@@ -1,0 +1,10 @@
+{
+    "name": "zerodha",
+    "display_name": "Zerodha (Kite Connect)",
+    "description": "Zerodha Kite Connect broker integration for OpenBull",
+    "version": "1.0",
+    "supported_exchanges": ["NSE", "BSE", "NFO", "BFO", "CDS", "MCX", "NSE_INDEX", "BSE_INDEX", "MCX_INDEX"],
+    "broker_type": "IN_stock",
+    "oauth_type": "request_token",
+    "auth_url_template": "https://kite.zerodha.com/connect/login?v=3&api_key={api_key}"
+}

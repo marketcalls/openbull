@@ -1,0 +1,10 @@
+{
+    "name": "upstox",
+    "display_name": "Upstox",
+    "description": "Upstox broker integration for OpenBull",
+    "version": "1.0",
+    "supported_exchanges": ["NSE", "BSE", "NFO", "BFO", "CDS", "BCD", "MCX", "NSE_INDEX", "BSE_INDEX"],
+    "broker_type": "IN_stock",
+    "oauth_type": "code",
+    "auth_url_template": "https://api.upstox.com/v2/login/authorization/dialog?client_id={api_key}&redirect_uri={redirect_url}&response_type=code"
+}

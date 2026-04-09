@@ -1,0 +1,24 @@
+"""
+External API router - /api/v1 prefix.
+All external endpoints require API key authentication via get_api_user dependency.
+"""
+
+from fastapi import APIRouter
+
+from backend.api.ping import router as ping_router
+from backend.api.place_order import router as place_order_router
+from backend.api.funds import router as funds_router
+from backend.api.orderbook import router as orderbook_router
+from backend.api.tradebook import router as tradebook_router
+from backend.api.positions import router as positions_router
+from backend.api.holdings import router as holdings_router
+
+api_v1_router = APIRouter(prefix="/api/v1", tags=["api-v1"])
+
+api_v1_router.include_router(ping_router)
+api_v1_router.include_router(place_order_router)
+api_v1_router.include_router(funds_router)
+api_v1_router.include_router(orderbook_router)
+api_v1_router.include_router(tradebook_router)
+api_v1_router.include_router(positions_router)
+api_v1_router.include_router(holdings_router)

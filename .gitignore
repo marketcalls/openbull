@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# UV package manager
+.uv/
+# Note: uv.lock IS committed (like package-lock.json)
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test / Coverage
+htmlcov/
+.coverage
+.pytest_cache/
+.mypy_cache/
+
+# Secrets
+*.pem
+*.key
+credentials.json

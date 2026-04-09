@@ -1,0 +1,54 @@
+from pydantic_settings import BaseSettings
+from functools import lru_cache
+
+
+class Settings(BaseSettings):
+    # Core secrets
+    app_secret_key: str
+    encryption_pepper: str
+
+    # Database
+    database_url: str = "postgresql+asyncpg://postgres:123456@localhost:5432/openbull"
+
+    # Server
+    backend_host: str = "127.0.0.1"
+    backend_port: int = 8000
+    frontend_url: str = "http://127.0.0.1:5173"
+    flask_debug: bool = True
+
+    # CORS
+    cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
+
+    # Brokers
+    valid_brokers: str = "upstox,zerodha"
+
+    # Logging
+    log_level: str = "INFO"
+
+    # Rate limits
+    login_rate_limit_min: str = "5 per minute"
+    login_rate_limit_hour: str = "25 per hour"
+    api_rate_limit: str = "50 per second"
+    order_rate_limit: str = "10 per second"
+
+    # Session
+    session_expiry_time: str = "03:00"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def valid_broker_list(self) -> list[str]:
+        return [b.strip() for b in self.valid_brokers.split(",") if b.strip()]
+
+    @property
+    def sync_database_url(self) -> str:
+        return self.database_url.replace("+asyncpg", "")
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

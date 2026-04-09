@@ -1,0 +1,23 @@
+[project]
+name = "openbull"
+version = "0.1.0"
+description = "Options Trading Platform for Indian Brokers"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "pydantic[email]>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "python-jose[cryptography]>=3.3.0",
+    "argon2-cffi>=23.1.0",
+    "cryptography>=44.0.0",
+    "httpx>=0.28.0",
+    "slowapi>=0.1.9",
+    "python-multipart>=0.0.17",
+    "python-dotenv>=1.0.1",
+    "cachetools>=5.5.0",
+    "pandas>=2.2.0",
+]
