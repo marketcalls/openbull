@@ -83,11 +83,11 @@ def get_margin_data(auth_token: str, config: dict | None = None) -> dict:
             logger.warning("Failed to fetch holdings for collateral calc: %s", e)
 
         return {
-            "availablecash": f"{total_available_margin:.2f}",
-            "collateral": f"{total_collateral:.2f}",
-            "m2munrealized": f"{total_unrealised:.2f}",
-            "m2mrealized": f"{total_realised:.2f}",
-            "utiliseddebits": f"{total_used_margin:.2f}",
+            "availablecash": round(total_available_margin, 2),
+            "collateral": round(total_collateral, 2),
+            "m2munrealized": round(total_unrealised, 2),
+            "m2mrealized": round(total_realised, 2),
+            "utiliseddebits": round(total_used_margin, 2),
         }
 
     except httpx.HTTPStatusError as e:
@@ -100,11 +100,11 @@ def get_margin_data(auth_token: str, config: dict | None = None) -> dict:
                         if error.get("errorCode") == "UDAPI100072":
                             logger.info("Upstox funds service outside operating hours. Returning defaults.")
                             return {
-                                "availablecash": "0.00",
-                                "collateral": "0.00",
-                                "m2munrealized": "0.00",
-                                "m2mrealized": "0.00",
-                                "utiliseddebits": "0.00",
+                                "availablecash": 0.0,
+                                "collateral": 0.0,
+                                "m2munrealized": 0.0,
+                                "m2mrealized": 0.0,
+                                "utiliseddebits": 0.0,
                             }
             except json.JSONDecodeError:
                 pass

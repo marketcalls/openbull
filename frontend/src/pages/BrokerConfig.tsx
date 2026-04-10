@@ -47,8 +47,13 @@ export default function BrokerConfig() {
       queryClient.invalidateQueries({ queryKey: ["brokers"] });
     },
     onError: (err: unknown) => {
-      const axiosErr = err as { response?: { data?: { detail?: string } } };
-      setError(axiosErr.response?.data?.detail ?? "Failed to save credentials.");
+      const axiosErr = err as { response?: { data?: { detail?: string | Array<{ msg: string }> } } };
+      const detail = axiosErr.response?.data?.detail;
+      if (Array.isArray(detail)) {
+        setError(detail.map((d) => d.msg).join(", "));
+      } else {
+        setError(detail ?? "Failed to save credentials.");
+      }
       setMessage("");
     },
   });

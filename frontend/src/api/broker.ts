@@ -12,7 +12,12 @@ export async function getBrokerCredentials(name: string): Promise<BrokerConfigDa
 }
 
 export async function saveBrokerCredentials(data: BrokerConfigData): Promise<BrokerConfigResponse> {
-  const response = await api.put<BrokerConfigResponse>("/web/broker/credentials", data);
+  const response = await api.put<BrokerConfigResponse>("/web/broker/credentials", {
+    broker_name: data.broker,
+    api_key: data.api_key,
+    api_secret: data.api_secret,
+    redirect_url: data.redirect_url,
+  });
   return response.data;
 }
 

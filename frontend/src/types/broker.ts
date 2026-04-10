@@ -19,5 +19,5 @@ export interface BrokerConfigResponse {
 }
 
 export interface BrokerRedirectResponse {
-  redirect_url: string;
+  url: string;
 }

@@ -9,6 +9,7 @@ from backend.database import async_session
 from backend.dependencies import get_db, get_current_user
 from backend.models.user import User
 from backend.models.auth import BrokerAuth
+from backend.models.broker_config import BrokerConfig
 from backend.models.audit import LoginAttempt, ActiveSession
 from backend.schemas.auth import SetupRequest, LoginRequest, AuthResponse, UserInfo
 from backend.security import hash_password, verify_password, check_needs_rehash, create_access_token
@@ -156,6 +157,20 @@ async def logout(response: Response, request: Request, db: AsyncSession = Depend
 async def me(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     broker_name = getattr(user, "_broker", None)
     broker_authenticated = False
+
+    # If JWT doesn't have broker claim (e.g. cookie domain mismatch after OAuth),
+    # check DB for the active broker config
+    if not broker_name:
+        result = await db.execute(
+            select(BrokerConfig).where(
+                BrokerConfig.user_id == user.id,
+                BrokerConfig.is_active == True,
+            )
+        )
+        active_config = result.scalar_one_or_none()
+        if active_config:
+            broker_name = active_config.broker_name
+
     if broker_name:
         result = await db.execute(
             select(BrokerAuth).where(

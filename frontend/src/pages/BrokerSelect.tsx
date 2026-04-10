@@ -18,7 +18,7 @@ export default function BrokerSelect() {
     setRedirecting(brokerName);
     try {
       const response = await getBrokerRedirectUrl(brokerName);
-      window.location.href = response.redirect_url;
+      window.location.href = response.url;
     } catch {
       setRedirecting(null);
     }

@@ -2,8 +2,8 @@ import api from "@/config/api";
 import type { FundsData, OrderbookItem, TradebookItem, PositionItem, HoldingItem } from "@/types/order";
 
 export async function getDashboard(): Promise<FundsData> {
-  const response = await api.get<FundsData>("/web/dashboard");
-  return response.data;
+  const response = await api.get<{ status: string; data: FundsData }>("/web/dashboard");
+  return response.data.data;
 }
 
 export async function getOrderbook(): Promise<OrderbookItem[]> {

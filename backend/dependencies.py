@@ -71,6 +71,20 @@ async def get_broker_context(
     db: AsyncSession = Depends(get_db),
 ) -> BrokerContext:
     broker_name = getattr(user, "_broker", None)
+
+    # If JWT doesn't have broker claim (cookie domain mismatch after OAuth),
+    # check DB for the active broker config
+    if not broker_name:
+        result = await db.execute(
+            select(BrokerConfig).where(
+                BrokerConfig.user_id == user.id,
+                BrokerConfig.is_active == True,
+            )
+        )
+        active_config = result.scalar_one_or_none()
+        if active_config:
+            broker_name = active_config.broker_name
+
     if not broker_name:
         raise HTTPException(status_code=403, detail="Broker not authenticated. Please complete broker login.")
 
