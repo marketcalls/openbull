@@ -1,4 +1,5 @@
 import logging
+from threading import Thread
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -94,6 +95,28 @@ async def zerodha_callback(
 
     state = request.query_params.get("state")
     return await _handle_oauth_callback("zerodha", request_token, request, response, db, state=state)
+
+
+def _start_master_contract_download(broker_name: str, auth_token: str):
+    """Start master contract download in a background thread after broker login."""
+    from backend.services.symbol_service import download_master_contracts
+    from backend.services.master_contract_status import set_downloading, set_success, set_error
+
+    def _background():
+        try:
+            set_downloading(broker_name)
+            result = download_master_contracts(broker_name, auth_token=auth_token)
+            logger.info("Master contract download result for %s: %s", broker_name, result)
+            if result.get("status") == "success":
+                set_success(broker_name, result.get("count", 0))
+            else:
+                set_error(broker_name, result.get("message", "Unknown error"))
+        except Exception as e:
+            logger.error("Background master contract download failed for %s: %s", broker_name, e)
+            set_error(broker_name, str(e))
+
+    thread = Thread(target=_background, daemon=True)
+    thread.start()
 
 
 async def _handle_oauth_callback(
@@ -210,6 +233,9 @@ async def _handle_oauth_callback(
         broker=broker_name,
     ))
     await db.commit()
+
+    # Trigger master contract download in background
+    _start_master_contract_download(broker_name, access_token)
 
     # Issue new JWT with broker claim
     new_token = create_access_token(data={

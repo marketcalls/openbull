@@ -20,4 +20,6 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "cachetools>=5.5.0",
     "pandas>=2.2.0",
+    "psycopg2-binary>=2.9.11",
+    "psycopg[binary]>=3.3.3",
 ]

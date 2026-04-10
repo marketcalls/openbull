@@ -1,69 +1,39 @@
 """
 Upstox master contract download and symbol table population.
 
-Uses synchronous SQLAlchemy since this runs as a background task.
-Adapted from OpenAlgo's upstox master_contract_db.py for OpenBull.
+Runs in a background thread. Uses asyncio.run() with a dedicated async engine
+(separate from the main app's engine) to avoid event loop conflicts.
 """
 
+import asyncio
 import gzip
 import logging
 import os
 import shutil
 from pathlib import Path
 
+import httpx
 import pandas as pd
-import requests
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 logger = logging.getLogger(__name__)
-
-SYNC_DB_URL = "postgresql://postgres:123456@localhost:5432/openbull"
-
-_engine = create_engine(SYNC_DB_URL)
-_Session = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
 
 TMP_DIR = Path(__file__).resolve().parents[4] / "tmp"
 TMP_DIR.mkdir(exist_ok=True)
 
 
-def _delete_all_symtokens(session):
-    """Remove all rows from symtoken table."""
-    logger.info("Clearing symtoken table")
-    session.execute(text("DELETE FROM symtoken"))
-    session.commit()
-
-
-def _bulk_insert(session, df: pd.DataFrame):
-    """Bulk insert DataFrame rows into symtoken table."""
-    logger.info("Performing bulk insert of %d records", len(df))
-    data_dict = df.to_dict(orient="records")
-    if not data_dict:
-        logger.info("No records to insert")
-        return
-
-    try:
-        session.execute(
-            text(
-                "INSERT INTO symtoken (symbol, brsymbol, name, exchange, brexchange, "
-                "token, expiry, strike, lotsize, instrumenttype, tick_size) "
-                "VALUES (:symbol, :brsymbol, :name, :exchange, :brexchange, "
-                ":token, :expiry, :strike, :lotsize, :instrumenttype, :tick_size)"
-            ),
-            data_dict,
-        )
-        session.commit()
-        logger.info("Bulk insert completed with %d records", len(data_dict))
-    except Exception as e:
-        logger.error("Error during bulk insert: %s", e)
-        session.rollback()
-        raise
+def _create_async_session():
+    """Create a fresh async engine+session for use in background threads."""
+    from backend.config import get_settings
+    engine = create_async_engine(get_settings().database_url, echo=False)
+    return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
 def _download_and_unzip(url: str, gz_path: str, json_path: str):
     """Download gzipped JSON from Upstox and decompress."""
     logger.info("Downloading Upstox master contract from %s", url)
-    response = requests.get(url, timeout=60)
+    response = httpx.get(url, timeout=60, follow_redirects=True)
     response.raise_for_status()
     with open(gz_path, "wb") as f:
         f.write(response.content)
@@ -264,12 +234,32 @@ def master_contract_download() -> dict:
         token_df = _process_json(json_path)
         _cleanup_temp(gz_path, json_path)
 
-        session = _Session()
-        try:
-            _delete_all_symtokens(session)
-            _bulk_insert(session, token_df)
-        finally:
-            session.close()
+        async def _db_ops():
+            session_factory = _create_async_session()
+            async with session_factory() as session:
+                async with session.begin():
+                    logger.info("Clearing symtoken table")
+                    await session.execute(text("DELETE FROM symtoken"))
+                    data_dict = token_df.to_dict(orient="records")
+                    # Replace NaN with None for asyncpg compatibility
+                    import math
+                    for row in data_dict:
+                        for k, v in row.items():
+                            if isinstance(v, float) and math.isnan(v):
+                                row[k] = None
+                    logger.info("Performing bulk insert of %d records", len(data_dict))
+                    await session.execute(
+                        text(
+                            "INSERT INTO symtoken (symbol, brsymbol, name, exchange, brexchange, "
+                            "token, expiry, strike, lotsize, instrumenttype, tick_size) "
+                            "VALUES (:symbol, :brsymbol, :name, :exchange, :brexchange, "
+                            ":token, :expiry, :strike, :lotsize, :instrumenttype, :tick_size)"
+                        ),
+                        data_dict,
+                    )
+            logger.info("Bulk insert completed with %d records", len(data_dict))
+
+        asyncio.run(_db_ops())
 
         logger.info("Upstox master contract download completed successfully")
         return {"status": "success", "message": "Upstox master contracts downloaded", "count": len(token_df)}
@@ -282,32 +272,23 @@ def master_contract_download() -> dict:
 
 def search_symbols(symbol: str, exchange: str) -> list[dict]:
     """Search symtoken table for symbols matching the query."""
-    session = _Session()
-    try:
-        result = session.execute(
-            text(
-                "SELECT symbol, brsymbol, name, exchange, brexchange, token, "
-                "expiry, strike, lotsize, instrumenttype, tick_size "
-                "FROM symtoken WHERE symbol ILIKE :pattern AND exchange = :exchange LIMIT 50"
-            ),
-            {"pattern": f"%{symbol}%", "exchange": exchange},
-        )
-        rows = result.fetchall()
-        return [
-            {
-                "symbol": r[0],
-                "brsymbol": r[1],
-                "name": r[2],
-                "exchange": r[3],
-                "brexchange": r[4],
-                "token": r[5],
-                "expiry": r[6],
-                "strike": r[7],
-                "lotsize": r[8],
-                "instrumenttype": r[9],
-                "tick_size": r[10],
-            }
-            for r in rows
-        ]
-    finally:
-        session.close()
+    async def _search():
+        session_factory = _create_async_session()
+        async with session_factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT symbol, brsymbol, name, exchange, brexchange, token, "
+                    "expiry, strike, lotsize, instrumenttype, tick_size "
+                    "FROM symtoken WHERE symbol ILIKE :pattern AND exchange = :exchange LIMIT 50"
+                ),
+                {"pattern": f"%{symbol}%", "exchange": exchange},
+            )
+            return [
+                {
+                    "symbol": r[0], "brsymbol": r[1], "name": r[2], "exchange": r[3],
+                    "brexchange": r[4], "token": r[5], "expiry": r[6], "strike": r[7],
+                    "lotsize": r[8], "instrumenttype": r[9], "tick_size": r[10],
+                }
+                for r in result.fetchall()
+            ]
+    return asyncio.run(_search())

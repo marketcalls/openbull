@@ -7,12 +7,20 @@ from threading import Thread
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from backend.dependencies import get_broker_context, BrokerContext
+from backend.dependencies import get_broker_context, get_current_user, BrokerContext
+from backend.models.user import User
 from backend.services.symbol_service import download_master_contracts, search_symbols
+from backend.services.master_contract_status import get_download_status
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/web/symbols", tags=["symbols"])
+
+
+@router.get("/status")
+async def symbol_download_status(user: User = Depends(get_current_user)):
+    """Get current master contract download status."""
+    return get_download_status()
 
 
 @router.get("/search")

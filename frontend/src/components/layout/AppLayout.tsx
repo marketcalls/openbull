@@ -5,6 +5,7 @@ import { Separator } from "@/components/ui/separator";
 import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
 import { cn } from "@/lib/utils";
+import { MasterContractStatus } from "@/components/layout/MasterContractStatus";
 
 interface NavItem {
   label: string;
@@ -141,6 +142,8 @@ export function AppLayout() {
           </div>
 
           <div className="flex items-center gap-2">
+            <MasterContractStatus />
+            <Separator orientation="vertical" className="mx-1 h-6" />
             <Button variant="outline" size="sm" onClick={toggleTheme}>
               {theme === "dark" ? "Light" : "Dark"}
             </Button>

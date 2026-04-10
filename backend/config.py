@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     @property
     def sync_database_url(self) -> str:
-        return self.database_url.replace("+asyncpg", "")
+        return self.database_url.replace("+asyncpg", "+psycopg")
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
