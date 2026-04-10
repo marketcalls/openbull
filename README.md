@@ -1,4 +1,4 @@
-# OpenBull
+# OpenBull (Option Trading Platform)
 
 Options trading platform for Indian brokers. Single-user application with plug-and-play broker integration, starting with Upstox and Zerodha.
 

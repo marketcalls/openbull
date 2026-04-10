@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep:*)",
+      "Bash(psql:*)",
+      "Bash(where psql:*)",
+      "Read(//c/Program Files/PostgreSQL//**)",
+      "Read(//c/Program Files/PostgreSQL/**)",
+      "Bash(C:/Program Files/PostgreSQL/18/bin/psql.exe:*)",
+      "Bash(xargs ls:*)"
+    ]
+  }
+}
