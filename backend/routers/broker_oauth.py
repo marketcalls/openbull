@@ -109,6 +109,10 @@ def _start_master_contract_download(broker_name: str, auth_token: str):
             logger.info("Master contract download result for %s: %s", broker_name, result)
             if result.get("status") == "success":
                 set_success(broker_name, result.get("count", 0))
+                # Reload symbol cache after successful download
+                import asyncio
+                from backend.broker.upstox.mapping.order_data import _load_symbol_cache
+                asyncio.run(_load_symbol_cache())
             else:
                 set_error(broker_name, result.get("message", "Unknown error"))
         except Exception as e:

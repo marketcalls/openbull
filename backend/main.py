@@ -43,6 +43,13 @@ async def lifespan(app: FastAPI):
     plugins = load_all_plugins()
     logger.info("Loaded %d broker plugins: %s", len(plugins), list(plugins.keys()))
 
+    # Load symbol cache if symtoken table has data
+    try:
+        from backend.broker.upstox.mapping.order_data import _load_symbol_cache
+        await _load_symbol_cache()
+    except Exception as e:
+        logger.info("Symbol cache not loaded (will load after master contract download): %s", e)
+
     yield
 
     # Shutdown

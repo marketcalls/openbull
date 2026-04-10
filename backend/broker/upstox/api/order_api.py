@@ -113,64 +113,53 @@ def _invalidate_position_cache(auth):
         _position_cache.pop(auth, None)
 
 
+def _run_async_query(query: str, params: dict):
+    """Run an async DB query from a sync context using a dedicated engine."""
+    import asyncio
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    async def _query():
+        from backend.config import get_settings
+        engine = create_async_engine(get_settings().database_url, echo=False)
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(text(query), params)
+            row = result.fetchone()
+        await engine.dispose()
+        return row
+
+    try:
+        return asyncio.run(_query())
+    except Exception:
+        return None
+
+
 def _get_br_symbol(symbol: str, exchange: str) -> str:
     """Look up broker symbol from symtoken table."""
-    from sqlalchemy import create_engine, text as sa_text
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine("postgresql://postgres:123456@localhost:5432/openbull")
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    try:
-        result = session.execute(
-            sa_text("SELECT brsymbol FROM symtoken WHERE symbol = :symbol AND exchange = :exchange LIMIT 1"),
-            {"symbol": symbol, "exchange": exchange},
-        )
-        row = result.fetchone()
-        return row[0] if row else symbol
-    finally:
-        session.close()
-        engine.dispose()
+    row = _run_async_query(
+        "SELECT brsymbol FROM symtoken WHERE symbol = :symbol AND exchange = :exchange LIMIT 1",
+        {"symbol": symbol, "exchange": exchange},
+    )
+    return row[0] if row else symbol
 
 
 def _get_token(symbol: str, exchange: str) -> str | None:
     """Look up instrument token from symtoken table."""
-    from sqlalchemy import create_engine, text as sa_text
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine("postgresql://postgres:123456@localhost:5432/openbull")
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    try:
-        result = session.execute(
-            sa_text("SELECT token FROM symtoken WHERE symbol = :symbol AND exchange = :exchange LIMIT 1"),
-            {"symbol": symbol, "exchange": exchange},
-        )
-        row = result.fetchone()
-        return row[0] if row else None
-    finally:
-        session.close()
-        engine.dispose()
+    row = _run_async_query(
+        "SELECT token FROM symtoken WHERE symbol = :symbol AND exchange = :exchange LIMIT 1",
+        {"symbol": symbol, "exchange": exchange},
+    )
+    return row[0] if row else None
 
 
 def _get_symbol(token: str, exchange: str) -> str | None:
     """Look up OpenBull symbol from instrument token."""
-    from sqlalchemy import create_engine, text as sa_text
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine("postgresql://postgres:123456@localhost:5432/openbull")
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    try:
-        result = session.execute(
-            sa_text("SELECT symbol FROM symtoken WHERE token = :token AND exchange = :exchange LIMIT 1"),
-            {"token": token, "exchange": exchange},
-        )
-        row = result.fetchone()
-        return row[0] if row else None
-    finally:
-        session.close()
-        engine.dispose()
+    row = _run_async_query(
+        "SELECT symbol FROM symtoken WHERE token = :token AND exchange = :exchange LIMIT 1",
+        {"token": token, "exchange": exchange},
+    )
+    return row[0] if row else None
 
 
 def get_open_position(tradingsymbol, exchange, product, auth):

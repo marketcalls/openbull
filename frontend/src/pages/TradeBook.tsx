@@ -63,9 +63,8 @@ export default function TradeBook() {
                   <TableHead>Exchange</TableHead>
                   <TableHead>Action</TableHead>
                   <TableHead>Product</TableHead>
-                  <TableHead>Price Type</TableHead>
                   <TableHead className="text-right">Qty</TableHead>
-                  <TableHead className="text-right">Price</TableHead>
+                  <TableHead className="text-right">Avg Price</TableHead>
                   <TableHead className="text-right">Trade Value</TableHead>
                 </TableRow>
               </TableHeader>
@@ -86,10 +85,9 @@ export default function TradeBook() {
                       </span>
                     </TableCell>
                     <TableCell>{trade.product}</TableCell>
-                    <TableCell>{trade.price_type}</TableCell>
                     <TableCell className="text-right">{trade.quantity}</TableCell>
                     <TableCell className="text-right">
-                      {trade.price.toFixed(2)}
+                      {trade.average_price.toFixed(2)}
                     </TableCell>
                     <TableCell className="text-right">
                       {trade.trade_value.toFixed(2)}

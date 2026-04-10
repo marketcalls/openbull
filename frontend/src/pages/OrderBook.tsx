@@ -95,14 +95,14 @@ export default function OrderBook() {
                       </span>
                     </TableCell>
                     <TableCell>{order.product}</TableCell>
-                    <TableCell>{order.price_type}</TableCell>
+                    <TableCell>{order.pricetype}</TableCell>
                     <TableCell className="text-right">{order.quantity}</TableCell>
                     <TableCell className="text-right">
                       {order.price.toFixed(2)}
                     </TableCell>
                     <TableCell>
-                      <Badge variant={getStatusVariant(order.status)}>
-                        {order.status}
+                      <Badge variant={getStatusVariant(order.order_status)}>
+                        {order.order_status}
                       </Badge>
                     </TableCell>
                   </TableRow>

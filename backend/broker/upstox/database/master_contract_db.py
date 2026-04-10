@@ -108,6 +108,9 @@ def _process_json(path: str) -> pd.DataFrame:
         }
     )
 
+    # Upstox returns tick_size in paisa, convert to rupees
+    df["tick_size"] = df["tick_size"] / 100
+
     df["brsymbol"] = df["symbol"]
     df["symbol"] = df.apply(_reformat_symbol, axis=1)
     df["brexchange"] = segment_copy

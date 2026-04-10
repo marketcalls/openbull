@@ -11,10 +11,13 @@ export interface OrderbookItem {
   exchange: string;
   action: string;
   product: string;
-  price_type: string;
+  pricetype: string;
   quantity: number;
   price: number;
-  status: string;
+  trigger_price: number;
+  orderid: string;
+  order_status: string;
+  timestamp: string;
 }
 
 export interface TradebookItem {
@@ -22,10 +25,11 @@ export interface TradebookItem {
   exchange: string;
   action: string;
   product: string;
-  price_type: string;
   quantity: number;
-  price: number;
+  average_price: number;
   trade_value: number;
+  orderid: string;
+  timestamp: string;
 }
 
 export interface PositionItem {
@@ -42,8 +46,7 @@ export interface HoldingItem {
   symbol: string;
   exchange: string;
   quantity: number;
-  average_price: number;
-  ltp: number;
+  product: string;
   pnl: number;
-  pnl_percent: number;
+  pnlpercent: number;
 }

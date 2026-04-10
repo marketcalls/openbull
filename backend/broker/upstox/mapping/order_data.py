@@ -5,7 +5,31 @@ Adapted from OpenAlgo's upstox order_data.py.
 
 import logging
 
+from sqlalchemy import text
+
 logger = logging.getLogger(__name__)
+
+
+# In-memory symbol cache populated from DB on first use
+_symbol_cache: dict[str, str] | None = None
+
+
+async def _load_symbol_cache():
+    """Load all token->symbol mappings into memory from the DB."""
+    global _symbol_cache
+    from backend.database import async_session
+
+    async with async_session() as session:
+        result = await session.execute(text("SELECT token, symbol FROM symtoken"))
+        _symbol_cache = {row[0]: row[1] for row in result.fetchall()}
+    logger.info("Symbol cache loaded with %d entries", len(_symbol_cache))
+
+
+def _get_symbol_from_cache(token: str) -> str | None:
+    """Look up symbol from in-memory cache."""
+    if _symbol_cache is None:
+        return None
+    return _symbol_cache.get(token)
 
 
 def map_order_data(order_data: dict) -> list[dict]:
@@ -19,6 +43,11 @@ def map_order_data(order_data: dict) -> list[dict]:
     for order in data:
         instrument_token = order.get("instrument_token", "")
         exchange = order.get("exchange", "")
+
+        # Look up human-readable symbol from in-memory cache
+        symbol = _get_symbol_from_cache(instrument_token)
+        if symbol:
+            order["tradingsymbol"] = symbol
 
         # Map product types
         if (exchange in ("NSE", "BSE")) and order.get("product") == "D":
@@ -175,6 +204,8 @@ def transform_holdings_data(holdings_data: list[dict]) -> list[dict]:
             "exchange": holding.get("exchange", ""),
             "quantity": holding.get("quantity", 0),
             "product": holding.get("product", ""),
+            "average_price": avg_price if avg_price else 0.0,
+            "ltp": holding.get("last_price", 0.0),
             "pnl": holding.get("pnl", 0.0),
             "pnlpercent": round(pnlpercent, 2),
         })

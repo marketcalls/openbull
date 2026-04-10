@@ -90,9 +90,9 @@ export default function Holdings() {
                       {holding.pnl >= 0 ? "+" : ""}
                       {holding.pnl.toFixed(2)}
                     </TableCell>
-                    <TableCell className={`text-right font-medium ${getPnlColor(holding.pnl_percent)}`}>
-                      {holding.pnl_percent >= 0 ? "+" : ""}
-                      {holding.pnl_percent.toFixed(2)}%
+                    <TableCell className={`text-right font-medium ${getPnlColor(holding.pnlpercent)}`}>
+                      {holding.pnlpercent >= 0 ? "+" : ""}
+                      {holding.pnlpercent.toFixed(2)}%
                     </TableCell>
                   </TableRow>
                 ))}
