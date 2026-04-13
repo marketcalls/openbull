@@ -1,11 +1,15 @@
 """
 External API - Place order, modify order, cancel order endpoints.
 All endpoints accept JSON body with 'apikey' field for authentication.
+Response format follows OpenAlgo standard:
+  Success: {"status": "success", ...}
+  Error:   {"status": "error", "message": "..."}
 """
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from backend.services.order_service import (
     place_order,
@@ -30,12 +34,25 @@ async def _resolve_api_user(request: Request) -> tuple:
         return result
 
 
+async def _get_request_body(request: Request) -> dict:
+    """Safely parse JSON request body."""
+    try:
+        return await request.json()
+    except Exception:
+        return {}
+
+
 @router.post("/placeorder")
 async def api_place_order(request: Request):
     """Place a regular order via the external API."""
-    user_id, auth_token, broker_name, config = await _resolve_api_user(request)
+    try:
+        api_user = await _resolve_api_user(request)
+    except Exception as e:
+        return _error_from_exception(e)
 
-    body = await request.json()
+    user_id, auth_token, broker_name, config = api_user
+
+    body = await _get_request_body(request)
     order_data = {
         "symbol": body.get("symbol"),
         "exchange": body.get("exchange"),
@@ -56,18 +73,20 @@ async def api_place_order(request: Request):
         config=config,
     )
 
-    if not success:
-        raise HTTPException(status_code=status_code, detail=response_data)
-
-    return response_data
+    return JSONResponse(content=response_data, status_code=status_code)
 
 
 @router.post("/placesmartorder")
 async def api_place_smart_order(request: Request):
     """Place a smart (position-aware) order via the external API."""
-    user_id, auth_token, broker_name, config = await _resolve_api_user(request)
+    try:
+        api_user = await _resolve_api_user(request)
+    except Exception as e:
+        return _error_from_exception(e)
 
-    body = await request.json()
+    user_id, auth_token, broker_name, config = api_user
+
+    body = await _get_request_body(request)
     order_data = {
         "symbol": body.get("symbol"),
         "exchange": body.get("exchange"),
@@ -89,18 +108,20 @@ async def api_place_smart_order(request: Request):
         config=config,
     )
 
-    if not success:
-        raise HTTPException(status_code=status_code, detail=response_data)
-
-    return response_data
+    return JSONResponse(content=response_data, status_code=status_code)
 
 
 @router.post("/modifyorder")
 async def api_modify_order(request: Request):
     """Modify an existing order via the external API."""
-    user_id, auth_token, broker_name, config = await _resolve_api_user(request)
+    try:
+        api_user = await _resolve_api_user(request)
+    except Exception as e:
+        return _error_from_exception(e)
 
-    body = await request.json()
+    user_id, auth_token, broker_name, config = api_user
+
+    body = await _get_request_body(request)
     modify_data = {
         "orderid": body.get("orderid"),
         "quantity": body.get("quantity"),
@@ -117,21 +138,26 @@ async def api_modify_order(request: Request):
         config=config,
     )
 
-    if not success:
-        raise HTTPException(status_code=status_code, detail=response_data)
-
-    return response_data
+    return JSONResponse(content=response_data, status_code=status_code)
 
 
 @router.post("/cancelorder")
 async def api_cancel_order(request: Request):
     """Cancel a specific order via the external API."""
-    user_id, auth_token, broker_name, config = await _resolve_api_user(request)
+    try:
+        api_user = await _resolve_api_user(request)
+    except Exception as e:
+        return _error_from_exception(e)
 
-    body = await request.json()
+    user_id, auth_token, broker_name, config = api_user
+
+    body = await _get_request_body(request)
     orderid = body.get("orderid")
     if not orderid:
-        raise HTTPException(status_code=400, detail={"status": "error", "message": "orderid is required"})
+        return JSONResponse(
+            content={"status": "error", "message": "orderid is required"},
+            status_code=400,
+        )
 
     success, response_data, status_code = cancel_order_service(
         orderid=orderid,
@@ -140,16 +166,18 @@ async def api_cancel_order(request: Request):
         config=config,
     )
 
-    if not success:
-        raise HTTPException(status_code=status_code, detail=response_data)
-
-    return response_data
+    return JSONResponse(content=response_data, status_code=status_code)
 
 
 @router.post("/cancelallorder")
 async def api_cancel_all_orders(request: Request):
     """Cancel all open orders via the external API."""
-    user_id, auth_token, broker_name, config = await _resolve_api_user(request)
+    try:
+        api_user = await _resolve_api_user(request)
+    except Exception as e:
+        return _error_from_exception(e)
+
+    user_id, auth_token, broker_name, config = api_user
 
     success, response_data, status_code = cancel_all_orders_service(
         auth_token=auth_token,
@@ -157,18 +185,20 @@ async def api_cancel_all_orders(request: Request):
         config=config,
     )
 
-    if not success:
-        raise HTTPException(status_code=status_code, detail=response_data)
-
-    return response_data
+    return JSONResponse(content=response_data, status_code=status_code)
 
 
 @router.post("/closeposition")
 async def api_close_all_positions(request: Request):
     """Close all open positions via the external API."""
-    user_id, auth_token, broker_name, config = await _resolve_api_user(request)
+    try:
+        api_user = await _resolve_api_user(request)
+    except Exception as e:
+        return _error_from_exception(e)
 
-    body = await request.json()
+    user_id, auth_token, broker_name, config = api_user
+
+    body = await _get_request_body(request)
     api_key = body.get("apikey", "")
 
     success, response_data, status_code = close_all_positions_service(
@@ -178,7 +208,21 @@ async def api_close_all_positions(request: Request):
         config=config,
     )
 
-    if not success:
-        raise HTTPException(status_code=status_code, detail=response_data)
+    return JSONResponse(content=response_data, status_code=status_code)
 
-    return response_data
+
+def _error_from_exception(exc: Exception) -> JSONResponse:
+    """Convert an HTTPException or generic exception to OpenAlgo error format."""
+    from fastapi import HTTPException
+
+    if isinstance(exc, HTTPException):
+        message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        return JSONResponse(
+            content={"status": "error", "message": message},
+            status_code=exc.status_code,
+        )
+    logger.exception("Unexpected error in API endpoint")
+    return JSONResponse(
+        content={"status": "error", "message": "An unexpected error occurred"},
+        status_code=500,
+    )

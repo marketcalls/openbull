@@ -8,11 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import async_session
 from backend.dependencies import get_db, get_current_user
 from backend.models.user import User
-from backend.models.auth import BrokerAuth
+from backend.models.auth import BrokerAuth, ApiKey
 from backend.models.broker_config import BrokerConfig
 from backend.models.audit import LoginAttempt, ActiveSession
 from backend.schemas.auth import SetupRequest, LoginRequest, AuthResponse, UserInfo
-from backend.security import hash_password, verify_password, check_needs_rehash, create_access_token
+from backend.security import (
+    hash_password, verify_password, check_needs_rehash, create_access_token,
+    generate_api_key, hash_api_key, encrypt_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +43,18 @@ async def setup(data: SetupRequest, db: AsyncSession = Depends(get_db)):
         is_admin=True,
     )
     db.add(user)
+    await db.flush()  # Get user.id before committing
+
+    # Auto-generate API key for the new admin user
+    new_api_key = generate_api_key()
+    db.add(ApiKey(
+        user_id=user.id,
+        api_key_hash=hash_api_key(new_api_key),
+        api_key_encrypted=encrypt_value(new_api_key),
+    ))
+
     await db.commit()
-    logger.info("Admin user '%s' created during setup", data.username)
+    logger.info("Admin user '%s' created during setup with API key", data.username)
     return AuthResponse(status="success", message="Admin account created. Please login.")
 
 

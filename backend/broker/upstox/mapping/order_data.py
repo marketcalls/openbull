@@ -10,16 +10,18 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 
-# In-memory symbol cache populated from DB on first use
-_symbol_cache: dict[str, str] | None = None
+# In-memory caches populated from DB on startup
+_token_to_symbol: dict[str, str] | None = None  # token -> symbol
+_symbol_exchange_to_token: dict[tuple[str, str], str] | None = None  # (symbol, exchange) -> token
+_symbol_exchange_to_brsymbol: dict[tuple[str, str], str] | None = None  # (symbol, exchange) -> brsymbol
+
+# Keep backward-compatible alias
+_symbol_cache = None
 
 
 async def _load_symbol_cache():
-    """Load all token->symbol mappings into memory from the DB.
-    Uses a dedicated engine so it can be called from both the main event loop
-    and from background threads via asyncio.run().
-    """
-    global _symbol_cache
+    """Load all symbol mappings into memory from the DB."""
+    global _symbol_cache, _token_to_symbol, _symbol_exchange_to_token, _symbol_exchange_to_brsymbol
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
     from backend.config import get_settings
 
@@ -27,18 +29,45 @@ async def _load_symbol_cache():
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
         async with session_factory() as session:
-            result = await session.execute(text("SELECT token, symbol FROM symtoken"))
-            _symbol_cache = {row[0]: row[1] for row in result.fetchall()}
-        logger.info("Symbol cache loaded with %d entries", len(_symbol_cache))
+            result = await session.execute(
+                text("SELECT token, symbol, exchange, brsymbol FROM symtoken")
+            )
+            rows = result.fetchall()
+
+            _token_to_symbol = {}
+            _symbol_exchange_to_token = {}
+            _symbol_exchange_to_brsymbol = {}
+
+            for token, symbol, exchange, brsymbol in rows:
+                _token_to_symbol[token] = symbol
+                _symbol_exchange_to_token[(symbol, exchange)] = token
+                _symbol_exchange_to_brsymbol[(symbol, exchange)] = brsymbol
+
+            _symbol_cache = _token_to_symbol
+        logger.info("Symbol cache loaded with %d entries", len(_token_to_symbol))
     finally:
         await engine.dispose()
 
 
 def _get_symbol_from_cache(token: str) -> str | None:
     """Look up symbol from in-memory cache."""
-    if _symbol_cache is None:
+    if _token_to_symbol is None:
         return None
-    return _symbol_cache.get(token)
+    return _token_to_symbol.get(token)
+
+
+def get_token_from_cache(symbol: str, exchange: str) -> str | None:
+    """Look up instrument token from in-memory cache."""
+    if _symbol_exchange_to_token is None:
+        return None
+    return _symbol_exchange_to_token.get((symbol, exchange))
+
+
+def get_brsymbol_from_cache(symbol: str, exchange: str) -> str | None:
+    """Look up broker symbol from in-memory cache."""
+    if _symbol_exchange_to_brsymbol is None:
+        return None
+    return _symbol_exchange_to_brsymbol.get((symbol, exchange))
 
 
 def map_order_data(order_data: dict) -> list[dict]:

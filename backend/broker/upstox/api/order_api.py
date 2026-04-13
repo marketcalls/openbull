@@ -16,6 +16,11 @@ from backend.broker.upstox.mapping.transform_data import (
     transform_data,
     transform_modify_order_data,
 )
+from backend.broker.upstox.mapping.order_data import (
+    get_token_from_cache,
+    get_brsymbol_from_cache,
+    _get_symbol_from_cache,
+)
 from backend.utils.httpx_client import get_httpx_client
 
 logger = logging.getLogger(__name__)
@@ -113,53 +118,19 @@ def _invalidate_position_cache(auth):
         _position_cache.pop(auth, None)
 
 
-def _run_async_query(query: str, params: dict):
-    """Run an async DB query from a sync context using a dedicated engine."""
-    import asyncio
-    from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-    async def _query():
-        from backend.config import get_settings
-        engine = create_async_engine(get_settings().database_url, echo=False)
-        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-        async with session_factory() as session:
-            result = await session.execute(text(query), params)
-            row = result.fetchone()
-        await engine.dispose()
-        return row
-
-    try:
-        return asyncio.run(_query())
-    except Exception:
-        return None
-
-
 def _get_br_symbol(symbol: str, exchange: str) -> str:
-    """Look up broker symbol from symtoken table."""
-    row = _run_async_query(
-        "SELECT brsymbol FROM symtoken WHERE symbol = :symbol AND exchange = :exchange LIMIT 1",
-        {"symbol": symbol, "exchange": exchange},
-    )
-    return row[0] if row else symbol
+    """Look up broker symbol from in-memory cache."""
+    return get_brsymbol_from_cache(symbol, exchange) or symbol
 
 
 def _get_token(symbol: str, exchange: str) -> str | None:
-    """Look up instrument token from symtoken table."""
-    row = _run_async_query(
-        "SELECT token FROM symtoken WHERE symbol = :symbol AND exchange = :exchange LIMIT 1",
-        {"symbol": symbol, "exchange": exchange},
-    )
-    return row[0] if row else None
+    """Look up instrument token from in-memory cache."""
+    return get_token_from_cache(symbol, exchange)
 
 
-def _get_symbol(token: str, exchange: str) -> str | None:
-    """Look up OpenBull symbol from instrument token."""
-    row = _run_async_query(
-        "SELECT symbol FROM symtoken WHERE token = :token AND exchange = :exchange LIMIT 1",
-        {"token": token, "exchange": exchange},
-    )
-    return row[0] if row else None
+def _get_symbol(token: str, exchange: str = "") -> str | None:
+    """Look up OpenBull symbol from in-memory cache."""
+    return _get_symbol_from_cache(token)
 
 
 def get_open_position(tradingsymbol, exchange, product, auth):

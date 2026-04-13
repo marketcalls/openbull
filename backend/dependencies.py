@@ -128,7 +128,10 @@ async def get_api_user(
     """Resolve API key to (user_id, auth_token, broker_name, broker_config).
     Used by external /api/v1/* endpoints.
     """
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     provided_key = body.get("apikey") or request.headers.get("X-API-KEY")
     if not provided_key:
         raise HTTPException(status_code=401, detail="API key required")
