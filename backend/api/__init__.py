@@ -12,6 +12,8 @@ from backend.api.orderbook import router as orderbook_router
 from backend.api.tradebook import router as tradebook_router
 from backend.api.positions import router as positions_router
 from backend.api.holdings import router as holdings_router
+from backend.api.orderstatus import router as orderstatus_router
+from backend.api.openposition import router as openposition_router
 
 api_v1_router = APIRouter(prefix="/api/v1", tags=["api-v1"])
 
@@ -22,3 +24,5 @@ api_v1_router.include_router(orderbook_router)
 api_v1_router.include_router(tradebook_router)
 api_v1_router.include_router(positions_router)
 api_v1_router.include_router(holdings_router)
+api_v1_router.include_router(orderstatus_router)
+api_v1_router.include_router(openposition_router)

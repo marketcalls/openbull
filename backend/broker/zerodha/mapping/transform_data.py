@@ -9,27 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_br_symbol(symbol: str, exchange: str) -> str:
-    """Look up broker symbol from the symtoken table.
-
-    For simplicity, does a synchronous DB query. In production, this could
-    be cached or use the async path.
-    """
-    from sqlalchemy import create_engine, text
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine("postgresql://postgres:123456@localhost:5432/openbull")
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    try:
-        result = session.execute(
-            text("SELECT brsymbol FROM symtoken WHERE symbol = :symbol AND exchange = :exchange LIMIT 1"),
-            {"symbol": symbol, "exchange": exchange},
-        )
-        row = result.fetchone()
-        return row[0] if row else symbol
-    finally:
-        session.close()
-        engine.dispose()
+    """Look up broker symbol from in-memory cache."""
+    from backend.broker.upstox.mapping.order_data import get_brsymbol_from_cache
+    return get_brsymbol_from_cache(symbol, exchange) or symbol
 
 
 def transform_data(data: dict) -> dict:

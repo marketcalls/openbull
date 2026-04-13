@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 _token_to_symbol: dict[str, str] | None = None  # token -> symbol
 _symbol_exchange_to_token: dict[tuple[str, str], str] | None = None  # (symbol, exchange) -> token
 _symbol_exchange_to_brsymbol: dict[tuple[str, str], str] | None = None  # (symbol, exchange) -> brsymbol
+_brsymbol_exchange_to_symbol: dict[tuple[str, str], str] | None = None  # (brsymbol, exchange) -> symbol
 
 # Keep backward-compatible alias
 _symbol_cache = None
@@ -21,7 +22,7 @@ _symbol_cache = None
 
 async def _load_symbol_cache():
     """Load all symbol mappings into memory from the DB."""
-    global _symbol_cache, _token_to_symbol, _symbol_exchange_to_token, _symbol_exchange_to_brsymbol
+    global _symbol_cache, _token_to_symbol, _symbol_exchange_to_token, _symbol_exchange_to_brsymbol, _brsymbol_exchange_to_symbol
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
     from backend.config import get_settings
 
@@ -37,11 +38,13 @@ async def _load_symbol_cache():
             _token_to_symbol = {}
             _symbol_exchange_to_token = {}
             _symbol_exchange_to_brsymbol = {}
+            _brsymbol_exchange_to_symbol = {}
 
             for token, symbol, exchange, brsymbol in rows:
                 _token_to_symbol[token] = symbol
                 _symbol_exchange_to_token[(symbol, exchange)] = token
                 _symbol_exchange_to_brsymbol[(symbol, exchange)] = brsymbol
+                _brsymbol_exchange_to_symbol[(brsymbol, exchange)] = symbol
 
             _symbol_cache = _token_to_symbol
         logger.info("Symbol cache loaded with %d entries", len(_token_to_symbol))
@@ -68,6 +71,13 @@ def get_brsymbol_from_cache(symbol: str, exchange: str) -> str | None:
     if _symbol_exchange_to_brsymbol is None:
         return None
     return _symbol_exchange_to_brsymbol.get((symbol, exchange))
+
+
+def get_symbol_from_brsymbol_cache(brsymbol: str, exchange: str) -> str | None:
+    """Look up OpenBull symbol from broker symbol in-memory cache."""
+    if _brsymbol_exchange_to_symbol is None:
+        return None
+    return _brsymbol_exchange_to_symbol.get((brsymbol, exchange))
 
 
 def map_order_data(order_data: dict) -> list[dict]:

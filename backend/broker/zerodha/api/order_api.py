@@ -14,6 +14,10 @@ from backend.broker.zerodha.mapping.transform_data import (
     transform_data,
     transform_modify_order_data,
 )
+from backend.broker.upstox.mapping.order_data import (
+    get_brsymbol_from_cache,
+    get_symbol_from_brsymbol_cache,
+)
 from backend.utils.httpx_client import get_httpx_client
 
 logger = logging.getLogger(__name__)
@@ -114,43 +118,13 @@ def _invalidate_position_cache(auth):
 
 
 def _get_br_symbol(symbol: str, exchange: str) -> str:
-    """Look up broker symbol from symtoken table."""
-    from sqlalchemy import create_engine, text as sa_text
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine("postgresql://postgres:123456@localhost:5432/openbull")
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    try:
-        result = session.execute(
-            sa_text("SELECT brsymbol FROM symtoken WHERE symbol = :symbol AND exchange = :exchange LIMIT 1"),
-            {"symbol": symbol, "exchange": exchange},
-        )
-        row = result.fetchone()
-        return row[0] if row else symbol
-    finally:
-        session.close()
-        engine.dispose()
+    """Look up broker symbol from in-memory cache."""
+    return get_brsymbol_from_cache(symbol, exchange) or symbol
 
 
 def _get_oa_symbol(brsymbol: str, exchange: str) -> str:
-    """Look up OpenBull symbol from broker symbol."""
-    from sqlalchemy import create_engine, text as sa_text
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine("postgresql://postgres:123456@localhost:5432/openbull")
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    try:
-        result = session.execute(
-            sa_text("SELECT symbol FROM symtoken WHERE brsymbol = :brsymbol AND exchange = :exchange LIMIT 1"),
-            {"brsymbol": brsymbol, "exchange": exchange},
-        )
-        row = result.fetchone()
-        return row[0] if row else brsymbol
-    finally:
-        session.close()
-        engine.dispose()
+    """Look up OpenBull symbol from broker symbol using in-memory cache."""
+    return get_symbol_from_brsymbol_cache(brsymbol, exchange) or brsymbol
 
 
 def get_open_position(tradingsymbol, exchange, product, auth):

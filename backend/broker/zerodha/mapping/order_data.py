@@ -9,23 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_oa_symbol(brsymbol: str, exchange: str) -> str:
-    """Look up OpenBull symbol from broker symbol in the symtoken table."""
-    from sqlalchemy import create_engine, text
-    from sqlalchemy.orm import sessionmaker
-
-    engine = create_engine("postgresql://postgres:123456@localhost:5432/openbull")
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    try:
-        result = session.execute(
-            text("SELECT symbol FROM symtoken WHERE brsymbol = :brsymbol AND exchange = :exchange LIMIT 1"),
-            {"brsymbol": brsymbol, "exchange": exchange},
-        )
-        row = result.fetchone()
-        return row[0] if row else brsymbol
-    finally:
-        session.close()
-        engine.dispose()
+    """Look up OpenBull symbol from broker symbol using in-memory cache."""
+    from backend.broker.upstox.mapping.order_data import get_symbol_from_brsymbol_cache
+    return get_symbol_from_brsymbol_cache(brsymbol, exchange) or brsymbol
 
 
 def map_order_data(order_data: dict) -> list[dict]:
