@@ -7,7 +7,21 @@
       "Read(//c/Program Files/PostgreSQL//**)",
       "Read(//c/Program Files/PostgreSQL/**)",
       "Bash(C:/Program Files/PostgreSQL/18/bin/psql.exe:*)",
-      "Bash(xargs ls:*)"
+      "Bash(xargs ls:*)",
+      "Bash(python:*)",
+      "Bash(PGPASSWORD=123456 C:/Program Files/PostgreSQL/18/bin/psql.exe:*)",
+      "Bash(npx vite:*)",
+      "Read(//dev/**)",
+      "Bash(curl:*)",
+      "Bash(uv run:*)",
+      "Bash(pkill -f \"uvicorn backend.main:app\")",
+      "Bash(PGPASSWORD=123456 \"C:/Program Files/PostgreSQL/18/bin/psql.exe\" -U postgres -c \"DROP DATABASE openbull;\")",
+      "Bash(PGPASSWORD=123456 \"C:/Program Files/PostgreSQL/18/bin/psql.exe\" -U postgres -c \"CREATE DATABASE openbull;\")",
+      "Bash(PGPASSWORD=123456 \"C:/Program Files/PostgreSQL/18/bin/psql.exe\" -U postgres -c \"SELECT pg_terminate_backend\\(pid\\) FROM pg_stat_activity WHERE datname = 'openbull' AND pid <> pg_backend_pid\\(\\);\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //F //PID 45792)",
+      "Bash(taskkill //F //PID 62824)",
+      "Bash(taskkill //F //PID 63508)"
     ]
   }
 }
