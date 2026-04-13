@@ -47,6 +47,8 @@ export interface HoldingItem {
   exchange: string;
   quantity: number;
   product: string;
+  average_price: number;
+  ltp: number;
   pnl: number;
   pnlpercent: number;
 }

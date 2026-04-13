@@ -21,6 +21,10 @@ settings = get_settings()
 
 router = APIRouter(tags=["broker-oauth"])
 
+# In-memory store for pending OAuth flows (broker -> {user_id, username})
+# Used when broker doesn't echo back state param (e.g. Zerodha)
+_pending_oauth: dict[str, dict] = {}
+
 
 @router.get("/auth/broker-redirect")
 async def broker_redirect(
@@ -63,6 +67,9 @@ async def broker_redirect(
         redirect_url=quote(redirect_url, safe=""),
     )
     auth_url += f"&state={quote(state_token, safe='')}"
+
+    # Store pending OAuth for brokers that don't echo state (e.g. Zerodha)
+    _pending_oauth[broker] = {"user_id": user.id, "username": user.username}
 
     return {"url": auth_url}
 
@@ -148,6 +155,12 @@ async def _handle_oauth_callback(
     if not payload and state:
         payload = decode_access_token(state)
         logger.info("state payload: %s", "found" if payload else "none")
+
+    # Fallback: use pending OAuth store (for brokers like Zerodha that don't echo state)
+    if not payload and broker_name in _pending_oauth:
+        pending = _pending_oauth.pop(broker_name)
+        payload = {"sub": str(pending["user_id"]), "username": pending["username"]}
+        logger.info("pending oauth payload: found for user %s", pending["username"])
 
     if not payload:
         logger.error("NO user identity found - redirecting to login")

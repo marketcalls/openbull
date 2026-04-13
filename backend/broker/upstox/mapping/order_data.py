@@ -15,14 +15,23 @@ _symbol_cache: dict[str, str] | None = None
 
 
 async def _load_symbol_cache():
-    """Load all token->symbol mappings into memory from the DB."""
+    """Load all token->symbol mappings into memory from the DB.
+    Uses a dedicated engine so it can be called from both the main event loop
+    and from background threads via asyncio.run().
+    """
     global _symbol_cache
-    from backend.database import async_session
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from backend.config import get_settings
 
-    async with async_session() as session:
-        result = await session.execute(text("SELECT token, symbol FROM symtoken"))
-        _symbol_cache = {row[0]: row[1] for row in result.fetchall()}
-    logger.info("Symbol cache loaded with %d entries", len(_symbol_cache))
+    engine = create_async_engine(get_settings().database_url, echo=False)
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            result = await session.execute(text("SELECT token, symbol FROM symtoken"))
+            _symbol_cache = {row[0]: row[1] for row in result.fetchall()}
+        logger.info("Symbol cache loaded with %d entries", len(_symbol_cache))
+    finally:
+        await engine.dispose()
 
 
 def _get_symbol_from_cache(token: str) -> str | None:

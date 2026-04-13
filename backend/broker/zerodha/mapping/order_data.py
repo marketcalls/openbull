@@ -199,6 +199,7 @@ def transform_holdings_data(holdings_data: list[dict]) -> list[dict]:
             "quantity": holding.get("quantity", 0),
             "product": holding.get("product", ""),
             "average_price": average_price,
+            "ltp": holding.get("last_price", 0.0),
             "pnl": round(holding.get("pnl", 0.0), 2),
             "pnlpercent": pnlpercent,
         })

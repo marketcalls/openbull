@@ -80,6 +80,9 @@ def _process_csv(path: str) -> pd.DataFrame:
     }
     df["exchange"] = df["exchange"].map(exchange_map)
 
+    # Drop rows with unmapped exchanges (e.g. GIFT NIFTY)
+    df = df.dropna(subset=["exchange"])
+
     # Index segment handling
     df.loc[(df["segment"] == "INDICES") & (df["exchange"] == "NSE"), "exchange"] = "NSE_INDEX"
     df.loc[(df["segment"] == "INDICES") & (df["exchange"] == "BSE"), "exchange"] = "BSE_INDEX"

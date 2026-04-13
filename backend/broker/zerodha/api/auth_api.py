@@ -39,7 +39,9 @@ def authenticate_broker(request_token: str, config: dict) -> tuple[str | None, s
         response_data = response.json()
         if "data" in response_data and "access_token" in response_data["data"]:
             logger.info("Successfully authenticated with Zerodha")
-            return response_data["data"]["access_token"], None
+            # Zerodha API requires "api_key:access_token" format in Authorization header
+            combined_token = f"{api_key}:{response_data['data']['access_token']}"
+            return combined_token, None
         else:
             return None, "Authentication succeeded but no access token returned."
 
