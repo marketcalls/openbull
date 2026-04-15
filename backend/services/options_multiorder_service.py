@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from backend.services.option_symbol_service import get_option_symbol
+from backend.services.split_order_service import split_order
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,24 @@ def _place_leg(order_data: dict, broker_module, auth_token: str, leg_meta: dict)
         return {**leg_meta, "status": "error", "message": "Failed to place order due to internal error"}
 
 
+def _place_leg_split(
+    order_data: dict, splitsize: int, auth_token: str, broker: str, config: dict | None,
+    leg_meta: dict,
+) -> dict:
+    """Route a single leg through split_order_service when leg has splitsize > 0."""
+    try:
+        split_payload = {**order_data, "splitsize": str(splitsize)}
+        ok, resp, _ = split_order(
+            split_data=split_payload, auth_token=auth_token, broker=broker, config=config,
+        )
+        if ok and resp.get("status") == "success":
+            return {**leg_meta, "status": "success", "split": resp}
+        return {**leg_meta, "status": "error", "message": resp.get("message", "Split failed")}
+    except Exception as e:
+        logger.exception("Error splitting options leg %s: %s", leg_meta.get("symbol"), e)
+        return {**leg_meta, "status": "error", "message": "Failed to split leg due to internal error"}
+
+
 def place_options_multiorder(
     multi_data: dict[str, Any],
     auth_token: str,
@@ -113,6 +132,11 @@ def place_options_multiorder(
         if underlying_ltp is None:
             underlying_ltp = sym_resp.get("underlying_ltp")
 
+        try:
+            leg_splitsize = int(leg.get("splitsize", 0) or 0)
+        except (ValueError, TypeError):
+            leg_splitsize = 0
+
         resolved_legs.append({
             "leg": idx,
             "symbol": sym_resp["symbol"],
@@ -127,6 +151,7 @@ def place_options_multiorder(
             "strategy": strategy,
             "offset": leg.get("offset"),
             "option_type": leg.get("option_type"),
+            "splitsize": leg_splitsize,
         })
 
     broker_module = _import_broker_order_module(broker)
@@ -156,7 +181,13 @@ def place_options_multiorder(
                     "leg": leg["leg"], "symbol": leg["symbol"], "action": leg["action"],
                     "offset": leg["offset"], "option_type": leg["option_type"],
                 }
-                fut = executor.submit(_place_leg, order_data, broker_module, auth_token, leg_meta)
+                if leg["splitsize"] > 0:
+                    fut = executor.submit(
+                        _place_leg_split,
+                        order_data, leg["splitsize"], auth_token, broker, config, leg_meta,
+                    )
+                else:
+                    fut = executor.submit(_place_leg, order_data, broker_module, auth_token, leg_meta)
                 futures[fut] = leg
 
             for future in as_completed(futures):

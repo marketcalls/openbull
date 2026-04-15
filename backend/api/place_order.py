@@ -92,8 +92,9 @@ async def api_place_smart_order(request: Request):
         "exchange": body.get("exchange"),
         "action": body.get("action", "BUY"),
         "quantity": body.get("quantity", "0"),
-        "pricetype": body.get("pricetype"),
-        "product": body.get("product"),
+        # OpenAlgo defaults: pricetype=MARKET, product=MIS when omitted
+        "pricetype": body.get("pricetype", "MARKET"),
+        "product": body.get("product", "MIS"),
         "price": body.get("price", "0"),
         "trigger_price": body.get("trigger_price", "0"),
         "disclosed_quantity": body.get("disclosed_quantity", "0"),
@@ -122,6 +123,9 @@ async def api_modify_order(request: Request):
     user_id, auth_token, broker_name, config = api_user
 
     body = await _get_request_body(request)
+    # Accept (but ignore for the broker call) the OpenAlgo-style metadata fields
+    # symbol/action/exchange/product/strategy so that requests built for OpenAlgo
+    # work as-is. The broker modify endpoint only needs the fields below.
     modify_data = {
         "orderid": body.get("orderid"),
         "quantity": body.get("quantity"),
@@ -153,6 +157,9 @@ async def api_cancel_order(request: Request):
 
     body = await _get_request_body(request)
     orderid = body.get("orderid")
+    # OpenAlgo accepts an optional `strategy` field for telemetry — accepted here
+    # for request-shape parity even though the broker call doesn't use it.
+    _strategy = body.get("strategy", "")
     if not orderid:
         return JSONResponse(
             content={"status": "error", "message": "orderid is required"},
@@ -179,6 +186,10 @@ async def api_cancel_all_orders(request: Request):
 
     user_id, auth_token, broker_name, config = api_user
 
+    # OpenAlgo accepts an optional `strategy` for telemetry — read but unused.
+    body = await _get_request_body(request)
+    _strategy = body.get("strategy", "")
+
     success, response_data, status_code = cancel_all_orders_service(
         auth_token=auth_token,
         broker=broker_name,
@@ -200,6 +211,8 @@ async def api_close_all_positions(request: Request):
 
     body = await _get_request_body(request)
     api_key = body.get("apikey", "")
+    # OpenAlgo accepts an optional `strategy` for telemetry — read but unused.
+    _strategy = body.get("strategy", "")
 
     success, response_data, status_code = close_all_positions_service(
         api_key=api_key,
