@@ -22,6 +22,9 @@ from backend.api.quotes import router as quotes_router
 from backend.api.multiquotes import router as multiquotes_router
 from backend.api.depth import router as depth_router
 from backend.api.history import router as history_router
+from backend.api.margin import router as margin_router
+from backend.api.basket_order import router as basket_order_router
+from backend.api.split_order import router as split_order_router
 
 api_v1_router = APIRouter(prefix="/api/v1", tags=["api-v1"])
 
@@ -42,3 +45,6 @@ api_v1_router.include_router(quotes_router)
 api_v1_router.include_router(multiquotes_router)
 api_v1_router.include_router(depth_router)
 api_v1_router.include_router(history_router)
+api_v1_router.include_router(margin_router)
+api_v1_router.include_router(basket_order_router)
+api_v1_router.include_router(split_order_router)
