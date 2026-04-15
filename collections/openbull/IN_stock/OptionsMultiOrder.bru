@@ -1,0 +1,29 @@
+meta {
+  name: OptionsMultiOrder
+  type: http
+  seq: 27
+}
+
+post {
+  url: http://127.0.0.1:8000/api/v1/optionsmultiorder
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+      "apikey": "4368c7c1bba345b9d1f3e813ae86af2b111bc17efb49c5b28e935781f34adac6",
+      "strategy": "IronCondor",
+      "underlying": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "expiry_date": "28APR26",
+      "pricetype": "MARKET",
+      "product": "NRML",
+      "legs": [
+          {"offset": "OTM4", "option_type": "CE", "action": "SELL", "quantity": 65},
+          {"offset": "OTM6", "option_type": "CE", "action": "BUY", "quantity": 65},
+          {"offset": "OTM4", "option_type": "PE", "action": "SELL", "quantity": 65},
+          {"offset": "OTM6", "option_type": "PE", "action": "BUY", "quantity": 65}
+      ]
+  }
+}

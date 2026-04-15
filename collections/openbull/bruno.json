@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "name": "openbull",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ]
+}

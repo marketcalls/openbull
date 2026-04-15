@@ -1,0 +1,51 @@
+meta {
+  name: Margin
+  type: http
+  seq: 6
+}
+
+post {
+  url: http://127.0.0.1:8000/api/v1/margin
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+      "apikey": "4368c7c1bba345b9d1f3e813ae86af2b111bc17efb49c5b28e935781f34adac6",
+      "positions": [
+          {
+              "symbol": "NIFTY28APR2624300CE",
+              "exchange": "NFO",
+              "action": "SELL",
+              "quantity": "65",
+              "product": "NRML",
+              "pricetype": "MARKET"
+          },
+          {
+              "symbol": "NIFTY28APR2624500CE",
+              "exchange": "NFO",
+              "action": "BUY",
+              "quantity": "65",
+              "product": "NRML",
+              "pricetype": "MARKET"
+          },
+          {
+              "symbol": "NIFTY28APR2624100PE",
+              "exchange": "NFO",
+              "action": "SELL",
+              "quantity": "65",
+              "product": "NRML",
+              "pricetype": "MARKET"
+          },
+          {
+              "symbol": "NIFTY28APR2623900PE",
+              "exchange": "NFO",
+              "action": "BUY",
+              "quantity": "65",
+              "product": "NRML",
+              "pricetype": "MARKET"
+          }
+      ]
+  }
+}

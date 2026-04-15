@@ -1,0 +1,19 @@
+meta {
+  name: Quotes
+  type: http
+  seq: 18
+}
+
+post {
+  url: http://127.0.0.1:8000/api/v1/quotes
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+      "apikey": "4368c7c1bba345b9d1f3e813ae86af2b111bc17efb49c5b28e935781f34adac6",
+      "symbol": "NIFTY28APR2624250CE",
+      "exchange": "NFO"
+  }
+}

@@ -1,0 +1,27 @@
+meta {
+  name: OptionsOrder
+  type: http
+  seq: 26
+}
+
+post {
+  url: http://127.0.0.1:8000/api/v1/optionsorder
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+      "apikey": "4368c7c1bba345b9d1f3e813ae86af2b111bc17efb49c5b28e935781f34adac6",
+      "strategy": "OptionsOrderTest",
+      "underlying": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "expiry_date": "28APR26",
+      "offset": "ATM",
+      "option_type": "CE",
+      "action": "BUY",
+      "quantity": "65",
+      "pricetype": "MARKET",
+      "product": "MIS"
+  }
+}

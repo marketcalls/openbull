@@ -1,0 +1,36 @@
+meta {
+  name: BasketOrder
+  type: http
+  seq: 4
+}
+
+post {
+  url: http://127.0.0.1:8000/api/v1/basketorder
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+      "apikey": "4368c7c1bba345b9d1f3e813ae86af2b111bc17efb49c5b28e935781f34adac6",
+      "strategy": "BasketTest",
+      "orders": [
+          {
+              "symbol": "INFY",
+              "exchange": "NSE",
+              "action": "BUY",
+              "quantity": "2",
+              "pricetype": "MARKET",
+              "product": "MIS"
+          },
+          {
+              "symbol": "TCS",
+              "exchange": "NSE",
+              "action": "BUY",
+              "quantity": "2",
+              "pricetype": "MARKET",
+              "product": "MIS"
+          }
+      ]
+  }
+}
