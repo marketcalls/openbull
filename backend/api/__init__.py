@@ -28,6 +28,9 @@ from backend.api.split_order import router as split_order_router
 from backend.api.optionsymbol import router as optionsymbol_router
 from backend.api.optionchain import router as optionchain_router
 from backend.api.syntheticfuture import router as syntheticfuture_router
+from backend.api.optionsorder import router as optionsorder_router
+from backend.api.optionsmultiorder import router as optionsmultiorder_router
+from backend.api.optiongreeks import router as optiongreeks_router
 
 api_v1_router = APIRouter(prefix="/api/v1", tags=["api-v1"])
 
@@ -54,3 +57,6 @@ api_v1_router.include_router(split_order_router)
 api_v1_router.include_router(optionsymbol_router)
 api_v1_router.include_router(optionchain_router)
 api_v1_router.include_router(syntheticfuture_router)
+api_v1_router.include_router(optionsorder_router)
+api_v1_router.include_router(optionsmultiorder_router)
+api_v1_router.include_router(optiongreeks_router)
