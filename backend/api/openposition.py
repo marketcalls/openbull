@@ -48,6 +48,7 @@ async def api_openposition(request: Request):
     symbol = body.get("symbol")
     exchange = body.get("exchange")
     product = body.get("product")
+    _strategy = body.get("strategy", "")  # OpenAlgo parity — accepted but unused
 
     if not all([symbol, exchange, product]):
         return JSONResponse(

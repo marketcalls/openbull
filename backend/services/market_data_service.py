@@ -120,23 +120,50 @@ def search_symbols_api(
 
 
 def get_expiry_dates(
-    symbol: str, exchange: str
+    symbol: str, exchange: str, instrumenttype: str | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
-    """Get sorted expiry dates for a symbol in an F&O exchange."""
+    """Get sorted expiry dates for a symbol in an F&O exchange.
+
+    instrumenttype: "options" (CE+PE) or "futures" (FUT). Optional — if omitted,
+    all instrument types are returned (legacy behaviour).
+    """
     try:
+        # Map OpenAlgo instrument-type tokens to DB column values
+        itype_filter: list[str] | None = None
+        if instrumenttype:
+            it_lower = instrumenttype.lower()
+            if it_lower in ("options", "option", "opt"):
+                itype_filter = ["CE", "PE"]
+            elif it_lower in ("futures", "future", "fut"):
+                itype_filter = ["FUT"]
+            else:
+                return False, {
+                    "status": "error",
+                    "message": f"Invalid instrumenttype '{instrumenttype}'. Use 'options' or 'futures'.",
+                }, 400
+
+        params = {"symbol": symbol, "exchange": exchange}
+        itype_clause = ""
+        if itype_filter:
+            params["itypes"] = itype_filter
+            itype_clause = " AND instrumenttype = ANY(:itypes)"
+
         rows = _run_query(
             "SELECT DISTINCT expiry FROM symtoken "
             "WHERE name = :symbol AND exchange = :exchange "
-            "AND expiry IS NOT NULL AND expiry != ''",
-            {"symbol": symbol, "exchange": exchange},
+            "AND expiry IS NOT NULL AND expiry != ''" + itype_clause,
+            params,
         )
 
         if not rows:
+            params2 = {"pattern": f"{symbol}%", "exchange": exchange}
+            if itype_filter:
+                params2["itypes"] = itype_filter
             rows = _run_query(
                 "SELECT DISTINCT expiry FROM symtoken "
                 "WHERE symbol LIKE :pattern AND exchange = :exchange "
-                "AND expiry IS NOT NULL AND expiry != ''",
-                {"pattern": f"{symbol}%", "exchange": exchange},
+                "AND expiry IS NOT NULL AND expiry != ''" + itype_clause,
+                params2,
             )
 
         if not rows:

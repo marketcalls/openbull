@@ -58,7 +58,7 @@ def calculate_synthetic_future(
             return False, mqdata, status_code
 
         call_ltp = put_ltp = None
-        for q in mqdata.get("data", []):
+        for q in mqdata.get("results", []):
             if q.get("symbol") == call_symbol:
                 call_ltp = q.get("ltp")
             elif q.get("symbol") == put_symbol:

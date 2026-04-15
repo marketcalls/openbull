@@ -46,6 +46,7 @@ async def api_orderstatus(request: Request):
         body = {}
 
     orderid = body.get("orderid")
+    _strategy = body.get("strategy", "")  # OpenAlgo parity — accepted but unused
     if not orderid:
         return JSONResponse(
             content={"status": "error", "message": "orderid is required"},

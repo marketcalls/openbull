@@ -16,8 +16,9 @@ router = APIRouter()
 
 
 @router.post("/positions")
+@router.post("/positionbook")  # OpenAlgo compatibility alias
 async def api_positions(request: Request):
-    """Get open positions via the external API."""
+    """Get open positions via the external API. Aliased as /positionbook for OpenAlgo parity."""
     from backend.dependencies import get_api_user, get_db
     from backend.services.positions_service import get_positions_with_auth
 

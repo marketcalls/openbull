@@ -39,7 +39,8 @@ def get_multi_quotes_with_auth(
 
     try:
         results = data_module.get_multi_quotes(symbols_list, auth_token, config)
-        return True, {"status": "success", "data": results}, 200
+        # OpenAlgo returns the list under "results" (not "data"); match that contract.
+        return True, {"status": "success", "results": results}, 200
     except ValueError as e:
         return False, {"status": "error", "message": str(e)}, 400
     except Exception as e:

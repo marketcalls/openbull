@@ -137,7 +137,7 @@ def get_option_chain(
         )
         quotes_map: dict[str, dict] = {}
         if ok_q:
-            for q in mqdata.get("data", []):
+            for q in mqdata.get("results", []):
                 quotes_map[q.get("symbol")] = q
 
         chain = []

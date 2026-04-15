@@ -38,8 +38,9 @@ async def api_expiry(request: Request):
 
     symbol = body.get("symbol")
     exchange = body.get("exchange")
+    instrumenttype = body.get("instrumenttype")  # OpenAlgo: "options" or "futures"
     if not symbol or not exchange:
         return JSONResponse(content={"status": "error", "message": "symbol and exchange are required"}, status_code=400)
 
-    success, response_data, status_code = get_expiry_dates(symbol, exchange)
+    success, response_data, status_code = get_expiry_dates(symbol, exchange, instrumenttype)
     return JSONResponse(content=response_data, status_code=status_code)
