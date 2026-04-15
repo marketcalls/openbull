@@ -85,12 +85,15 @@ def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None 
 def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | None = None) -> list[dict]:
     """Get quotes for multiple symbols using v2 full quote endpoint."""
     keys_map = {}  # token -> {symbol, exchange}
+    suffix_map = {}  # numeric token suffix (e.g. "72277") -> {symbol, exchange}
     encoded_keys = []
     for item in symbols_list:
         sym, exch = item["symbol"], item["exchange"]
         token = get_token_from_cache(sym, exch)
         if token:
             keys_map[token] = {"symbol": sym, "exchange": exch}
+            if "|" in token:
+                suffix_map[token.split("|", 1)[1]] = {"symbol": sym, "exchange": exch}
             encoded_keys.append(_encode_key(token))
 
     if not encoded_keys:
@@ -109,6 +112,15 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
     for response_key, quote_data in data["data"].items():
         info = keys_map.get(response_key)
         if not info:
+            # Upstox returns keys like "NSE_FO:Nifty 50" — try matching by the
+            # broker-provided instrument_token field on the quote payload.
+            it = quote_data.get("instrument_token")
+            if it:
+                info = keys_map.get(it)
+                if not info and "|" in it:
+                    info = suffix_map.get(it.split("|", 1)[1])
+        if not info:
+            # Last resort: substring match against the response key
             for orig_token, orig_info in keys_map.items():
                 if orig_token in response_key or response_key in orig_token:
                     info = orig_info

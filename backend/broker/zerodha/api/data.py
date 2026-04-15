@@ -96,20 +96,22 @@ def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None 
 def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | None = None) -> list[dict]:
     """Get quotes for multiple symbols using batch Kite quote API."""
     # Build i= params: i=NSE:SBIN&i=NSE:TCS
+    # Use httpx params= so spaces (e.g. "NIFTY 24250 CE 28 APR 26") are URL-encoded.
     params_map = {}  # instrument_param -> {symbol, exchange}
-    query_parts = []
+    params: list[tuple[str, str]] = []
     for item in symbols_list:
         sym, exch = item["symbol"], item["exchange"]
         instrument_param = _get_instrument_param(sym, exch)
         params_map[instrument_param] = {"symbol": sym, "exchange": exch}
-        query_parts.append(f"i={instrument_param}")
+        params.append(("i", instrument_param))
 
-    if not query_parts:
+    if not params:
         return []
 
     client = get_httpx_client()
-    url = f"https://api.kite.trade/quote?{'&'.join(query_parts)}"
-    response = client.get(url, headers=_headers(auth_token))
+    response = client.get(
+        "https://api.kite.trade/quote", params=params, headers=_headers(auth_token)
+    )
     response.raise_for_status()
     data = response.json()
 

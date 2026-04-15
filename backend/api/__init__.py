@@ -25,6 +25,9 @@ from backend.api.history import router as history_router
 from backend.api.margin import router as margin_router
 from backend.api.basket_order import router as basket_order_router
 from backend.api.split_order import router as split_order_router
+from backend.api.optionsymbol import router as optionsymbol_router
+from backend.api.optionchain import router as optionchain_router
+from backend.api.syntheticfuture import router as syntheticfuture_router
 
 api_v1_router = APIRouter(prefix="/api/v1", tags=["api-v1"])
 
@@ -48,3 +51,6 @@ api_v1_router.include_router(history_router)
 api_v1_router.include_router(margin_router)
 api_v1_router.include_router(basket_order_router)
 api_v1_router.include_router(split_order_router)
+api_v1_router.include_router(optionsymbol_router)
+api_v1_router.include_router(optionchain_router)
+api_v1_router.include_router(syntheticfuture_router)
