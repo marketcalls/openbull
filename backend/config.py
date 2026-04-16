@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # WebSocket Proxy
     websocket_host: str = "127.0.0.1"
     websocket_port: int = 8765
+    websocket_url: str = "ws://127.0.0.1:8765"
     zmq_host: str = "127.0.0.1"
     zmq_port: int = 5555
 
