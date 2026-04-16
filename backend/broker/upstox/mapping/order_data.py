@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 # In-memory caches populated from DB on startup
 _token_to_symbol: dict[str, str] | None = None  # token -> symbol
+_token_to_symbol_exchange: dict[str, tuple[str, str]] | None = None  # token -> (symbol, exchange)
 _symbol_exchange_to_token: dict[tuple[str, str], str] | None = None  # (symbol, exchange) -> token
 _symbol_exchange_to_brsymbol: dict[tuple[str, str], str] | None = None  # (symbol, exchange) -> brsymbol
 _brsymbol_exchange_to_symbol: dict[tuple[str, str], str] | None = None  # (brsymbol, exchange) -> symbol
@@ -22,7 +23,7 @@ _symbol_cache = None
 
 async def _load_symbol_cache():
     """Load all symbol mappings into memory from the DB."""
-    global _symbol_cache, _token_to_symbol, _symbol_exchange_to_token, _symbol_exchange_to_brsymbol, _brsymbol_exchange_to_symbol
+    global _symbol_cache, _token_to_symbol, _token_to_symbol_exchange, _symbol_exchange_to_token, _symbol_exchange_to_brsymbol, _brsymbol_exchange_to_symbol
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
     from backend.config import get_settings
 
@@ -36,15 +37,21 @@ async def _load_symbol_cache():
             rows = result.fetchall()
 
             _token_to_symbol = {}
+            _token_to_symbol_exchange = {}
             _symbol_exchange_to_token = {}
             _symbol_exchange_to_brsymbol = {}
             _brsymbol_exchange_to_symbol = {}
 
             for token, symbol, exchange, brsymbol in rows:
                 _token_to_symbol[token] = symbol
+                _token_to_symbol_exchange[token] = (symbol, exchange)
                 _symbol_exchange_to_token[(symbol, exchange)] = token
                 _symbol_exchange_to_brsymbol[(symbol, exchange)] = brsymbol
                 _brsymbol_exchange_to_symbol[(brsymbol, exchange)] = symbol
+                # Numeric token reverse mapping (for Zerodha: "12345::::67890" -> "12345")
+                if "::::" in token:
+                    numeric_part = token.split("::::")[0]
+                    _token_to_symbol_exchange[numeric_part] = (symbol, exchange)
 
             _symbol_cache = _token_to_symbol
         logger.info("Symbol cache loaded with %d entries", len(_token_to_symbol))
@@ -78,6 +85,13 @@ def get_symbol_from_brsymbol_cache(brsymbol: str, exchange: str) -> str | None:
     if _brsymbol_exchange_to_symbol is None:
         return None
     return _brsymbol_exchange_to_symbol.get((brsymbol, exchange))
+
+
+def get_symbol_exchange_from_token(token: str) -> tuple[str, str] | None:
+    """Reverse lookup: token -> (symbol, exchange). Used by streaming adapters."""
+    if _token_to_symbol_exchange is None:
+        return None
+    return _token_to_symbol_exchange.get(token)
 
 
 def map_order_data(order_data: dict) -> list[dict]:

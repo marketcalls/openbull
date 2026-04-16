@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     # Session
     session_expiry_time: str = "03:00"
 
+    # WebSocket Proxy
+    websocket_host: str = "127.0.0.1"
+    websocket_port: int = 8765
+    zmq_host: str = "127.0.0.1"
+    zmq_port: int = 5555
+
+    # WebSocket Connection Pooling
+    max_symbols_per_websocket: int = 1000
+    max_websocket_connections: int = 3
+    enable_connection_pooling: bool = True
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

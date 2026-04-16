@@ -50,9 +50,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.info("Symbol cache not loaded (will load after master contract download): %s", e)
 
+    # Start WebSocket proxy server in background
+    import asyncio
+    from backend.websocket_proxy.server import start_ws_proxy, shutdown_ws_proxy
+    ws_task = asyncio.create_task(
+        start_ws_proxy(settings.websocket_host, settings.websocket_port)
+    )
+    logger.info(
+        "WebSocket proxy starting on ws://%s:%d", settings.websocket_host, settings.websocket_port
+    )
+
     yield
 
     # Shutdown
+    await shutdown_ws_proxy()
+    ws_task.cancel()
+    try:
+        await ws_task
+    except asyncio.CancelledError:
+        pass
     close_httpx_client()
     await engine.dispose()
     logger.info("OpenBull shut down")

@@ -22,4 +22,8 @@ dependencies = [
     "pandas>=2.2.0",
     "psycopg2-binary>=2.9.11",
     "psycopg[binary]>=3.3.3",
+    "pyzmq>=27.1.0",
+    "websockets>=16.0",
+    "protobuf>=7.34.1",
+    "websocket-client>=1.9.0",
 ]
