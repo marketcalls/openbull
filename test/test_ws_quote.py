@@ -1,6 +1,7 @@
 """
 Test WebSocket Quote streaming (OHLCV + OI).
 Usage: uv run python test/test_ws_quote.py
+Press Ctrl+C to stop.
 """
 
 import asyncio
@@ -18,27 +19,27 @@ INSTRUMENTS = [
 
 
 async def main():
-    async with websockets.connect(WS_URL) as ws:
-        # Authenticate
-        await ws.send(json.dumps({"action": "authenticate", "api_key": API_KEY}))
-        auth = json.loads(await ws.recv())
-        print(f"Auth: {auth['status']} | Broker: {auth.get('broker')}")
+    try:
+        async with websockets.connect(WS_URL) as ws:
+            # Authenticate
+            await ws.send(json.dumps({"action": "authenticate", "api_key": API_KEY}))
+            auth = json.loads(await ws.recv())
+            print(f"Auth: {auth['status']} | Broker: {auth.get('broker')}")
 
-        # Subscribe Quote
-        await ws.send(json.dumps({
-            "action": "subscribe",
-            "symbols": INSTRUMENTS,
-            "mode": "Quote",
-        }))
-        sub = json.loads(await ws.recv())
-        print(f"Subscribed: {len(sub.get('subscriptions', []))} symbols in Quote mode\n")
+            # Subscribe Quote
+            await ws.send(json.dumps({
+                "action": "subscribe",
+                "symbols": INSTRUMENTS,
+                "mode": "Quote",
+            }))
+            sub = json.loads(await ws.recv())
+            print(f"Subscribed: {len(sub.get('subscriptions', []))} symbols in Quote mode\n")
 
-        # Stream
-        header = f"{'Symbol':30s} {'LTP':>10s} {'Open':>10s} {'High':>10s} {'Low':>10s} {'Volume':>10s} {'OI':>10s}"
-        print(header)
-        print("-" * len(header))
+            # Stream
+            header = f"{'Symbol':30s} {'LTP':>10s} {'Open':>10s} {'High':>10s} {'Low':>10s} {'Volume':>10s} {'OI':>10s}"
+            print(header)
+            print("-" * len(header))
 
-        try:
             while True:
                 msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
                 if msg.get("type") == "market_data" and msg["data"].get("mode") == "quote":
@@ -52,9 +53,15 @@ async def main():
                         f"{d.get('volume', 0):>10} "
                         f"{d.get('oi', 0):>10}"
                     )
-        except (asyncio.TimeoutError, KeyboardInterrupt):
-            print("\nStopped.")
+
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        print("\nNo data received (timeout). Stopped.")
+    except websockets.ConnectionClosed:
+        print("\nConnection closed.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nStopped.")

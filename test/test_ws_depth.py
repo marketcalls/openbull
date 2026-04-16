@@ -1,6 +1,7 @@
 """
 Test WebSocket Depth streaming (5-level bid/ask + OHLCV).
 Usage: uv run python test/test_ws_depth.py
+Press Ctrl+C to stop.
 """
 
 import asyncio
@@ -37,30 +38,36 @@ def print_depth(symbol, data):
 
 
 async def main():
-    async with websockets.connect(WS_URL) as ws:
-        # Authenticate
-        await ws.send(json.dumps({"action": "authenticate", "api_key": API_KEY}))
-        auth = json.loads(await ws.recv())
-        print(f"Auth: {auth['status']} | Broker: {auth.get('broker')}")
+    try:
+        async with websockets.connect(WS_URL) as ws:
+            # Authenticate
+            await ws.send(json.dumps({"action": "authenticate", "api_key": API_KEY}))
+            auth = json.loads(await ws.recv())
+            print(f"Auth: {auth['status']} | Broker: {auth.get('broker')}")
 
-        # Subscribe Depth
-        await ws.send(json.dumps({
-            "action": "subscribe",
-            "symbols": INSTRUMENTS,
-            "mode": "Depth",
-        }))
-        sub = json.loads(await ws.recv())
-        print(f"Subscribed: {len(sub.get('subscriptions', []))} symbols in Depth mode")
+            # Subscribe Depth
+            await ws.send(json.dumps({
+                "action": "subscribe",
+                "symbols": INSTRUMENTS,
+                "mode": "Depth",
+            }))
+            sub = json.loads(await ws.recv())
+            print(f"Subscribed: {len(sub.get('subscriptions', []))} symbols in Depth mode")
 
-        # Stream
-        try:
+            # Stream
             while True:
                 msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
                 if msg.get("type") == "market_data" and msg["data"].get("mode") == "full":
                     print_depth(msg["symbol"], msg["data"])
-        except (asyncio.TimeoutError, KeyboardInterrupt):
-            print("\nStopped.")
+
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        print("\nNo data received (timeout). Stopped.")
+    except websockets.ConnectionClosed:
+        print("\nConnection closed.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nStopped.")
