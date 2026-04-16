@@ -137,6 +137,8 @@ def get_open_position(tradingsymbol, exchange, product, auth):
     """Get the net quantity of an open position for a given symbol."""
     try:
         br_symbol = _get_br_symbol(tradingsymbol, exchange)
+        # Convert OpenBull product (CNC/NRML/MIS) to Upstox product (D/I)
+        upstox_product = map_product_type(product)
         positions_data = _get_cached_positions(auth)
         net_qty = "0"
 
@@ -146,10 +148,12 @@ def get_open_position(tradingsymbol, exchange, product, auth):
             and positions_data.get("data")
         ):
             for position in positions_data["data"]:
+                # Upstox raw fields: trading_symbol (with underscore), product (D/I)
+                pos_symbol = position.get("trading_symbol") or position.get("tradingsymbol", "")
                 if (
-                    position.get("tradingsymbol") == br_symbol
+                    pos_symbol == br_symbol
                     and position.get("exchange") == exchange
-                    and position.get("product") == product
+                    and position.get("product") == upstox_product
                 ):
                     net_qty = position.get("quantity", "0")
                     break
@@ -248,6 +252,17 @@ def place_smartorder_api(data: dict, auth: str) -> tuple:
         return None, {"status": "error", "message": str(e)}, None
 
 
+def _extract_error_message(response_data: dict, fallback: str) -> str:
+    """Extract human-readable error from Upstox response (top-level or nested errors array)."""
+    msg = response_data.get("message")
+    if msg:
+        return msg
+    errors = response_data.get("errors")
+    if isinstance(errors, list) and errors:
+        return errors[0].get("message", fallback)
+    return fallback
+
+
 def cancel_order(orderid: str, auth: str) -> tuple[dict, int]:
     """Cancel a specific order by its ID."""
     try:
@@ -258,7 +273,7 @@ def cancel_order(orderid: str, auth: str) -> tuple[dict, int]:
             canceled_id = response_data.get("data", {}).get("order_id")
             return {"status": "success", "orderid": canceled_id}, 200
         else:
-            return {"status": "error", "message": response_data.get("message", "Failed to cancel order")}, 400
+            return {"status": "error", "message": _extract_error_message(response_data, "Failed to cancel order")}, 400
 
     except Exception as e:
         return {"status": "error", "message": str(e)}, 500
@@ -275,7 +290,7 @@ def modify_order(data: dict, auth: str) -> tuple[dict, int]:
             modified_id = response_data.get("data", {}).get("order_id")
             return {"status": "success", "orderid": modified_id}, 200
         else:
-            return {"status": "error", "message": response_data.get("message", "Failed to modify order")}, 400
+            return {"status": "error", "message": _extract_error_message(response_data, "Failed to modify order")}, 400
 
     except Exception as e:
         return {"status": "error", "message": str(e)}, 500
