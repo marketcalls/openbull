@@ -45,12 +45,16 @@ MODE_MAP = {"LTP": MODE_LTP, "QUOTE": MODE_QUOTE, "DEPTH": MODE_DEPTH, "FULL": M
 _adapter: BaseBrokerAdapter | None = None
 _adapter_lock = asyncio.Lock()
 _clients: dict[str, websockets.WebSocketServerProtocol] = {}
+_authenticated_clients: set[str] = set()  # client_ids that have authenticated
 _subscription_index: dict[tuple[str, str, int], set[str]] = {}  # (symbol, exchange, mode) -> client_ids
 _last_send_time: dict[tuple[str, str], float] = {}  # (symbol, exchange) -> timestamp
 _server: websockets.WebSocketServer | None = None
 _zmq_task: asyncio.Task | None = None
 
 LTP_THROTTLE_SEC = 0.05  # 50ms
+MAX_WS_CONNECTIONS = 10
+MAX_MESSAGE_SIZE = 65536  # 64KB
+MAX_SYMBOLS_PER_SUBSCRIBE = 1000
 
 
 def _create_adapter(broker_name: str, auth_token: str, config: dict) -> BaseBrokerAdapter:
@@ -196,11 +200,12 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
 
                 try:
                     user_id, auth_token, bname, config = await verify_api_key_standalone(api_key)
-                except ValueError as e:
-                    await _send_json(ws, {"type": "auth", "status": "error", "message": str(e)})
+                except ValueError:
+                    await _send_json(ws, {"type": "auth", "status": "error", "message": "Authentication failed"})
                     continue
 
                 broker_name = bname
+                _authenticated_clients.add(client_id)
 
                 # Create adapter if needed (single-user: one adapter at a time)
                 async with _adapter_lock:
@@ -219,7 +224,7 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
                         except Exception as e:
                             logger.exception("Failed to create adapter: %s", e)
                             _adapter = None
-                            await _send_json(ws, {"type": "auth", "status": "error", "message": str(e)})
+                            await _send_json(ws, {"type": "auth", "status": "error", "message": "Broker connection failed"})
                             continue
 
                 await _send_json(ws, {
@@ -230,11 +235,14 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
 
             # -- subscribe --
             elif action == "subscribe":
-                if _adapter is None:
+                if _adapter is None or client_id not in _authenticated_clients:
                     await _send_json(ws, {"type": "subscribe", "status": "error", "message": "Not authenticated"})
                     continue
 
                 symbols = msg.get("symbols", [])
+                if not isinstance(symbols, list) or len(symbols) > MAX_SYMBOLS_PER_SUBSCRIBE:
+                    await _send_json(ws, {"type": "subscribe", "status": "error", "message": f"symbols must be a list (max {MAX_SYMBOLS_PER_SUBSCRIBE})"})
+                    continue
                 mode = MODE_MAP.get(msg.get("mode", "LTP").upper(), MODE_LTP)
 
                 for item in symbols:
@@ -260,7 +268,7 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
 
             # -- unsubscribe --
             elif action == "unsubscribe":
-                if _adapter is None:
+                if _adapter is None or client_id not in _authenticated_clients:
                     await _send_json(ws, {"type": "unsubscribe", "status": "error", "message": "Not authenticated"})
                     continue
 
@@ -293,8 +301,9 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
     except websockets.ConnectionClosed:
         pass
     finally:
-        # Cleanup client subscriptions
+        # Cleanup client subscriptions and auth state
         _clients.pop(client_id, None)
+        _authenticated_clients.discard(client_id)
         for key in list(_subscription_index.keys()):
             subs = _subscription_index.get(key)
             if subs:
@@ -313,6 +322,8 @@ async def start_ws_proxy(host: str, port: int) -> None:
         _handle_client, host, port,
         ping_interval=30,
         ping_timeout=10,
+        max_size=MAX_MESSAGE_SIZE,
+        max_connections=MAX_WS_CONNECTIONS,
     )
     logger.info("WebSocket proxy listening on ws://%s:%d", host, port)
     await asyncio.Future()  # run forever
@@ -344,6 +355,7 @@ async def shutdown_ws_proxy() -> None:
         _server = None
 
     _clients.clear()
+    _authenticated_clients.clear()
     _subscription_index.clear()
     _last_send_time.clear()
     logger.info("WebSocket proxy shut down")

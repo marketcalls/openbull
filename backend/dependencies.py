@@ -16,7 +16,7 @@ from backend.security import decode_access_token, verify_api_key, decrypt_value
 logger = logging.getLogger(__name__)
 
 # -- Caches --
-_verified_api_key_cache: TTLCache = TTLCache(maxsize=64, ttl=36000)  # 10 hours
+_verified_api_key_cache: TTLCache = TTLCache(maxsize=64, ttl=900)  # 15 minutes
 _invalid_api_key_cache: TTLCache = TTLCache(maxsize=64, ttl=300)  # 5 minutes
 _auth_token_cache: TTLCache = TTLCache(maxsize=64, ttl=3600)  # 1 hour
 

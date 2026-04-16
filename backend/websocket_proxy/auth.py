@@ -17,8 +17,21 @@ from backend.security import verify_api_key, decrypt_value
 
 logger = logging.getLogger(__name__)
 
-_verified_cache: TTLCache = TTLCache(maxsize=64, ttl=36000)
+_verified_cache: TTLCache = TTLCache(maxsize=64, ttl=900)  # 15 min (not 10h)
 _invalid_cache: TTLCache = TTLCache(maxsize=64, ttl=300)
+
+# Singleton engine — created once, reused across all verify calls
+_engine = None
+_session_factory = None
+
+
+def _get_session_factory():
+    global _engine, _session_factory
+    if _session_factory is None:
+        settings = get_settings()
+        _engine = create_async_engine(settings.database_url, echo=False)
+        _session_factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+    return _session_factory
 
 
 async def verify_api_key_standalone(
@@ -33,12 +46,9 @@ async def verify_api_key_standalone(
     if cache_key in _invalid_cache:
         raise ValueError("Invalid API key")
 
-    settings = get_settings()
-    engine = create_async_engine(settings.database_url, echo=False)
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    session_factory = _get_session_factory()
 
-    try:
-        async with session_factory() as db:
+    async with session_factory() as db:
             # Resolve user_id
             if cache_key in _verified_cache:
                 user_id = _verified_cache[cache_key]
@@ -86,5 +96,3 @@ async def verify_api_key_standalone(
                 }
 
             return (user_id, auth_token, broker_name, config)
-    finally:
-        await engine.dispose()

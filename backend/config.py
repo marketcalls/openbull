@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     backend_host: str = "127.0.0.1"
     backend_port: int = 8000
     frontend_url: str = "http://127.0.0.1:5173"
-    flask_debug: bool = True
+    flask_debug: bool = False
 
     # CORS
     cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"

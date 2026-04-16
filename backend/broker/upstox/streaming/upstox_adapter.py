@@ -126,7 +126,7 @@ class UpstoxAdapter(BaseBrokerAdapter):
         while self._running:
             try:
                 self._ws.run_forever(
-                    sslopt={"cert_reqs": ssl.CERT_NONE},
+                    sslopt={"cert_reqs": ssl.CERT_REQUIRED},
                     ping_interval=30,
                     ping_timeout=10,
                 )

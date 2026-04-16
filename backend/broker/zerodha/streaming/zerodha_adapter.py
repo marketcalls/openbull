@@ -147,7 +147,7 @@ class ZerodhaAdapter(BaseBrokerAdapter):
         while self._running:
             try:
                 self._ws.run_forever(
-                    sslopt={"cert_reqs": ssl.CERT_NONE},
+                    sslopt={"cert_reqs": ssl.CERT_REQUIRED},
                     ping_interval=30,
                     ping_timeout=10,
                 )
@@ -286,8 +286,8 @@ class ZerodhaAdapter(BaseBrokerAdapter):
             except struct.error as e:
                 logger.debug("Quote parse error for %s: %s", symbol, e)
 
-        # DEPTH (184+ bytes)
-        if pkt_mode >= MODE_DEPTH and len(pkt) >= 184:
+        # DEPTH (184+ bytes) — requires quote_data from the block above
+        if pkt_mode >= MODE_DEPTH and len(pkt) >= 184 and pkt_mode >= MODE_QUOTE:
             try:
                 bids, asks = [], []
                 depth_offset = 64
@@ -312,7 +312,7 @@ class ZerodhaAdapter(BaseBrokerAdapter):
                     "depth": {"buy": bids, "sell": asks},
                 }
                 self.publish(f"{exchange}_{symbol}_DEPTH", depth_data)
-            except struct.error as e:
+            except (struct.error, NameError) as e:
                 logger.debug("Depth parse error for %s: %s", symbol, e)
 
     # ---- Binary message builders ----
