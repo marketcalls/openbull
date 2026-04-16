@@ -175,6 +175,12 @@ async def _zmq_listener(zmq_port: int) -> None:
 async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
     global _adapter, _zmq_task
 
+    # Enforce connection limit
+    if len(_clients) >= MAX_WS_CONNECTIONS:
+        await _send_json(ws, {"type": "error", "message": "Max connections reached"})
+        await ws.close()
+        return
+
     client_id = str(uuid.uuid4())
     _clients[client_id] = ws
     logger.info("Client %s connected (%d total)", client_id[:8], len(_clients))
@@ -323,7 +329,6 @@ async def start_ws_proxy(host: str, port: int) -> None:
         ping_interval=30,
         ping_timeout=10,
         max_size=MAX_MESSAGE_SIZE,
-        max_connections=MAX_WS_CONNECTIONS,
     )
     logger.info("WebSocket proxy listening on ws://%s:%d", host, port)
     await asyncio.Future()  # run forever

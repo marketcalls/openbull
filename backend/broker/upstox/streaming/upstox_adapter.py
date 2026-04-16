@@ -209,8 +209,12 @@ class UpstoxAdapter(BaseBrokerAdapter):
         symbol, exchange = info
         highest_mode = self._key_mode.get(feed_key, MODE_LTP)
 
-        # Extract LTPC (always available)
-        ltpc = feed_data.get("ltpc") or feed_data.get("ff", {}).get("marketFF", {}).get("ltpc", {})
+        # Extract fullFeed.marketFF (Upstox v3 protobuf structure)
+        full_feed = feed_data.get("fullFeed", feed_data.get("ff", {}))
+        market_ff = full_feed.get("marketFF", {}) if isinstance(full_feed, dict) else {}
+
+        # LTPC can be at top-level (ltpc mode) or inside marketFF (full mode)
+        ltpc = feed_data.get("ltpc") or market_ff.get("ltpc", {})
         ltp = ltpc.get("ltp", 0)
         ltt = ltpc.get("ltt")
         cp = ltpc.get("cp", 0)
@@ -222,24 +226,19 @@ class UpstoxAdapter(BaseBrokerAdapter):
         }
         self.publish(f"{exchange}_{symbol}_LTP", ltp_data)
 
-        # QUOTE / DEPTH from fullFeed
-        full_feed = feed_data.get("ff", {}).get("marketFF", {})
-        if not full_feed and highest_mode <= MODE_LTP:
-            return
-
-        if full_feed and highest_mode >= MODE_QUOTE:
+        if market_ff and highest_mode >= MODE_QUOTE:
             # Extract OHLCV from marketOHLC
-            ohlc_list = full_feed.get("marketOHLC", {}).get("ohlc", [])
+            ohlc_list = market_ff.get("marketOHLC", {}).get("ohlc", [])
             day_ohlc = {}
             for ohlc in ohlc_list:
                 if ohlc.get("interval") == "1d":
                     day_ohlc = ohlc
                     break
 
-            atp = full_feed.get("atp", 0)
-            tbq = full_feed.get("tbq", 0)
-            tsq = full_feed.get("tsq", 0)
-            oi = full_feed.get("oi", 0)
+            atp = market_ff.get("atp", 0)
+            tbq = market_ff.get("tbq", 0)
+            tsq = market_ff.get("tsq", 0)
+            oi = market_ff.get("oi", 0)
 
             quote_data = {
                 "symbol": symbol, "exchange": exchange, "mode": "quote",
@@ -256,8 +255,8 @@ class UpstoxAdapter(BaseBrokerAdapter):
             }
             self.publish(f"{exchange}_{symbol}_QUOTE", quote_data)
 
-        if full_feed and highest_mode >= MODE_DEPTH:
-            bid_ask = full_feed.get("marketLevel", {}).get("bidAskQuote", [])
+        if market_ff and highest_mode >= MODE_DEPTH:
+            bid_ask = market_ff.get("marketLevel", {}).get("bidAskQuote", [])
             bids = []
             asks = []
             for level in bid_ask[:5]:
