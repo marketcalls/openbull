@@ -31,8 +31,10 @@ from backend.websocket_proxy.base_adapter import (
 logger = logging.getLogger("upstox_stream")
 
 AUTH_ENDPOINT = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-# Upstox modes: ltpc (LTP), full (OHLCV + depth)
-_UPSTOX_MODE = {MODE_LTP: "ltpc", MODE_QUOTE: "full", MODE_DEPTH: "full"}
+# Always subscribe in "full" mode to get continuous updates.
+# Upstox ltpc mode only fires on price change (very infrequent).
+# Server-side routing filters LTP/QUOTE/DEPTH per client subscription.
+_UPSTOX_MODE = {MODE_LTP: "full", MODE_QUOTE: "full", MODE_DEPTH: "full"}
 
 
 class UpstoxAdapter(BaseBrokerAdapter):
@@ -82,10 +84,9 @@ class UpstoxAdapter(BaseBrokerAdapter):
             token = get_token_from_cache(sym, exch) if (sym and exch) else None
             if token:
                 keys.append(token)
-                # Track highest mode per key
-                current = self._key_mode.get(token, 0)
-                if mode > current:
-                    self._key_mode[token] = mode
+                # Always publish all topics (LTP+QUOTE+DEPTH) since we
+                # subscribe in "full" mode. Server handles per-client filtering.
+                self._key_mode[token] = MODE_DEPTH
 
         if not keys:
             return
