@@ -2,7 +2,6 @@ import hashlib
 import logging
 from typing import AsyncGenerator
 
-from cachetools import TTLCache
 from fastapi import Request, HTTPException, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,19 +11,48 @@ from backend.models.user import User
 from backend.models.auth import BrokerAuth, ApiKey
 from backend.models.broker_config import BrokerConfig
 from backend.security import decode_access_token, verify_api_key, decrypt_value
+from backend.utils.redis_client import (
+    cache_delete,
+    cache_delete_pattern,
+    cache_get_json,
+    cache_set_json,
+)
 
 logger = logging.getLogger(__name__)
 
-# -- Caches --
-_verified_api_key_cache: TTLCache = TTLCache(maxsize=64, ttl=900)  # 15 minutes
-_invalid_api_key_cache: TTLCache = TTLCache(maxsize=64, ttl=300)  # 5 minutes
-_auth_token_cache: TTLCache = TTLCache(maxsize=64, ttl=3600)  # 1 hour
+# -- Cache TTLs (seconds) --
+API_KEY_TTL = 900         # 15 min
+INVALID_KEY_TTL = 300     # 5 min
+BROKER_CTX_TTL = 3600     # 1 hour
+API_CTX_TTL = 3600        # 1 hour
 
 
-def invalidate_all_caches():
-    _verified_api_key_cache.clear()
-    _invalid_api_key_cache.clear()
-    _auth_token_cache.clear()
+def _key_api_valid(key_hash: str) -> str:
+    return f"api_key:valid:{key_hash}"
+
+
+def _key_api_invalid(key_hash: str) -> str:
+    return f"api_key:invalid:{key_hash}"
+
+
+def _key_broker_ctx(user_id: int) -> str:
+    return f"broker_ctx:{user_id}"
+
+
+def _key_api_ctx(user_id: int) -> str:
+    return f"api_ctx:{user_id}"
+
+
+async def invalidate_all_caches() -> None:
+    """Clear all API key / broker context caches. Called on API key rotation or logout."""
+    await cache_delete_pattern("api_key:*")
+    await cache_delete_pattern("broker_ctx:*")
+    await cache_delete_pattern("api_ctx:*")
+
+
+async def invalidate_user_cache(user_id: int) -> None:
+    """Clear cached broker context for a single user. Call on logout / re-auth."""
+    await cache_delete(_key_broker_ctx(user_id), _key_api_ctx(user_id))
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -70,6 +98,16 @@ async def get_broker_context(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> BrokerContext:
+    # Try Redis first — stores decrypted broker_name, auth_token, config
+    cached = await cache_get_json(_key_broker_ctx(user.id))
+    if cached:
+        return BrokerContext(
+            user=user,
+            auth_token=cached["auth_token"],
+            broker_name=cached["broker_name"],
+            broker_config=cached["broker_config"],
+        )
+
     broker_name = getattr(user, "_broker", None)
 
     # If JWT doesn't have broker claim (cookie domain mismatch after OAuth),
@@ -118,6 +156,12 @@ async def get_broker_context(
             "redirect_url": broker_cfg.redirect_url,
         }
 
+    await cache_set_json(
+        _key_broker_ctx(user.id),
+        {"broker_name": broker_name, "auth_token": auth_token, "broker_config": config},
+        BROKER_CTX_TTL,
+    )
+
     return BrokerContext(user=user, auth_token=auth_token, broker_name=broker_name, broker_config=config)
 
 
@@ -136,30 +180,39 @@ async def get_api_user(
     if not provided_key:
         raise HTTPException(status_code=401, detail="API key required")
 
-    cache_key = hashlib.sha256(provided_key.encode()).hexdigest()
+    key_hash = hashlib.sha256(provided_key.encode()).hexdigest()
 
-    # Fast reject
-    if cache_key in _invalid_api_key_cache:
+    # Fast reject from negative cache
+    if await cache_get_json(_key_api_invalid(key_hash)) is not None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # Check verified cache
-    if cache_key in _verified_api_key_cache:
-        user_id = _verified_api_key_cache[cache_key]
-    else:
+    # Positive cache: key_hash -> user_id
+    user_id = await cache_get_json(_key_api_valid(key_hash))
+
+    if user_id is None:
         # Expensive: verify against all stored keys
         result = await db.execute(select(ApiKey))
         api_keys = result.scalars().all()
 
-        user_id = None
         for ak in api_keys:
             if verify_api_key(provided_key, ak.api_key_hash):
                 user_id = ak.user_id
-                _verified_api_key_cache[cache_key] = user_id
+                await cache_set_json(_key_api_valid(key_hash), user_id, API_KEY_TTL)
                 break
 
         if user_id is None:
-            _invalid_api_key_cache[cache_key] = True
+            await cache_set_json(_key_api_invalid(key_hash), 1, INVALID_KEY_TTL)
             raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # Try full api-context cache (saves 2 more DB hits + 3 decrypts)
+    cached_ctx = await cache_get_json(_key_api_ctx(user_id))
+    if cached_ctx:
+        return (
+            user_id,
+            cached_ctx["auth_token"],
+            cached_ctx["broker_name"],
+            cached_ctx["broker_config"],
+        )
 
     # Get broker auth
     result = await db.execute(
@@ -190,5 +243,11 @@ async def get_api_user(
             "api_secret": decrypt_value(broker_cfg.api_secret),
             "redirect_url": broker_cfg.redirect_url,
         }
+
+    await cache_set_json(
+        _key_api_ctx(user_id),
+        {"auth_token": auth_token, "broker_name": broker_name, "broker_config": config},
+        API_CTX_TTL,
+    )
 
     return (user_id, auth_token, broker_name, config)

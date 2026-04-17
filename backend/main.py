@@ -15,6 +15,7 @@ from backend.database import engine, Base
 from backend.exceptions import OpenBullException, openbull_exception_handler
 from backend.utils.plugin_loader import load_all_plugins
 from backend.utils.httpx_client import close_httpx_client
+from backend.utils.redis_client import close_redis
 
 settings = get_settings()
 
@@ -25,8 +26,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("openbull")
 
-# Rate limiter
-limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
+# Rate limiter — Redis-backed so counters survive restarts and are shared across workers
+limiter = Limiter(key_func=get_remote_address, storage_uri=settings.redis_url)
 
 
 @asynccontextmanager
@@ -70,6 +71,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     close_httpx_client()
+    await close_redis()
     await engine.dispose()
     logger.info("OpenBull shut down")
 

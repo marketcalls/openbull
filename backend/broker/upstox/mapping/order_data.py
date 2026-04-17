@@ -22,41 +22,58 @@ _symbol_cache = None
 
 
 async def _load_symbol_cache():
-    """Load all symbol mappings into memory from the DB."""
-    global _symbol_cache, _token_to_symbol, _token_to_symbol_exchange, _symbol_exchange_to_token, _symbol_exchange_to_brsymbol, _brsymbol_exchange_to_symbol
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-    from backend.config import get_settings
+    """Hydrate in-memory symbol lookup dicts.
 
-    engine = create_async_engine(get_settings().database_url, echo=False)
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    try:
-        async with session_factory() as session:
-            result = await session.execute(
-                text("SELECT token, symbol, exchange, brsymbol FROM symtoken")
-            )
-            rows = result.fetchall()
+    Source of truth priority:
+      1. Redis (``openbull:symtoken:*``) — avoids re-reading 122k DB rows on restart
+      2. PostgreSQL (``symtoken`` table) — fallback when Redis is cold; rebuilds Redis
+    """
+    global _symbol_cache, _token_to_symbol, _token_to_symbol_exchange
+    global _symbol_exchange_to_token, _symbol_exchange_to_brsymbol, _brsymbol_exchange_to_symbol
 
-            _token_to_symbol = {}
-            _token_to_symbol_exchange = {}
-            _symbol_exchange_to_token = {}
-            _symbol_exchange_to_brsymbol = {}
-            _brsymbol_exchange_to_symbol = {}
+    from backend.utils import symtoken_cache
 
-            for token, symbol, exchange, brsymbol in rows:
-                _token_to_symbol[token] = symbol
-                _token_to_symbol_exchange[token] = (symbol, exchange)
-                _symbol_exchange_to_token[(symbol, exchange)] = token
-                _symbol_exchange_to_brsymbol[(symbol, exchange)] = brsymbol
-                _brsymbol_exchange_to_symbol[(brsymbol, exchange)] = symbol
-                # Numeric token reverse mapping (for Zerodha: "12345::::67890" -> "12345")
-                if "::::" in token:
-                    numeric_part = token.split("::::")[0]
-                    _token_to_symbol_exchange[numeric_part] = (symbol, exchange)
+    # Try Redis first
+    if await symtoken_cache.is_ready():
+        tok2sym, tok2symex, symex2tok, symex2brsym, brsymex2sym = (
+            await symtoken_cache.load_into_memory_dicts()
+        )
+        _token_to_symbol = tok2sym
+        _token_to_symbol_exchange = tok2symex
+        _symbol_exchange_to_token = symex2tok
+        _symbol_exchange_to_brsymbol = symex2brsym
+        _brsymbol_exchange_to_symbol = brsymex2sym
+        _symbol_cache = _token_to_symbol
+        logger.info("Symbol cache hydrated from Redis: %d entries", len(_token_to_symbol))
+        return
 
-            _symbol_cache = _token_to_symbol
-        logger.info("Symbol cache loaded with %d entries", len(_token_to_symbol))
-    finally:
-        await engine.dispose()
+    # Cold Redis: warm from DB, then hydrate from Redis for a single source of truth
+    logger.info("Redis symtoken cache is cold — warming from PostgreSQL")
+    rows_written = await symtoken_cache.warm_from_db()
+    if rows_written == 0:
+        # DB is empty too (fresh install, no master contract yet)
+        _token_to_symbol = {}
+        _token_to_symbol_exchange = {}
+        _symbol_exchange_to_token = {}
+        _symbol_exchange_to_brsymbol = {}
+        _brsymbol_exchange_to_symbol = {}
+        _symbol_cache = _token_to_symbol
+        logger.info("Symbol cache empty (no master contract downloaded yet)")
+        return
+
+    tok2sym, tok2symex, symex2tok, symex2brsym, brsymex2sym = (
+        await symtoken_cache.load_into_memory_dicts()
+    )
+    _token_to_symbol = tok2sym
+    _token_to_symbol_exchange = tok2symex
+    _symbol_exchange_to_token = symex2tok
+    _symbol_exchange_to_brsymbol = symex2brsym
+    _brsymbol_exchange_to_symbol = brsymex2sym
+    _symbol_cache = _token_to_symbol
+    logger.info(
+        "Symbol cache hydrated: %d entries (warmed Redis from DB)",
+        len(_token_to_symbol),
+    )
 
 
 def _get_symbol_from_cache(token: str) -> str | None:

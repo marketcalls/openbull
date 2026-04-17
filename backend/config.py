@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     zmq_host: str = "127.0.0.1"
     zmq_port: int = 5555
 
+    # Redis (cache backend)
+    redis_url: str = "redis://127.0.0.1:6379/0"
+
     # WebSocket Connection Pooling
     max_symbols_per_websocket: int = 1000
     max_websocket_connections: int = 3

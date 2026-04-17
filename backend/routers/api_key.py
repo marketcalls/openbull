@@ -87,7 +87,7 @@ async def generate_new_api_key(
 
     # Invalidate API key caches
     from backend.dependencies import invalidate_all_caches
-    invalidate_all_caches()
+    await invalidate_all_caches()
 
     return {
         "status": "success",

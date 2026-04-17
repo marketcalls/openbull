@@ -162,6 +162,10 @@ async def logout(response: Response, request: Request, db: AsyncSession = Depend
                     await db.delete(session)
                 await db.commit()
 
+                # Clear cached broker context for this user
+                from backend.dependencies import invalidate_user_cache
+                await invalidate_user_cache(int(user_id))
+
     response.delete_cookie("access_token", path="/")
     return AuthResponse(status="success", message="Logged out")
 
