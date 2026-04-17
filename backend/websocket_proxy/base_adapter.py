@@ -12,6 +12,8 @@ from abc import ABC, abstractmethod
 
 import zmq
 
+from backend.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 # Modes matching OpenAlgo convention
@@ -22,19 +24,16 @@ MODE_DEPTH = 3
 MODE_NAME = {MODE_LTP: "LTP", MODE_QUOTE: "QUOTE", MODE_DEPTH: "DEPTH"}
 
 
-def _find_free_port(start: int = 5556, attempts: int = 50) -> int:
-    """Find a TCP port that is free to bind."""
-    for offset in range(attempts):
-        port = start + offset
-        try:
-            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-                s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-                s.settimeout(1.0)
-                s.bind(("127.0.0.1", port))
-                return port
-        except OSError:
-            continue
-    raise RuntimeError(f"No free port found in range {start}-{start + attempts}")
+def _check_port_available(port: int) -> bool:
+    """Return True if the TCP port is free to bind on 127.0.0.1."""
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            s.settimeout(1.0)
+            s.bind(("127.0.0.1", port))
+            return True
+    except OSError:
+        return False
 
 
 class BaseBrokerAdapter(ABC):
@@ -56,12 +55,19 @@ class BaseBrokerAdapter(ABC):
         return self._zmq_port
 
     def setup_zmq(self) -> int:
-        """Create a ZMQ PUB socket, bind to a free port, return the port number."""
-        self._zmq_context = zmq.Context()
-        self._zmq_socket = self._zmq_context.socket(zmq.PUB)
+        """Create a ZMQ PUB socket, bind to the configured ZMQ_PORT, return the port number."""
+        settings = get_settings()
+        port = settings.zmq_port
 
         with self._port_lock:
-            port = _find_free_port(start=5556)
+            if not _check_port_available(port):
+                raise RuntimeError(
+                    f"Port {port} is busy. Free it before starting the WebSocket proxy "
+                    f"(set ZMQ_PORT in .env to use a different port)."
+                )
+
+            self._zmq_context = zmq.Context()
+            self._zmq_socket = self._zmq_context.socket(zmq.PUB)
             self._zmq_socket.bind(f"tcp://127.0.0.1:{port}")
             self._bound_ports.add(port)
 
