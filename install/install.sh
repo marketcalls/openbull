@@ -672,10 +672,26 @@ server {
     ssl_stapling on;
     ssl_stapling_verify on;
 
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
-    add_header X-Frame-Options SAMEORIGIN always;
-    add_header X-Content-Type-Options nosniff always;
-    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    # ------------------------------------------------------------------
+    # Security headers — targets securityheaders.com A grade
+    # (mirrors openalgo's 4 base headers; adds CSP / Permissions-Policy /
+    #  Referrer-Policy here because nginx serves the SPA's index.html
+    #  directly, so the FastAPI middleware in backend/main.py doesn't run
+    #  for those static responses.)
+    # ------------------------------------------------------------------
+
+    # From openalgo install.sh
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Strict-Transport-Security "max-age=63072000" always;
+
+    # Extra headers needed for static responses (nginx-served SPA)
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: ws:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'" always;
+
+    # Hide nginx version
     server_tokens off;
 
     gzip on;
@@ -708,11 +724,50 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
+
+        # Prevent duplicate security headers: FastAPI middleware
+        # (backend/main.py) also sets these. nginx's add_header above
+        # is the single source of truth.
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header X-XSS-Protection;
+        proxy_hide_header Referrer-Policy;
+        proxy_hide_header Permissions-Policy;
+        proxy_hide_header Content-Security-Policy;
     }
 
-    location /docs         { proxy_pass http://openbull_backend; include /etc/nginx/proxy_params; }
-    location /redoc        { proxy_pass http://openbull_backend; include /etc/nginx/proxy_params; }
-    location /openapi.json { proxy_pass http://openbull_backend; include /etc/nginx/proxy_params; }
+    location /docs {
+        proxy_pass http://openbull_backend;
+        include /etc/nginx/proxy_params;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header X-XSS-Protection;
+        proxy_hide_header Referrer-Policy;
+        proxy_hide_header Permissions-Policy;
+        proxy_hide_header Content-Security-Policy;
+    }
+
+    location /redoc {
+        proxy_pass http://openbull_backend;
+        include /etc/nginx/proxy_params;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header X-XSS-Protection;
+        proxy_hide_header Referrer-Policy;
+        proxy_hide_header Permissions-Policy;
+        proxy_hide_header Content-Security-Policy;
+    }
+
+    location /openapi.json {
+        proxy_pass http://openbull_backend;
+        include /etc/nginx/proxy_params;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header X-XSS-Protection;
+        proxy_hide_header Referrer-Policy;
+        proxy_hide_header Permissions-Policy;
+        proxy_hide_header Content-Security-Policy;
+    }
 
     # WebSocket proxy — openbull runs the ws server in-process on port 8765.
     # ZMQ pub/sub (127.0.0.1:5555) is internal between broker adapters and the
