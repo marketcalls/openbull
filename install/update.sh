@@ -1,5 +1,9 @@
 #!/bin/bash
-set -e
+# Note: `set -e` intentionally NOT used — harmless `[ ] && echo` patterns
+# and transient apt warnings would kill the script silently. Errors are
+# handled explicitly via check_status() below.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
 
 # ============================================================================
 # OpenBull - Update Script

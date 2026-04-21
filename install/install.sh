@@ -1,5 +1,14 @@
 #!/bin/bash
-set -e
+# Note: `set -e` intentionally NOT used — it caused silent exits on harmless
+# non-zero returns from `[ ... ] && echo ""` patterns and interactive apt
+# warnings. Critical failures are handled explicitly via check_status() and
+# direct exit 1 calls throughout.
+
+# Non-interactive apt so needrestart / ucf / cloud-init won't block on prompts
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+export APT_LISTCHANGES_FRONTEND=none
 
 # ============================================================================
 # OpenBull - Automated Installation Script
@@ -66,26 +75,37 @@ validate_domain() {
 }
 
 install_package() {
-    if ! dpkg -l "$1" &>/dev/null; then
-        apt-get install -y "$1"
-    else
+    # dpkg -l | grep ^ii is the correct "truly installed" check
+    if dpkg -l "$1" 2>/dev/null | grep -q "^ii"; then
         log_info "$1 already installed"
+    else
+        apt-get install -y "$1" || log_warn "Failed to install $1 (continuing)"
     fi
 }
 
 wait_for_dpkg_lock() {
     local max_wait=300
     local waited=0
-    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
-          fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
-          fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-        [ $waited -ge $max_wait ] && { log_error "Timeout waiting for apt lock"; exit 1; }
-        [ $waited -eq 0 ] && log_warn "Waiting for apt lock..."
+    # Use pgrep (part of procps — always installed) instead of fuser (psmisc).
+    while pgrep -x unattended-upgr >/dev/null 2>&1 \
+       || pgrep -x apt-get          >/dev/null 2>&1 \
+       || pgrep -x apt              >/dev/null 2>&1 \
+       || pgrep -x dpkg             >/dev/null 2>&1; do
+        if [ $waited -ge $max_wait ]; then
+            log_error "Timeout waiting for apt/dpkg lock"
+            exit 1
+        fi
+        if [ $waited -eq 0 ]; then
+            log_warn "Waiting for apt/dpkg lock to release..."
+        fi
         printf "."
         sleep 5
         waited=$((waited + 5))
     done
-    [ $waited -gt 0 ] && echo ""
+    if [ $waited -gt 0 ]; then
+        echo ""
+    fi
+    return 0
 }
 
 # ============================================================================
@@ -162,10 +182,10 @@ fi
 log_step "Step 2: Installing system packages"
 
 wait_for_dpkg_lock
-apt-get update -y
+apt-get update -y -o Acquire::Retries=3 || log_warn "apt-get update reported issues, continuing"
 
 for pkg in git curl wget build-essential python3 python3-dev python3-venv python3-pip \
-           libpq-dev libffi-dev libssl-dev openssl pkg-config; do
+           libpq-dev libffi-dev libssl-dev openssl pkg-config psmisc; do
     install_package "$pkg"
 done
 

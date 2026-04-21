@@ -1,5 +1,6 @@
 #!/bin/bash
-set -e
+# Note: `set -e` intentionally NOT used — harmless `[ ] && echo` patterns
+# would kill the script silently. check_status() handles real errors.
 
 # ============================================================================
 # OpenBull - Performance Tuning Script
