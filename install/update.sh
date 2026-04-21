@@ -110,23 +110,38 @@ CURRENT_DB_URL=$(grep -E '^DATABASE_URL\s*=' "$APP_ROOT/.env" | head -1 | sed 's
 log_step "Step 2: Pulling latest code from GitHub"
 
 cd "$APP_ROOT"
-git config --global --add safe.directory "$APP_ROOT" 2>/dev/null || true
 
-# Stash any local changes (backed up above)
-git stash push -u -m "update-$TIMESTAMP" 2>/dev/null || true
+# Git sees root accessing a www-data-owned repo → "dubious ownership".
+# Whitelist the path for both the invoking user and the www-data user
+# so git operations work from either context.
+git config --global --add safe.directory "$APP_ROOT" 2>/dev/null || true
+sudo -u www-data git config --global --add safe.directory "$APP_ROOT" 2>/dev/null || true
+
+# Stash local edits (.env/alembic.ini already backed up in Step 1).
+# The `-u` includes untracked files. The named stash makes it easy to
+# recover with `git stash list | grep update-$TIMESTAMP`.
+STASHED=false
+if ! git diff --quiet HEAD 2>/dev/null || [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    log_info "Stashing local changes as 'update-$TIMESTAMP'"
+    git stash push -u -m "update-$TIMESTAMP" >/dev/null 2>&1 && STASHED=true
+fi
 
 git fetch origin
 if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    git checkout main
+    git checkout main 2>/dev/null || true
     git pull origin main
 elif git rev-parse --verify origin/master >/dev/null 2>&1; then
-    git checkout master
+    git checkout master 2>/dev/null || true
     git pull origin master
 else
     log_error "Could not find main or master branch on origin"
     exit 1
 fi
 check_status "Code updated"
+
+if [ "$STASHED" = true ]; then
+    log_info "Local changes saved in stash. Recover with: git stash list | grep update-$TIMESTAMP"
+fi
 
 # Restore .env (git pull shouldn't touch it, but be safe)
 cp "$BACKUP_DIR/.env" "$APP_ROOT/.env"
@@ -165,32 +180,58 @@ fi
 log_step "Step 4: Running database migrations"
 
 cd "$APP_ROOT"
-# Use `uv run` so alembic/env.py can import `backend.*` (project root must
-# be on sys.path). Fall back to PYTHONPATH if uv isn't available.
-if command -v uv &>/dev/null; then
-    ALEMBIC_CMD=(uv run alembic)
-elif [ -x "$APP_ROOT/.venv/bin/alembic" ]; then
-    export PYTHONPATH="$APP_ROOT"
+
+# `uv sync` installs deps but not openbull as a package (no [build-system]
+# in pyproject), so PYTHONPATH is required for alembic env.py to find
+# `backend.models`.
+export PYTHONPATH="$APP_ROOT"
+if [ -x "$APP_ROOT/.venv/bin/alembic" ]; then
     ALEMBIC_CMD=("$APP_ROOT/.venv/bin/alembic")
 else
     ALEMBIC_CMD=()
 fi
 
-if [ ${#ALEMBIC_CMD[@]} -gt 0 ]; then
-    log_info "Current migration:"
-    "${ALEMBIC_CMD[@]}" current || true
-    echo ""
-
-    log_info "Applying upgrades..."
-    "${ALEMBIC_CMD[@]}" upgrade head
-    check_status "Migrations applied"
-
-    echo ""
-    log_info "New migration:"
-    "${ALEMBIC_CMD[@]}" current || true
-else
+if [ ${#ALEMBIC_CMD[@]} -eq 0 ]; then
     log_warn "Alembic not available, skipping migrations"
-    log_warn "Tables will be auto-created at app startup"
+else
+    # Pull DB creds from .env for psql probe (matches what the app uses).
+    DB_URL=$(grep -E '^DATABASE_URL\s*=' "$APP_ROOT/.env" | head -1 | sed 's/^[^=]*=[ \t]*"\?//; s/"\?[ \t]*$//')
+    # Convert asyncpg URL to psycopg for psql. Regex: driver://user:pass@host:port/db
+    PG_CREDS=$(echo "$DB_URL" | sed -E 's|^postgresql(\+[a-z]+)?://||')
+    PG_USER=$(echo "$PG_CREDS" | cut -d: -f1)
+    PG_PASS=$(echo "$PG_CREDS" | sed -E 's|^[^:]+:([^@]+)@.*|\1|')
+    PG_HOSTPORT=$(echo "$PG_CREDS" | sed -E 's|^[^@]+@||; s|/.*||')
+    PG_HOST=$(echo "$PG_HOSTPORT" | cut -d: -f1)
+    PG_PORT=$(echo "$PG_HOSTPORT" | cut -d: -f2)
+    PG_DB=$(echo "$PG_CREDS" | sed 's|.*/||')
+
+    HAS_ALEMBIC=$(PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -tAc \
+        "SELECT 1 FROM information_schema.tables WHERE table_name='alembic_version' AND table_schema='public'" 2>/dev/null | tr -d ' ')
+    HAS_TABLES=$(PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -tAc \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'" 2>/dev/null | tr -d ' ')
+
+    log_info "Migration state: alembic_version=${HAS_ALEMBIC:-0}, tables=${HAS_TABLES:-0}"
+
+    if [ "${HAS_ALEMBIC:-0}" = "1" ]; then
+        log_info "Current revision:"
+        "${ALEMBIC_CMD[@]}" current || true
+        echo ""
+        log_info "Applying upgrades..."
+        "${ALEMBIC_CMD[@]}" upgrade head
+        check_status "Migrations applied"
+        echo ""
+        log_info "New revision:"
+        "${ALEMBIC_CMD[@]}" current || true
+    elif [ "${HAS_TABLES:-0}" -gt "0" ]; then
+        log_warn "DB has tables but no alembic_version — stamping as up-to-date"
+        log_warn "(This is normal on first update after an install that pre-dates alembic tracking)"
+        "${ALEMBIC_CMD[@]}" stamp head
+        check_status "Database stamped at head"
+    else
+        log_info "Fresh database — running full migration"
+        "${ALEMBIC_CMD[@]}" upgrade head
+        check_status "Migrations applied"
+    fi
 fi
 
 # ============================================================================

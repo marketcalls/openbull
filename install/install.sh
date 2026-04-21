@@ -459,17 +459,39 @@ log_info "Python environment ready at $APP_ROOT/.venv"
 log_step "Step 8: Running database migrations"
 
 cd "$APP_ROOT"
-# alembic/env.py does `from backend.models import Base`, so the project
-# root must be on sys.path. `uv run` handles this by entering the project
-# environment. Fall back to PYTHONPATH if uv is not callable as root.
-if command -v uv &>/dev/null; then
-    uv run alembic upgrade head || \
-        log_warn "Alembic reported issues (tables may be auto-created at app startup)"
-elif [ -x "$APP_ROOT/.venv/bin/alembic" ]; then
-    PYTHONPATH="$APP_ROOT" "$APP_ROOT/.venv/bin/alembic" upgrade head || \
-        log_warn "Alembic reported issues (tables may be auto-created at app startup)"
+
+# alembic/env.py does `from backend.models import Base`. `uv sync` only
+# installs deps (pyproject has no [build-system]), so `backend` is not
+# on sys.path. Export PYTHONPATH and call the venv's alembic directly.
+export PYTHONPATH="$APP_ROOT"
+if [ -x "$APP_ROOT/.venv/bin/alembic" ]; then
+    ALEMBIC="$APP_ROOT/.venv/bin/alembic"
 else
+    ALEMBIC=""
+fi
+
+if [ -z "$ALEMBIC" ]; then
     log_warn "Alembic not installed; tables will be auto-created at app startup"
+else
+    # Three scenarios to handle cleanly:
+    #   (1) Fresh DB, nothing there         → `alembic upgrade head`
+    #   (2) Tables exist from create_all    → `alembic stamp head` (sync state)
+    #   (3) DB already alembic-managed      → `alembic upgrade head` (no-op or apply new)
+    HAS_ALEMBIC=$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc \
+        "SELECT 1 FROM information_schema.tables WHERE table_name='alembic_version' AND table_schema='public'" 2>/dev/null | tr -d ' ')
+    HAS_TABLES=$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'" 2>/dev/null | tr -d ' ')
+
+    if [ "${HAS_ALEMBIC:-0}" = "1" ]; then
+        log_info "Database is alembic-managed — running upgrade head"
+        $ALEMBIC upgrade head || log_warn "Alembic upgrade failed (see above)"
+    elif [ "${HAS_TABLES:-0}" -gt "0" ]; then
+        log_info "Database has tables (from Base.metadata.create_all) — stamping as up-to-date"
+        $ALEMBIC stamp head || log_warn "Alembic stamp failed (see above)"
+    else
+        log_info "Fresh database — running full migration"
+        $ALEMBIC upgrade head || log_warn "Alembic upgrade failed; app will create tables at startup"
+    fi
 fi
 
 # ============================================================================
