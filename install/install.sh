@@ -800,7 +800,10 @@ server {
     # Extra headers needed for static responses (nginx-served SPA)
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()" always;
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: ws:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'" always;
+    # Content Security Policy. Cloudflare Web Analytics (auto-enabled when
+    # proxied) injects static.cloudflareinsights.com/beacon.min.js — allow it
+    # in script-src + connect-src so the injected beacon doesn't trip CSP.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: ws: https://cloudflareinsights.com https://static.cloudflareinsights.com; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'" always;
 
     # Hide nginx version
     server_tokens off;
