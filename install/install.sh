@@ -459,8 +459,14 @@ log_info "Python environment ready at $APP_ROOT/.venv"
 log_step "Step 8: Running database migrations"
 
 cd "$APP_ROOT"
-if [ -x "$APP_ROOT/.venv/bin/alembic" ]; then
-    "$APP_ROOT/.venv/bin/alembic" upgrade head || \
+# alembic/env.py does `from backend.models import Base`, so the project
+# root must be on sys.path. `uv run` handles this by entering the project
+# environment. Fall back to PYTHONPATH if uv is not callable as root.
+if command -v uv &>/dev/null; then
+    uv run alembic upgrade head || \
+        log_warn "Alembic reported issues (tables may be auto-created at app startup)"
+elif [ -x "$APP_ROOT/.venv/bin/alembic" ]; then
+    PYTHONPATH="$APP_ROOT" "$APP_ROOT/.venv/bin/alembic" upgrade head || \
         log_warn "Alembic reported issues (tables may be auto-created at app startup)"
 else
     log_warn "Alembic not installed; tables will be auto-created at app startup"

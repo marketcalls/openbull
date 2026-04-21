@@ -165,18 +165,29 @@ fi
 log_step "Step 4: Running database migrations"
 
 cd "$APP_ROOT"
-if [ -x "$APP_ROOT/.venv/bin/alembic" ]; then
+# Use `uv run` so alembic/env.py can import `backend.*` (project root must
+# be on sys.path). Fall back to PYTHONPATH if uv isn't available.
+if command -v uv &>/dev/null; then
+    ALEMBIC_CMD=(uv run alembic)
+elif [ -x "$APP_ROOT/.venv/bin/alembic" ]; then
+    export PYTHONPATH="$APP_ROOT"
+    ALEMBIC_CMD=("$APP_ROOT/.venv/bin/alembic")
+else
+    ALEMBIC_CMD=()
+fi
+
+if [ ${#ALEMBIC_CMD[@]} -gt 0 ]; then
     log_info "Current migration:"
-    "$APP_ROOT/.venv/bin/alembic" current || true
+    "${ALEMBIC_CMD[@]}" current || true
     echo ""
 
     log_info "Applying upgrades..."
-    "$APP_ROOT/.venv/bin/alembic" upgrade head
+    "${ALEMBIC_CMD[@]}" upgrade head
     check_status "Migrations applied"
 
     echo ""
     log_info "New migration:"
-    "$APP_ROOT/.venv/bin/alembic" current || true
+    "${ALEMBIC_CMD[@]}" current || true
 else
     log_warn "Alembic not available, skipping migrations"
     log_warn "Tables will be auto-created at app startup"
