@@ -827,8 +827,20 @@ server {
     root $FRONTEND_DIR/dist;
     index index.html;
 
-    # FastAPI backend routes
-    location /api {
+    # ------------------------------------------------------------------
+    # Backend routes (FastAPI). openbull's top-level router prefixes are:
+    #   /auth      (auth.py)
+    #   /web       (dashboard, orderbook, tradebook, positions, holdings,
+    #               api_key, /web/broker, /web/symbols)
+    #   /api       (/api/v1/* trading API)
+    #   /upstox    (/upstox/callback OAuth)
+    #   /zerodha   (/zerodha/callback OAuth)
+    #   /docs, /redoc, /openapi.json  (FastAPI Swagger)
+    #
+    # If a new top-level router prefix is added in backend/, append it
+    # to the regex below or /auth/web/api traffic will 404 to the SPA.
+    # ------------------------------------------------------------------
+    location ~ ^/(auth|web|api|upstox|zerodha|docs|redoc|openapi\.json)(/|\$) {
         proxy_pass http://openbull_backend;
         proxy_http_version 1.1;
         proxy_read_timeout 300s;
@@ -844,42 +856,8 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
 
-        # Prevent duplicate security headers: FastAPI middleware
-        # (backend/main.py) also sets these. nginx's add_header above
-        # is the single source of truth.
-        proxy_hide_header X-Frame-Options;
-        proxy_hide_header X-Content-Type-Options;
-        proxy_hide_header X-XSS-Protection;
-        proxy_hide_header Referrer-Policy;
-        proxy_hide_header Permissions-Policy;
-        proxy_hide_header Content-Security-Policy;
-    }
-
-    location /docs {
-        proxy_pass http://openbull_backend;
-        include /etc/nginx/proxy_params;
-        proxy_hide_header X-Frame-Options;
-        proxy_hide_header X-Content-Type-Options;
-        proxy_hide_header X-XSS-Protection;
-        proxy_hide_header Referrer-Policy;
-        proxy_hide_header Permissions-Policy;
-        proxy_hide_header Content-Security-Policy;
-    }
-
-    location /redoc {
-        proxy_pass http://openbull_backend;
-        include /etc/nginx/proxy_params;
-        proxy_hide_header X-Frame-Options;
-        proxy_hide_header X-Content-Type-Options;
-        proxy_hide_header X-XSS-Protection;
-        proxy_hide_header Referrer-Policy;
-        proxy_hide_header Permissions-Policy;
-        proxy_hide_header Content-Security-Policy;
-    }
-
-    location /openapi.json {
-        proxy_pass http://openbull_backend;
-        include /etc/nginx/proxy_params;
+        # Nginx owns these security headers; strip backend copies to
+        # avoid duplicates.
         proxy_hide_header X-Frame-Options;
         proxy_hide_header X-Content-Type-Options;
         proxy_hide_header X-XSS-Protection;
