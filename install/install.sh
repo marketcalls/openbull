@@ -780,8 +780,13 @@ server {
     ssl_session_timeout 10m;
     ssl_session_cache shared:SSL:10m;
     ssl_session_tickets off;
-    ssl_stapling on;
-    ssl_stapling_verify on;
+    # OCSP stapling disabled: Let's Encrypt's default cert chain does not
+    # embed an OCSP responder URL, so nginx prints a warning on every
+    # reload. Stapling adds little value behind Cloudflare anyway (CF
+    # serves its own cert to visitors). Turn on if you switch to an
+    # ECDSA cert from a CA that does embed an OCSP URL.
+    ssl_stapling off;
+    ssl_stapling_verify off;
 
     # ------------------------------------------------------------------
     # Security headers — targets securityheaders.com A grade
