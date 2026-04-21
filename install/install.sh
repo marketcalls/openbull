@@ -163,6 +163,39 @@ log_info "Install path: $APP_ROOT"
 echo ""
 
 # ============================================================================
+# Step 0: Swap (critical on <4GB boxes — npm run build can spike to ~1.5GB)
+# ============================================================================
+
+log_step "Step 0: Checking swap"
+
+TOTAL_RAM_MB=$(($(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024))
+SWAP_TOTAL_MB=$(free -m | awk '/Swap:/ {print $2}')
+log_info "RAM: ${TOTAL_RAM_MB}MB  Swap: ${SWAP_TOTAL_MB}MB"
+
+if [ $TOTAL_RAM_MB -lt 6000 ] && [ $SWAP_TOTAL_MB -lt 3000 ]; then
+    log_info "Adding 3GB swap file to survive npm build memory spikes..."
+    if [ ! -f /swapfile ]; then
+        if fallocate -l 3G /swapfile 2>/dev/null; then
+            :
+        else
+            dd if=/dev/zero of=/swapfile bs=1M count=3072 status=progress
+        fi
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
+        sysctl -w vm.swappiness=10 >/dev/null
+        grep -q "^vm.swappiness=" /etc/sysctl.conf || echo "vm.swappiness=10" >> /etc/sysctl.conf
+        log_info "3GB swap enabled"
+    else
+        log_info "/swapfile exists, enabling it"
+        swapon /swapfile 2>/dev/null || true
+    fi
+else
+    log_info "Swap sufficient, skipping"
+fi
+
+# ============================================================================
 # Step 1: Timezone (auto-set to IST for Indian markets)
 # ============================================================================
 
@@ -426,6 +459,8 @@ fi
 log_step "Step 9: Building React frontend"
 
 cd "$FRONTEND_DIR"
+# Cap Node heap to avoid OOM kills on small (4GB) boxes; swap covers the rest.
+export NODE_OPTIONS="--max-old-space-size=2048"
 npm install --legacy-peer-deps
 npm run build
 log_info "Frontend built to $FRONTEND_DIR/dist"
@@ -464,11 +499,15 @@ log_info "Permissions set, logrotate configured"
 
 log_step "Step 11: Creating systemd service"
 
+# IMPORTANT: force --workers 1.
+# The WebSocket proxy (ZMQ PUB/SUB consumer on port 8765) is started in-process
+# by FastAPI's lifespan handler (backend/main.py). If uvicorn runs multiple
+# workers, every worker tries to bind 8765 and all but one crash on startup.
+# Scale horizontally with a reverse proxy / more VMs, not with -w.
+WORKERS=1
 CPU_CORES=$(nproc --all 2>/dev/null || echo 2)
-WORKERS=$((CPU_CORES))
-[ $WORKERS -gt 4 ] && WORKERS=4
-[ $WORKERS -lt 1 ] && WORKERS=1
-log_info "Uvicorn workers: $WORKERS (on $CPU_CORES CPU cores)"
+log_info "Uvicorn workers: $WORKERS (single worker — ws_proxy binds 8765 in-process)"
+log_info "CPU cores detected: $CPU_CORES"
 
 systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
@@ -675,33 +714,51 @@ server {
     location /redoc        { proxy_pass http://openbull_backend; include /etc/nginx/proxy_params; }
     location /openapi.json { proxy_pass http://openbull_backend; include /etc/nginx/proxy_params; }
 
-    # WebSocket proxy (backend runs on 8765)
+    # WebSocket proxy — openbull runs the ws server in-process on port 8765.
+    # ZMQ pub/sub (127.0.0.1:5555) is internal between broker adapters and the
+    # ws_proxy and is NOT exposed via nginx (ZMQ is not HTTP).
     location = /ws {
         proxy_pass http://127.0.0.1:8765;
         proxy_http_version 1.1;
+
+        # 24h idle timeout so long-lived market data streams stay open
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
+
+        # Real-time streaming — no buffering
         proxy_buffering off;
+        proxy_cache off;
+
+        # WebSocket upgrade
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
+
+        # Forward client context
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
     }
 
     location /ws/ {
         proxy_pass http://127.0.0.1:8765/;
         proxy_http_version 1.1;
+
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
+
         proxy_buffering off;
+        proxy_cache off;
+
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
+
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
     }
 
     # SPA fallback for React Router
