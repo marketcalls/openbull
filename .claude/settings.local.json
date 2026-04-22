@@ -21,7 +21,11 @@
       "Bash(netstat -ano)",
       "Bash(taskkill //F //PID 45792)",
       "Bash(taskkill //F //PID 62824)",
-      "Bash(taskkill //F //PID 63508)"
+      "Bash(taskkill //F //PID 63508)",
+      "Read(//tmp/**)",
+      "Bash(echo \"Started PID $!\")",
+      "Bash(kill %1)",
+      "Bash(git *)"
     ]
   }
 }
