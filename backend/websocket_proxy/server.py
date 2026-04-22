@@ -229,6 +229,18 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
                             logger.info("Adapter %s created and connected (ZMQ port %d)", broker_name, zmq_port)
                         except Exception as e:
                             logger.exception("Failed to create adapter: %s", e)
+                            # Release any resources the partial setup acquired
+                            # (ZMQ PUB socket/port + broker WS), otherwise the
+                            # next auth attempt fails with "Port is busy".
+                            if _adapter is not None:
+                                try:
+                                    _adapter.disconnect()
+                                except Exception:
+                                    pass
+                                try:
+                                    _adapter.cleanup_zmq()
+                                except Exception:
+                                    pass
                             _adapter = None
                             await _send_json(ws, {"type": "auth", "status": "error", "message": "Broker connection failed"})
                             continue

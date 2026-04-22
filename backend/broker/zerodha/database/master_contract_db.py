@@ -21,11 +21,18 @@ TMP_DIR = Path(__file__).resolve().parents[4] / "tmp"
 TMP_DIR.mkdir(exist_ok=True)
 
 
-def _create_async_session():
-    """Create a fresh async engine+session for use in background threads."""
+def _build_isolated_engine_and_session():
+    """Create a fresh engine + sessionmaker for use under asyncio.run().
+
+    The download path runs in a background thread and spins up a temporary
+    event loop via asyncio.run(); asyncpg connections can't cross loops, so
+    the shared app engine can't be reused here. Caller MUST dispose the
+    engine after use to release pooled connections.
+    """
     from backend.config import get_settings
     engine = create_async_engine(get_settings().database_url, echo=False)
-    return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    return engine, factory
 
 
 def _download_csv(auth_token: str, output_path: str) -> pd.DataFrame:
@@ -265,29 +272,32 @@ def master_contract_download(auth_token: str | None = None) -> dict:
         _cleanup_temp(output_path)
 
         async def _db_ops():
-            session_factory = _create_async_session()
-            async with session_factory() as session:
-                async with session.begin():
-                    logger.info("Clearing symtoken table")
-                    await session.execute(text("DELETE FROM symtoken"))
-                    data_dict = token_df.to_dict(orient="records")
-                    # Replace NaN with None for asyncpg compatibility
-                    import math
-                    for row in data_dict:
-                        for k, v in row.items():
-                            if isinstance(v, float) and math.isnan(v):
-                                row[k] = None
-                    logger.info("Performing bulk insert of %d records", len(data_dict))
-                    await session.execute(
-                        text(
-                            "INSERT INTO symtoken (symbol, brsymbol, name, exchange, brexchange, "
-                            "token, expiry, strike, lotsize, instrumenttype, tick_size) "
-                            "VALUES (:symbol, :brsymbol, :name, :exchange, :brexchange, "
-                            ":token, :expiry, :strike, :lotsize, :instrumenttype, :tick_size)"
-                        ),
-                        data_dict,
-                    )
-            logger.info("Bulk insert completed with %d records", len(data_dict))
+            engine, session_factory = _build_isolated_engine_and_session()
+            try:
+                async with session_factory() as session:
+                    async with session.begin():
+                        logger.info("Clearing symtoken table")
+                        await session.execute(text("DELETE FROM symtoken"))
+                        data_dict = token_df.to_dict(orient="records")
+                        # Replace NaN with None for asyncpg compatibility
+                        import math
+                        for row in data_dict:
+                            for k, v in row.items():
+                                if isinstance(v, float) and math.isnan(v):
+                                    row[k] = None
+                        logger.info("Performing bulk insert of %d records", len(data_dict))
+                        await session.execute(
+                            text(
+                                "INSERT INTO symtoken (symbol, brsymbol, name, exchange, brexchange, "
+                                "token, expiry, strike, lotsize, instrumenttype, tick_size) "
+                                "VALUES (:symbol, :brsymbol, :name, :exchange, :brexchange, "
+                                ":token, :expiry, :strike, :lotsize, :instrumenttype, :tick_size)"
+                            ),
+                            data_dict,
+                        )
+                logger.info("Bulk insert completed with %d records", len(data_dict))
+            finally:
+                await engine.dispose()
 
         asyncio.run(_db_ops())
 
@@ -347,8 +357,8 @@ async def search_symbols(symbol: str, exchange: str) -> list[dict]:
         "LIMIT 50"
     )
 
-    session_factory = _create_async_session()
-    async with session_factory() as session:
+    from backend.database import async_session
+    async with async_session() as session:
         result = await session.execute(text(sql), params)
         return [
             {

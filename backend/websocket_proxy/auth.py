@@ -9,9 +9,8 @@ import hashlib
 import logging
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from backend.config import get_settings
+from backend.database import async_session
 from backend.models.auth import ApiKey, BrokerAuth
 from backend.models.broker_config import BrokerConfig
 from backend.security import verify_api_key, decrypt_value
@@ -23,19 +22,6 @@ logger = logging.getLogger(__name__)
 API_KEY_TTL = 900       # 15 min
 INVALID_KEY_TTL = 300   # 5 min
 API_CTX_TTL = 3600      # 1 hour
-
-# Singleton engine — created once, reused across all verify calls
-_engine = None
-_session_factory = None
-
-
-def _get_session_factory():
-    global _engine, _session_factory
-    if _session_factory is None:
-        settings = get_settings()
-        _engine = create_async_engine(settings.database_url, echo=False)
-        _session_factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
-    return _session_factory
 
 
 def _key_api_valid(key_hash: str) -> str:
@@ -62,12 +48,10 @@ async def verify_api_key_standalone(
     if await cache_get_json(_key_api_invalid(key_hash)) is not None:
         raise ValueError("Invalid API key")
 
-    session_factory = _get_session_factory()
-
     # Resolve user_id from Redis or DB
     user_id = await cache_get_json(_key_api_valid(key_hash))
 
-    async with session_factory() as db:
+    async with async_session() as db:
         if user_id is None:
             result = await db.execute(select(ApiKey))
             api_keys = result.scalars().all()
