@@ -1,4 +1,3 @@
-import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,18 +12,18 @@ from backend.config import get_settings
 from backend.database import engine, Base
 from backend.exceptions import OpenBullException, openbull_exception_handler
 from backend.limiter import limiter
+from backend.middleware import RequestLoggingMiddleware
+from backend.utils.logging import get_logger, setup_logging
 from backend.utils.plugin_loader import load_all_plugins
 from backend.utils.httpx_client import close_httpx_client
 from backend.utils.redis_client import close_redis
 
 settings = get_settings()
 
-# Logging
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper(), logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-logger = logging.getLogger("openbull")
+# Centralized logging — installs console + rotating file handlers, sensitive-
+# data redaction, request-id stamping, and a DB sink for WARNING+ records.
+setup_logging(settings)
+logger = get_logger("openbull")
 
 
 @asynccontextmanager
@@ -71,6 +70,10 @@ async def lifespan(app: FastAPI):
     await close_redis()
     await engine.dispose()
     logger.info("OpenBull shut down")
+    # Flush DB error sink before the process exits so in-flight queued
+    # WARNING/ERROR records have a chance to persist.
+    import logging as _std_logging
+    _std_logging.shutdown()
 
 
 app = FastAPI(
@@ -115,14 +118,22 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 
+# Request-id + access log. Added last so it is the outermost wrapper —
+# the request_id contextvar is set before any other middleware runs,
+# and the latency line covers the full request lifecycle.
+app.add_middleware(RequestLoggingMiddleware)
+
+
 # Register routers
 from backend.routers.auth import router as auth_router
 from backend.routers.broker_config import router as broker_config_router
 from backend.routers.broker_oauth import router as broker_oauth_router
+from backend.routers.error_logs import router as error_logs_router
 
 app.include_router(auth_router)
 app.include_router(broker_config_router)
 app.include_router(broker_oauth_router)
+app.include_router(error_logs_router)
 
 # Phase 3: Symbol search and master contract download
 from backend.routers.symbols import router as symbols_router

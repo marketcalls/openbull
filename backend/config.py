@@ -24,6 +24,17 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+    log_to_file: bool = True
+    log_dir: str = "logs"
+    log_colors: bool = True
+    # File rotation. Total on-disk footprint per log file is bounded by
+    # (backup_count + 1) * max_mb. Defaults give a 100 MB hard cap per file
+    # (openbull.log and openbull-error.log each), 200 MB total on disk.
+    log_file_max_mb: int = 10
+    log_file_backup_count: int = 9
+    # DB-backed error sink. Worker trims the `error_logs` table down to this
+    # many rows after every batch of inserts, bounding table growth.
+    error_log_db_max_rows: int = 50000
 
     # Rate limits
     login_rate_limit_min: str = "5 per minute"

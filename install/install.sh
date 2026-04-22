@@ -401,7 +401,19 @@ CORS_ORIGINS = "https://$DOMAIN"
 VALID_BROKERS = "upstox,zerodha"
 
 # ---- Logging ----
+# App-level rotating files land under LOG_DIR alongside systemd's
+# backend.log / backend.error.log. LOG_COLORS=false because systemd
+# has no TTY — ANSI colour codes would just be noise in the file.
+# Per-file cap = (LOG_FILE_BACKUP_COUNT + 1) * LOG_FILE_MAX_MB, so
+# defaults give a 100 MB hard cap for each of openbull.log and
+# openbull-error.log (200 MB total).
 LOG_LEVEL = "INFO"
+LOG_TO_FILE = "true"
+LOG_DIR = "$LOG_DIR"
+LOG_FILE_MAX_MB = 10
+LOG_FILE_BACKUP_COUNT = 9
+LOG_COLORS = "false"
+ERROR_LOG_DB_MAX_ROWS = 50000
 
 # ---- Rate Limits ----
 LOGIN_RATE_LIMIT_MIN = "5 per minute"
@@ -521,9 +533,13 @@ chmod -R 755 "$APP_ROOT"
 chmod 640 "$APP_ROOT/.env"
 chown www-data:www-data "$APP_ROOT/.env"
 
-# Logrotate for systemd log files
+# Logrotate ONLY for the systemd-captured stdout/stderr files.
+# The app's own openbull.log / openbull-error.log are managed by
+# Python's RotatingFileHandler (size-based, in-process). If logrotate
+# also rotated those with copytruncate, it would race the handler's
+# internal byte counter and occasionally produce truncated files.
 cat > /etc/logrotate.d/openbull <<LREOF
-$LOG_DIR/*.log {
+$LOG_DIR/backend.log $LOG_DIR/backend.error.log {
     size 100M
     rotate 5
     compress
