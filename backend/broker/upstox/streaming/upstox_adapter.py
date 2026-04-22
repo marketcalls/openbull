@@ -214,22 +214,37 @@ class UpstoxAdapter(BaseBrokerAdapter):
         full_feed = feed_data.get("fullFeed", feed_data.get("ff", {}))
         market_ff = full_feed.get("marketFF", {}) if isinstance(full_feed, dict) else {}
 
-        # LTPC can be at top-level (ltpc mode) or inside marketFF (full mode)
-        ltpc = feed_data.get("ltpc") or market_ff.get("ltpc", {})
-        ltp = ltpc.get("ltp", 0)
+        # LTPC can be at top-level (ltpc mode) or inside marketFF (full mode).
+        # For IndexFullFeed it lives under fullFeed.indexFF.ltpc.
+        index_ff = full_feed.get("indexFF", {}) if isinstance(full_feed, dict) else {}
+        ltpc = feed_data.get("ltpc") or market_ff.get("ltpc") or index_ff.get("ltpc") or {}
+        try:
+            ltp = float(ltpc.get("ltp", 0) or 0)
+        except (TypeError, ValueError):
+            ltp = 0.0
+        try:
+            cp = float(ltpc.get("cp", 0) or 0)
+        except (TypeError, ValueError):
+            cp = 0.0
         ltt = ltpc.get("ltt")
-        cp = ltpc.get("cp", 0)
+        ltq = ltpc.get("ltq")
+        change = round(ltp - cp, 4) if (ltp and cp) else 0.0
+        change_percent = round((ltp - cp) / cp * 100, 4) if cp else 0.0
 
-        # Always publish LTP
+        # Always publish LTP. Openalgo-compatible fields (ltq, cp) are included
+        # alongside the computed change fields — Upstox ltpc carries cp (prev
+        # close) but not a pre-computed change, so we derive it here.
         ltp_data = {
             "symbol": symbol, "exchange": exchange, "mode": "ltp",
-            "ltp": ltp, "ltt": ltt, "change": cp,
+            "ltp": ltp, "ltt": ltt, "ltq": ltq, "cp": cp,
+            "change": change, "change_percent": change_percent,
         }
         self.publish(f"{exchange}_{symbol}_LTP", ltp_data)
 
-        if market_ff and highest_mode >= MODE_QUOTE:
-            # Extract OHLCV from marketOHLC
-            ohlc_list = market_ff.get("marketOHLC", {}).get("ohlc", [])
+        if (market_ff or index_ff) and highest_mode >= MODE_QUOTE:
+            # Extract OHLCV from marketOHLC (marketFF) or indexFF.marketOHLC
+            ohlc_container = market_ff.get("marketOHLC") or index_ff.get("marketOHLC") or {}
+            ohlc_list = ohlc_container.get("ohlc", []) if isinstance(ohlc_container, dict) else []
             day_ohlc = {}
             for ohlc in ohlc_list:
                 if ohlc.get("interval") == "1d":
@@ -243,7 +258,8 @@ class UpstoxAdapter(BaseBrokerAdapter):
 
             quote_data = {
                 "symbol": symbol, "exchange": exchange, "mode": "quote",
-                "ltp": ltp, "ltt": ltt, "change": cp,
+                "ltp": ltp, "ltt": ltt, "ltq": ltq, "cp": cp,
+                "change": change, "change_percent": change_percent,
                 "open": day_ohlc.get("open", 0),
                 "high": day_ohlc.get("high", 0),
                 "low": day_ohlc.get("low", 0),
@@ -260,16 +276,20 @@ class UpstoxAdapter(BaseBrokerAdapter):
             bid_ask = market_ff.get("marketLevel", {}).get("bidAskQuote", [])
             bids = []
             asks = []
+            # Upstox v3 Quote proto carries only bidQ/bidP/askQ/askP — there is
+            # no per-level order count. "orders" is therefore always 0 for
+            # Upstox. Zerodha's binary feed does carry orders (see
+            # zerodha_adapter._parse_packet).
             for level in bid_ask[:5]:
                 bids.append({
-                    "price": level.get("bidP", level.get("bp", 0)),
-                    "quantity": level.get("bidQ", level.get("bq", 0)),
-                    "orders": level.get("bidO", level.get("bno", 0)),
+                    "price": level.get("bidP", 0),
+                    "quantity": level.get("bidQ", 0),
+                    "orders": 0,
                 })
                 asks.append({
-                    "price": level.get("askP", level.get("ap", 0)),
-                    "quantity": level.get("askQ", level.get("aq", 0)),
-                    "orders": level.get("askO", level.get("ano", 0)),
+                    "price": level.get("askP", 0),
+                    "quantity": level.get("askQ", 0),
+                    "orders": 0,
                 })
 
             # Pad to 5 levels

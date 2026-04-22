@@ -57,6 +57,9 @@ class ZerodhaAdapter(BaseBrokerAdapter):
         self._subscribed_tokens: dict[int, int] = {}  # numeric_token -> mode
         # Reverse map: numeric_token -> token_str (for symbol lookup via cache)
         self._ntoken_to_token: dict[int, str] = {}
+        # Per-token prev-close cache so LTP-only packets can still report
+        # change/change_percent after a QUOTE/DEPTH packet has been seen.
+        self._last_close: dict[int, float] = {}
 
     # ---- BaseBrokerAdapter interface ----
 
@@ -250,10 +253,18 @@ class ZerodhaAdapter(BaseBrokerAdapter):
         else:
             pkt_mode = MODE_LTP
 
+        # For LTP-only (8-byte) packets Kite doesn't ship prev close, so
+        # change stays 0 until the first QUOTE/DEPTH packet populates the
+        # per-token close cache below.
+        cp_cached = self._last_close.get(ntok, 0.0)
+        change = round(ltp - cp_cached, 4) if (ltp and cp_cached) else 0.0
+        change_percent = round((ltp - cp_cached) / cp_cached * 100, 4) if cp_cached else 0.0
+
         # Always publish LTP
         ltp_data = {
             "symbol": symbol, "exchange": exchange, "mode": "ltp",
             "ltp": ltp, "ltt": int(time.time()),
+            "cp": cp_cached, "change": change, "change_percent": change_percent,
         }
         self.publish(f"{exchange}_{symbol}_LTP", ltp_data)
 
@@ -261,13 +272,21 @@ class ZerodhaAdapter(BaseBrokerAdapter):
         if pkt_mode >= MODE_QUOTE and len(pkt) >= 44:
             try:
                 fields = struct.unpack(">11i", pkt[0:44])
+                close = fields[10] / 100.0
+                if close:
+                    self._last_close[ntok] = close
+                q_change = round(ltp - close, 4) if (ltp and close) else 0.0
+                q_change_pct = round((ltp - close) / close * 100, 4) if close else 0.0
                 quote_data = {
                     "symbol": symbol, "exchange": exchange, "mode": "quote",
                     "ltp": fields[1] / 100.0,
                     "open": fields[7] / 100.0,
                     "high": fields[8] / 100.0,
                     "low": fields[9] / 100.0,
-                    "close": fields[10] / 100.0,
+                    "close": close,
+                    "cp": close,
+                    "change": q_change,
+                    "change_percent": q_change_pct,
                     "volume": fields[4],
                     "average_price": fields[3] / 100.0,
                     "total_buy_quantity": fields[5],
