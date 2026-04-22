@@ -2,11 +2,14 @@ import logging
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import get_settings
 from backend.database import async_session
-from backend.dependencies import get_db, get_current_user
+from backend.dependencies import get_db, get_current_user, invalidate_user_cache
+from backend.limiter import limiter
 from backend.models.user import User
 from backend.models.auth import BrokerAuth, ApiKey
 from backend.models.broker_config import BrokerConfig
@@ -14,12 +17,20 @@ from backend.models.audit import LoginAttempt, ActiveSession
 from backend.schemas.auth import SetupRequest, LoginRequest, AuthResponse, UserInfo
 from backend.security import (
     hash_password, verify_password, check_needs_rehash, create_access_token,
-    generate_api_key, hash_api_key, encrypt_value,
+    generate_api_key, hash_api_key, encrypt_value, decrypt_value,
 )
+from backend.utils.plugin_loader import get_broker_module
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Pre-computed Argon2 hash over a random throwaway secret, used to equalize
+# response time when the submitted username doesn't exist. Without this,
+# /auth/login leaks username existence through timing (Argon2 verify takes
+# ~100s of ms; short-circuiting leaks the answer).
+_TIMING_DUMMY_HASH = hash_password(secrets.token_hex(16))
 
 
 @router.get("/check-setup")
@@ -30,7 +41,8 @@ async def check_setup(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/setup", response_model=AuthResponse)
-async def setup(data: SetupRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("5 per hour")
+async def setup(data: SetupRequest, request: Request, db: AsyncSession = Depends(get_db)):
     # Only allow setup if no users exist
     result = await db.execute(select(func.count()).select_from(User))
     if result.scalar() > 0:
@@ -58,7 +70,72 @@ async def setup(data: SetupRequest, db: AsyncSession = Depends(get_db)):
     return AuthResponse(status="success", message="Admin account created. Please login.")
 
 
+async def _resume_broker_if_valid(
+    db: AsyncSession,
+    user: User,
+    broker_auth: BrokerAuth | None,
+) -> str | None:
+    """Validate a stored broker access_token with a lightweight funds call.
+
+    Returns the broker_name to stamp into the JWT if the broker still accepts
+    the token. If the token is rejected (expired/revoked upstream), revokes
+    the stale BrokerAuth row, clears cached context, and returns None so the
+    user is pushed back through /broker/select -> OAuth on the next request.
+    """
+    if not broker_auth:
+        return None
+
+    candidate_broker = broker_auth.broker_name
+    try:
+        auth_token = decrypt_value(broker_auth.access_token)
+
+        cfg_result = await db.execute(
+            select(BrokerConfig).where(
+                BrokerConfig.user_id == user.id,
+                BrokerConfig.broker_name == candidate_broker,
+            )
+        )
+        broker_cfg = cfg_result.scalar_one_or_none()
+        broker_config: dict = {}
+        if broker_cfg:
+            broker_config = {
+                "api_key": decrypt_value(broker_cfg.api_key),
+                "api_secret": decrypt_value(broker_cfg.api_secret),
+                "redirect_url": broker_cfg.redirect_url,
+            }
+
+        funds_mod = get_broker_module(candidate_broker, "funds")
+        margin = await run_in_threadpool(
+            funds_mod.get_margin_data, auth_token, broker_config
+        )
+    except Exception as exc:
+        logger.warning(
+            "Broker session resume check failed for user %s (%s): %s",
+            user.username, candidate_broker, exc,
+        )
+        broker_auth.is_revoked = True
+        await invalidate_user_cache(user.id)
+        return None
+
+    if not margin:
+        logger.info(
+            "Stored broker token for user %s on %s is no longer valid; revoking",
+            user.username, candidate_broker,
+        )
+        broker_auth.is_revoked = True
+        await invalidate_user_cache(user.id)
+        return None
+
+    logger.info(
+        "Resumed broker session for user %s on %s",
+        user.username, candidate_broker,
+    )
+    return candidate_broker
+
+
 @router.post("/login", response_model=AuthResponse)
+@limiter.limit(settings.login_rate_limit_min)
+@limiter.limit(settings.login_rate_limit_hour)
 async def login(data: LoginRequest, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     ip_address = request.client.host if request.client else "unknown"
     device_info = request.headers.get("User-Agent", "")[:500]
@@ -66,7 +143,14 @@ async def login(data: LoginRequest, request: Request, response: Response, db: As
     result = await db.execute(select(User).where(User.username == data.username.strip().lower()))
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(data.password, user.password_hash):
+    # Always run Argon2 verify — even when the user is absent — so the
+    # response time does not reveal whether the username exists.
+    password_ok = verify_password(
+        data.password,
+        user.password_hash if user else _TIMING_DUMMY_HASH,
+    )
+
+    if not user or not password_ok:
         # Log failed attempt
         db.add(LoginAttempt(
             username=data.username,
@@ -83,7 +167,11 @@ async def login(data: LoginRequest, request: Request, response: Response, db: As
     if check_needs_rehash(user.password_hash):
         user.password_hash = hash_password(data.password)
 
-    # Check if there's an active broker auth (session resume)
+    # Attempt session resume: keep the broker claim only if the stored
+    # access token still works at the broker. Broker tokens (Zerodha/Upstox)
+    # expire daily on the broker's side, so is_revoked alone is not a safe
+    # signal — a stale row from yesterday would otherwise send the user
+    # straight to /dashboard with a token that fails on first API call.
     result = await db.execute(
         select(BrokerAuth).where(
             BrokerAuth.user_id == user.id,
@@ -91,13 +179,19 @@ async def login(data: LoginRequest, request: Request, response: Response, db: As
         )
     )
     broker_auth = result.scalar_one_or_none()
-    broker_name = broker_auth.broker_name if broker_auth else None
+    broker_name = await _resume_broker_if_valid(db, user, broker_auth)
 
-    # Create JWT
+    # Generate an ActiveSession row up front; the JWT carries its token as
+    # `jti`, and get_current_user requires that the row still exist. This
+    # turns logout (which deletes the row) into real server-side revocation
+    # and makes "log out all devices" actually invalidate stolen cookies.
+    session_token = secrets.token_hex(32)
+
     token = create_access_token(data={
         "sub": str(user.id),
         "username": user.username,
         "broker": broker_name,
+        "jti": session_token,
     })
 
     # Log success
@@ -111,7 +205,6 @@ async def login(data: LoginRequest, request: Request, response: Response, db: As
     ))
 
     # Track session
-    session_token = secrets.token_hex(32)
     db.add(ActiveSession(
         user_id=user.id,
         session_token=session_token,
@@ -127,7 +220,7 @@ async def login(data: LoginRequest, request: Request, response: Response, db: As
         value=token,
         httponly=True,
         samesite="lax",
-        secure=False,  # Set True in production with HTTPS
+        secure=settings.cookie_secure,
         path="/",
     )
 
@@ -135,6 +228,7 @@ async def login(data: LoginRequest, request: Request, response: Response, db: As
 
 
 @router.post("/logout", response_model=AuthResponse)
+@limiter.limit("30 per minute")
 async def logout(response: Response, request: Request, db: AsyncSession = Depends(get_db)):
     token = request.cookies.get("access_token")
     if token:
@@ -166,7 +260,13 @@ async def logout(response: Response, request: Request, db: AsyncSession = Depend
                 from backend.dependencies import invalidate_user_cache
                 await invalidate_user_cache(int(user_id))
 
-    response.delete_cookie("access_token", path="/")
+    response.delete_cookie(
+        "access_token",
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=settings.cookie_secure,
+    )
     return AuthResponse(status="success", message="Logged out")
 
 

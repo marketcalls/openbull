@@ -12,7 +12,7 @@ from backend.dependencies import get_db, get_current_user
 from backend.models.user import User
 from backend.models.auth import BrokerAuth
 from backend.models.broker_config import BrokerConfig
-from backend.models.audit import LoginAttempt
+from backend.models.audit import LoginAttempt, ActiveSession
 from backend.security import encrypt_value, decrypt_value, create_access_token
 from backend.utils.plugin_loader import get_plugin_info, get_broker_module
 
@@ -254,11 +254,38 @@ async def _handle_oauth_callback(
     # Trigger master contract download in background
     _start_master_contract_download(broker_name, access_token)
 
-    # Issue new JWT with broker claim
+    # Re-issue the JWT with the broker claim, preserving the existing
+    # ActiveSession.session_token as `jti` so the user's server-side
+    # session stays valid. If no ActiveSession exists (shouldn't happen
+    # since OAuth is only reachable post-login, but be defensive), create
+    # one and keep the broker column in sync.
+    session_result = await db.execute(
+        select(ActiveSession)
+        .where(ActiveSession.user_id == user_id)
+        .order_by(ActiveSession.login_time.desc())
+    )
+    active_session = session_result.scalars().first()
+    if active_session is None:
+        import secrets as _secrets
+        session_token = _secrets.token_hex(32)
+        db.add(ActiveSession(
+            user_id=user_id,
+            session_token=session_token,
+            device_info=request.headers.get("User-Agent", "")[:500],
+            ip_address=request.client.host if request.client else "unknown",
+            broker=broker_name,
+        ))
+        await db.commit()
+    else:
+        session_token = active_session.session_token
+        active_session.broker = broker_name
+        await db.commit()
+
     new_token = create_access_token(data={
         "sub": str(user_id),
         "username": username,
         "broker": broker_name,
+        "jti": session_token,
     })
 
     redirect = RedirectResponse(url=f"{settings.frontend_url}/dashboard", status_code=302)
@@ -267,7 +294,7 @@ async def _handle_oauth_callback(
         value=new_token,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=settings.cookie_secure,
         path="/",
     )
 

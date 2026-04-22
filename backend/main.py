@@ -6,13 +6,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 from backend.config import get_settings
 from backend.database import engine, Base
 from backend.exceptions import OpenBullException, openbull_exception_handler
+from backend.limiter import limiter
 from backend.utils.plugin_loader import load_all_plugins
 from backend.utils.httpx_client import close_httpx_client
 from backend.utils.redis_client import close_redis
@@ -25,9 +25,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("openbull")
-
-# Rate limiter — Redis-backed so counters survive restarts and are shared across workers
-limiter = Limiter(key_func=get_remote_address, storage_uri=settings.redis_url)
 
 
 @asynccontextmanager

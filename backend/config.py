@@ -33,6 +33,9 @@ class Settings(BaseSettings):
 
     # Session
     session_expiry_time: str = "03:00"
+    # Set True when serving over HTTPS (production). Leave False for local
+    # http://127.0.0.1 dev so the browser actually sends the cookie.
+    cookie_secure: bool = False
 
     # WebSocket Proxy
     websocket_host: str = "127.0.0.1"

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import async_session
 from backend.models.user import User
 from backend.models.auth import BrokerAuth, ApiKey
+from backend.models.audit import ActiveSession
 from backend.models.broker_config import BrokerConfig
 from backend.security import decode_access_token, verify_api_key, decrypt_value
 from backend.utils.redis_client import (
@@ -76,6 +77,23 @@ async def get_current_user(
     if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid token payload")
 
+    # Enforce server-side session revocation: the JWT's jti must match a
+    # live ActiveSession row for this user. Logout (and "log out all
+    # devices") deletes those rows, invalidating any outstanding cookies
+    # even though the JWT itself is still cryptographically valid.
+    jti = payload.get("jti")
+    if not jti:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    session_result = await db.execute(
+        select(ActiveSession).where(
+            ActiveSession.user_id == int(user_id),
+            ActiveSession.session_token == jti,
+        )
+    )
+    if session_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=401, detail="Session revoked")
+
     result = await db.execute(select(User).where(User.id == int(user_id)))
     user = result.scalar_one_or_none()
     if user is None:
@@ -83,6 +101,7 @@ async def get_current_user(
 
     # Attach broker info from JWT to user object for convenience
     user._broker = payload.get("broker")
+    user._session_token = jti
     return user
 
 
