@@ -30,7 +30,7 @@ async def symbol_search(
     ctx: BrokerContext = Depends(get_broker_context),
 ):
     """Search for symbols in the master contract database."""
-    results = search_symbols(query=q, exchange=exchange, broker_name=ctx.broker_name)
+    results = await search_symbols(query=q, exchange=exchange, broker_name=ctx.broker_name)
     return {"status": "success", "data": results}
 
 

@@ -36,12 +36,11 @@ def download_master_contracts(broker_name: str, auth_token: str | None = None) -
         return {"status": "error", "message": str(e)}
 
 
-def search_symbols(query: str, exchange: str, broker_name: str = "upstox") -> list[dict]:
+async def search_symbols(query: str, exchange: str, broker_name: str = "upstox") -> list[dict]:
     """Search for symbols in the symtoken table.
 
     The symtoken table is shared across brokers (each download replaces all rows),
-    so broker_name determines which module's search_symbols to call. In practice
-    the search logic is the same SQL query for all brokers.
+    so broker_name determines which module's search_symbols to call.
 
     Args:
         query: Symbol search string (e.g. "NIFTY")
@@ -49,15 +48,15 @@ def search_symbols(query: str, exchange: str, broker_name: str = "upstox") -> li
         broker_name: Broker whose module to use for the search
 
     Returns:
-        List of matching symbol dicts
+        List of matching symbol dicts. Empty list only when the broker plugin
+        is missing; genuine search failures are re-raised so callers (and the
+        error-log sink) see them instead of being hidden behind ``[]``.
     """
     try:
         module_path = f"backend.broker.{broker_name}.database.master_contract_db"
         module = importlib.import_module(module_path)
-        return module.search_symbols(query, exchange)
     except ImportError:
         logger.error("Master contract module not found for broker: %s", broker_name)
         return []
-    except Exception as e:
-        logger.error("Symbol search failed: %s", e)
-        return []
+
+    return await module.search_symbols(query, exchange)

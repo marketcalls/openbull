@@ -15,6 +15,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: "Dashboard", to: "/dashboard" },
+  { label: "Symbol Search", to: "/search" },
   {
     label: "Orders",
     to: "/orderbook",

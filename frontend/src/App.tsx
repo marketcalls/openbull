@@ -15,6 +15,7 @@ import OrderBook from "@/pages/OrderBook";
 import TradeBook from "@/pages/TradeBook";
 import Positions from "@/pages/Positions";
 import Holdings from "@/pages/Holdings";
+import Search from "@/pages/Search";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -66,6 +67,14 @@ function App() {
                 />
                 <Route path="/broker/config" element={<BrokerConfig />} />
                 <Route path="/apikey" element={<ApiKey />} />
+                <Route
+                  path="/search"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Search />
+                    </ProtectedRoute>
+                  }
+                />
                 <Route
                   path="/orderbook"
                   element={

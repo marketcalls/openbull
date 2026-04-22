@@ -309,25 +309,52 @@ def master_contract_download(auth_token: str | None = None) -> dict:
         return {"status": "error", "message": str(e)}
 
 
-def search_symbols(symbol: str, exchange: str) -> list[dict]:
-    """Search symtoken table for symbols matching the query."""
-    async def _search():
-        session_factory = _create_async_session()
-        async with session_factory() as session:
-            result = await session.execute(
-                text(
-                    "SELECT symbol, brsymbol, name, exchange, brexchange, token, "
-                    "expiry, strike, lotsize, instrumenttype, tick_size "
-                    "FROM symtoken WHERE symbol ILIKE :pattern AND exchange = :exchange LIMIT 50"
-                ),
-                {"pattern": f"%{symbol}%", "exchange": exchange},
-            )
-            return [
-                {
-                    "symbol": r[0], "brsymbol": r[1], "name": r[2], "exchange": r[3],
-                    "brexchange": r[4], "token": r[5], "expiry": r[6], "strike": r[7],
-                    "lotsize": r[8], "instrumenttype": r[9], "tick_size": r[10],
-                }
-                for r in result.fetchall()
-            ]
-    return asyncio.run(_search())
+async def search_symbols(symbol: str, exchange: str) -> list[dict]:
+    """Search symtoken for symbols matching the query on the given exchange.
+
+    The query is split on whitespace into tokens; every token must appear
+    (case-insensitive, anywhere) in one of ``symbol``, ``brsymbol``, or
+    ``name``. This lets users type loose forms like ``NIFTY 28APR26`` and
+    still match ``NIFTY28APR2625000CE`` — because "NIFTY" and "28APR26"
+    both hit the ``symbol`` column. Tokens are capped to guard against
+    pathological queries; the entire query is already capped at 50 chars
+    by the route's Pydantic validator.
+
+    Ordering: rows whose ``symbol`` starts with the first token come
+    first, then by length, then alphabetical — so exact prefix matches
+    like plain "NIFTY" float to the top. Returns up to 50 rows.
+    """
+    tokens = [t for t in symbol.split() if t][:6]
+    if not tokens:
+        return []
+
+    where_parts = ["exchange = :exchange"]
+    params: dict = {"exchange": exchange, "prefix": f"{tokens[0]}%"}
+    for i, tok in enumerate(tokens):
+        key = f"t{i}"
+        where_parts.append(
+            f"(symbol ILIKE :{key} OR brsymbol ILIKE :{key} OR name ILIKE :{key})"
+        )
+        params[key] = f"%{tok}%"
+
+    sql = (
+        "SELECT symbol, brsymbol, name, exchange, brexchange, token, "
+        "expiry, strike, lotsize, instrumenttype, tick_size "
+        "FROM symtoken WHERE " + " AND ".join(where_parts) + " "
+        "ORDER BY "
+        "  CASE WHEN symbol ILIKE :prefix THEN 0 ELSE 1 END, "
+        "  length(symbol), symbol "
+        "LIMIT 50"
+    )
+
+    session_factory = _create_async_session()
+    async with session_factory() as session:
+        result = await session.execute(text(sql), params)
+        return [
+            {
+                "symbol": r[0], "brsymbol": r[1], "name": r[2], "exchange": r[3],
+                "brexchange": r[4], "token": r[5], "expiry": r[6], "strike": r[7],
+                "lotsize": r[8], "instrumenttype": r[9], "tick_size": r[10],
+            }
+            for r in result.fetchall()
+        ]
