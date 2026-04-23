@@ -16,15 +16,23 @@ from pydantic import BaseModel, Field
 from backend.dependencies import get_current_user
 from backend.models.user import User
 from backend.sandbox import config as sbx_config
-from backend.sandbox import fund_manager, order_manager
+from backend.sandbox import (
+    fund_manager,
+    order_manager,
+    pnl_snapshot,
+    squareoff,
+    t1_settle,
+    weekly_reset,
+)
 from backend.sandbox._db import session_scope
 from backend.models.sandbox import (
+    SandboxDailyPnL,
     SandboxHolding,
     SandboxOrder,
     SandboxPosition,
     SandboxTrade,
 )
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 logger = logging.getLogger(__name__)
 
@@ -83,3 +91,79 @@ async def summary(user: User = Depends(get_current_user)):
         "status": "success",
         "data": {"total_orders": total_orders, "funds": funds},
     }
+
+
+@router.get("/mypnl")
+async def my_daily_pnl(
+    limit: int = 180,
+    user: User = Depends(get_current_user),
+):
+    """Return the caller's daily P&L history (one row per trading day)."""
+    limit = max(1, min(365, int(limit)))
+    with session_scope() as db:
+        rows = (
+            db.execute(
+                select(SandboxDailyPnL)
+                .where(SandboxDailyPnL.user_id == user.id)
+                .order_by(SandboxDailyPnL.snapshot_date.desc())
+                .limit(limit)
+            )
+            .scalars()
+            .all()
+        )
+        data = [
+            {
+                "date": r.snapshot_date,
+                "starting_capital": round(r.starting_capital, 2),
+                "available": round(r.available, 2),
+                "used_margin": round(r.used_margin, 2),
+                "realized_pnl": round(r.realized_pnl, 2),
+                "unrealized_pnl": round(r.unrealized_pnl, 2),
+                "total_pnl": round(r.total_pnl, 2),
+                "positions_pnl": round(r.positions_pnl, 2),
+                "holdings_pnl": round(r.holdings_pnl, 2),
+                "trades_count": r.trades_count,
+            }
+            for r in rows
+        ]
+    return {"status": "success", "data": data}
+
+
+@router.post("/squareoff-now")
+async def squareoff_now(
+    bucket: str = "nse_nfo_bse_bfo",
+    user: User = Depends(get_current_user),
+):
+    """Manual trigger for an exchange-bucket square-off. Admin-only (matches
+    ``POST /web/trading-mode``). Handy for testing Phase 2b logic without
+    waiting for the scheduler."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if bucket not in ("nse_nfo_bse_bfo", "cds", "mcx"):
+        raise HTTPException(status_code=400, detail="Invalid bucket")
+    placed = squareoff.squareoff_bucket(bucket)
+    return {"status": "success", "placed": placed, "bucket": bucket}
+
+
+@router.post("/settle-now")
+async def settle_now(user: User = Depends(get_current_user)):
+    """Manual trigger for T+1 CNC settlement + daily P&L snapshot. Admin-only."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    moved = t1_settle.settle_cnc_to_holdings()
+    written = pnl_snapshot.snapshot_for_date()
+    return {
+        "status": "success",
+        "holdings_moved": moved,
+        "pnl_snapshots_written": written,
+    }
+
+
+@router.post("/wipe-all")
+async def wipe_all(user: User = Depends(get_current_user)):
+    """Manual trigger for the weekly reset job. Wipes every user's state.
+    Admin-only and intentionally destructive."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    affected = weekly_reset.wipe_all_users()
+    return {"status": "success", "users_wiped": affected}

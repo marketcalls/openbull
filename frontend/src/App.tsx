@@ -20,6 +20,7 @@ import Search from "@/pages/Search";
 import WebSocketTest from "@/pages/WebSocketTest";
 import Logs from "@/pages/Logs";
 import Sandbox from "@/pages/Sandbox";
+import SandboxMyPnL from "@/pages/SandboxMyPnL";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -133,6 +134,14 @@ function App() {
                   element={
                     <ProtectedRoute>
                       <Sandbox />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/sandbox/mypnl"
+                  element={
+                    <ProtectedRoute>
+                      <SandboxMyPnL />
                     </ProtectedRoute>
                   }
                 />

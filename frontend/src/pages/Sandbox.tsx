@@ -17,9 +17,12 @@ import {
   getSandboxConfigs,
   getSandboxSummary,
   resetSandbox,
+  settleNow,
+  squareoffNow,
   updateSandboxConfig,
   type SandboxConfigMap,
 } from "@/api/sandbox";
+import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
 /**
@@ -196,7 +199,109 @@ export default function Sandbox() {
           )}
         </CardContent>
       </Card>
+
+      {/* Manual triggers + mypnl link */}
+      {user?.is_admin && <AdminActions />}
+      <Card>
+        <CardHeader>
+          <CardTitle>History</CardTitle>
+          <CardDescription>
+            Daily P&amp;L snapshots are written at 23:55 IST (or via "Settle
+            now" below). View them at{" "}
+            <Link to="/sandbox/mypnl" className="font-medium underline">
+              /sandbox/mypnl
+            </Link>
+            .
+          </CardDescription>
+        </CardHeader>
+      </Card>
     </div>
+  );
+}
+
+function AdminActions() {
+  const qc = useQueryClient();
+  const [lastMessage, setLastMessage] = useState<string | null>(null);
+
+  const squareoff = useMutation({
+    mutationFn: (bucket: "nse_nfo_bse_bfo" | "cds" | "mcx") =>
+      squareoffNow(bucket),
+    onSuccess: (r, bucket) => {
+      setLastMessage(`Placed ${r.placed} reverse MARKET order(s) for ${bucket}.`);
+      qc.invalidateQueries({ queryKey: ["sandbox-summary"] });
+      qc.invalidateQueries({ predicate: (q) => {
+        const k = q.queryKey[0];
+        return k === "positions" || k === "orderbook" || k === "funds";
+      }});
+    },
+    onError: () => setLastMessage("Square-off failed; see server logs."),
+  });
+
+  const settle = useMutation({
+    mutationFn: settleNow,
+    onSuccess: (r) => {
+      setLastMessage(
+        `Moved ${r.holdings_moved} CNC position(s) to holdings, wrote ${r.pnl_snapshots_written} P&L snapshot(s).`
+      );
+      qc.invalidateQueries({ queryKey: ["sandbox-summary"] });
+      qc.invalidateQueries({ queryKey: ["sandbox-mypnl"] });
+      qc.invalidateQueries({ predicate: (q) => {
+        const k = q.queryKey[0];
+        return k === "holdings" || k === "positions";
+      }});
+    },
+    onError: () => setLastMessage("Settlement failed; see server logs."),
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Admin — manual triggers</CardTitle>
+        <CardDescription>
+          Fire the scheduled jobs on demand. Normally the scheduler runs these
+          at the configured IST times; these buttons are for testing.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => squareoff.mutate("nse_nfo_bse_bfo")}
+            disabled={squareoff.isPending}
+          >
+            Square-off NSE/NFO/BSE/BFO
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => squareoff.mutate("cds")}
+            disabled={squareoff.isPending}
+          >
+            Square-off CDS
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => squareoff.mutate("mcx")}
+            disabled={squareoff.isPending}
+          >
+            Square-off MCX
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => settle.mutate()}
+            disabled={settle.isPending}
+          >
+            Settle now (T+1 + P&amp;L snapshot)
+          </Button>
+        </div>
+        {lastMessage && (
+          <p className="mt-3 text-sm text-muted-foreground">{lastMessage}</p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

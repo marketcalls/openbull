@@ -178,3 +178,29 @@ class SandboxConfig(Base):
     updated_at = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class SandboxDailyPnL(Base):
+    """End-of-day P&L snapshot per user. One row per (user_id, snapshot_date)."""
+
+    __tablename__ = "sandbox_daily_pnl"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    snapshot_date = Column(String(10), nullable=False)  # "YYYY-MM-DD" IST
+
+    starting_capital = Column(Float, nullable=False, default=0.0)
+    available = Column(Float, nullable=False, default=0.0)
+    used_margin = Column(Float, nullable=False, default=0.0)
+    realized_pnl = Column(Float, nullable=False, default=0.0)
+    unrealized_pnl = Column(Float, nullable=False, default=0.0)
+    total_pnl = Column(Float, nullable=False, default=0.0)
+    positions_pnl = Column(Float, nullable=False, default=0.0)
+    holdings_pnl = Column(Float, nullable=False, default=0.0)
+    trades_count = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_sbx_daily_pnl_user_date", "user_id", "snapshot_date", unique=True),
+    )

@@ -48,12 +48,14 @@ async def lifespan(app: FastAPI):
     try:
         from backend.sandbox.config import seed_defaults
         from backend.sandbox.execution_engine import start as start_sandbox_engine
+        from backend.sandbox.scheduler import start as start_sandbox_scheduler
 
         seed_defaults()
         start_sandbox_engine()
-        logger.info("Sandbox execution engine started")
+        start_sandbox_scheduler()
+        logger.info("Sandbox execution engine + scheduler started")
     except Exception:
-        logger.exception("Failed to start sandbox execution engine")
+        logger.exception("Failed to start sandbox engine/scheduler")
 
     # Load broker plugins
     plugins = load_all_plugins()
@@ -93,10 +95,12 @@ async def lifespan(app: FastAPI):
         w.stop(timeout=2.0)
     try:
         from backend.sandbox.execution_engine import stop as stop_sandbox_engine
+        from backend.sandbox.scheduler import stop as stop_sandbox_scheduler
 
+        stop_sandbox_scheduler()
         stop_sandbox_engine()
     except Exception:
-        logger.exception("Error stopping sandbox engine")
+        logger.exception("Error stopping sandbox engine/scheduler")
     await engine.dispose()
     logger.info("OpenBull shut down")
     # Flush DB error sink before the process exits so in-flight queued
