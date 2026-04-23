@@ -10,6 +10,8 @@ from backend.database import engine, Base
 from backend.exceptions import OpenBullException, openbull_exception_handler
 from backend.limiter import limiter
 from backend.middleware import RequestLoggingMiddleware
+from backend.middleware_api_log import ApiLogMiddleware
+from backend.utils.api_log_writer import init_writer as init_api_log_writer, get_writer as get_api_log_writer
 from backend.utils.logging import get_logger, setup_logging
 from backend.utils.plugin_loader import load_all_plugins
 from backend.utils.httpx_client import close_httpx_client
@@ -32,6 +34,12 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables ready")
+
+    # Start the async-safe DB writer for api_logs. The middleware enqueues
+    # rows non-blocking; a daemon thread drains the queue and trims the
+    # table to settings.api_log_db_max_rows.
+    init_api_log_writer(settings.sync_database_url, settings.api_log_db_max_rows)
+    logger.info("ApiLogWriter started (max_rows=%d)", settings.api_log_db_max_rows)
 
     # Load broker plugins
     plugins = load_all_plugins()
@@ -65,6 +73,10 @@ async def lifespan(app: FastAPI):
         pass
     close_httpx_client()
     await close_redis()
+    # Drain the api-log queue so in-flight writes make it to the DB.
+    w = get_api_log_writer()
+    if w is not None:
+        w.stop(timeout=2.0)
     await engine.dispose()
     logger.info("OpenBull shut down")
     # Flush DB error sink before the process exits so in-flight queued
@@ -115,6 +127,12 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 
+# Auth-gated DB log. Added before the request-id middleware so that
+# RequestLoggingMiddleware wraps it — i.e. request_id_var is populated
+# before ApiLogMiddleware reads it, and the access-log line still covers
+# the full request lifecycle.
+app.add_middleware(ApiLogMiddleware)
+
 # Request-id + access log. Added last so it is the outermost wrapper —
 # the request_id contextvar is set before any other middleware runs,
 # and the latency line covers the full request lifecycle.
@@ -161,6 +179,11 @@ app.include_router(api_v1_router)
 from backend.routers.websocket import router as websocket_router
 
 app.include_router(websocket_router)
+
+# API request logs (auth-gated, DB-backed; see ApiLogMiddleware)
+from backend.routers.api_logs import router as api_logs_router
+
+app.include_router(api_logs_router)
 
 
 # Health check

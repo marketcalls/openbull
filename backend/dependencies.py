@@ -102,6 +102,10 @@ async def get_current_user(
     # Attach broker info from JWT to user object for convenience
     user._broker = payload.get("broker")
     user._session_token = jti
+    # Tell ApiLogMiddleware this request is authenticated — without this tag,
+    # the middleware skips the row so unauthenticated noise never hits the DB.
+    request.state.user_id = user.id
+    request.state.auth_method = "session"
     return user
 
 
@@ -222,6 +226,10 @@ async def get_api_user(
         if user_id is None:
             await cache_set_json(_key_api_invalid(key_hash), 1, INVALID_KEY_TTL)
             raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # Tell ApiLogMiddleware this request is authenticated (external API call).
+    request.state.user_id = user_id
+    request.state.auth_method = "api_key"
 
     # Try full api-context cache (saves 2 more DB hits + 3 decrypts)
     cached_ctx = await cache_get_json(_key_api_ctx(user_id))

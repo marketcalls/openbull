@@ -17,6 +17,7 @@ import Positions from "@/pages/Positions";
 import Holdings from "@/pages/Holdings";
 import Search from "@/pages/Search";
 import WebSocketTest from "@/pages/WebSocketTest";
+import Logs from "@/pages/Logs";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -113,6 +114,14 @@ function App() {
                   element={
                     <ProtectedRoute requiresBroker>
                       <WebSocketTest />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/logs"
+                  element={
+                    <ProtectedRoute>
+                      <Logs />
                     </ProtectedRoute>
                   }
                 />

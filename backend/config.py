@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # DB-backed error sink. Worker trims the `error_logs` table down to this
     # many rows after every batch of inserts, bounding table growth.
     error_log_db_max_rows: int = 50000
+    # DB-backed API request log. Stores one row per *authenticated* request;
+    # worker trims to this row count so attacker floods cannot blow up the
+    # table (they also get skipped at the middleware because they never pass
+    # auth). At ~2 KB/row this caps the table around 200 MB.
+    api_log_db_max_rows: int = 100000
 
     # Rate limits
     login_rate_limit_min: str = "5 per minute"

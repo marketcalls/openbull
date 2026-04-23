@@ -1,4 +1,15 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, func
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 
 from backend.database import Base
 
@@ -50,3 +61,40 @@ class ErrorLog(Base):
     lineno = Column(Integer, nullable=True)
     request_id = Column(String(50), nullable=True, index=True)
     exc_text = Column(Text, nullable=True)
+
+
+class ApiLog(Base):
+    """One row per *authenticated* HTTP request.
+
+    Written from a background thread by ``backend.utils.api_log_writer``. The
+    middleware only enqueues records after a successful auth dependency has
+    attached ``user_id`` to ``request.state`` — unauthenticated noise (attacker
+    floods, bad API keys, expired cookies) never reaches this table.
+
+    The worker trims the table to ``api_log_db_max_rows`` after every N
+    inserts, so growth is bounded regardless of traffic volume.
+    """
+
+    __tablename__ = "api_logs"
+
+    id = Column(BigInteger, primary_key=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    user_id = Column(Integer, nullable=True)
+    auth_method = Column(String(20), nullable=True)  # "session" | "api_key"
+    method = Column(String(8), nullable=False)
+    path = Column(String(500), nullable=False)
+    status_code = Column(Integer, nullable=False)
+    duration_ms = Column(Float, nullable=False)
+    client_ip = Column(String(64), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    request_id = Column(String(50), nullable=True)
+    request_body = Column(Text, nullable=True)
+    response_body = Column(Text, nullable=True)
+    error = Column(String(500), nullable=True)
+
+    __table_args__ = (
+        Index("idx_api_logs_created_at", "created_at"),
+        Index("idx_api_logs_status_code", "status_code"),
+        Index("idx_api_logs_path", "path"),
+        Index("idx_api_logs_user_created", "user_id", "created_at"),
+    )
