@@ -28,6 +28,7 @@ import websockets
 import zmq
 import zmq.asyncio
 
+from backend.services.market_data_cache import get_market_data_cache
 from backend.websocket_proxy.auth import verify_api_key_standalone
 from backend.websocket_proxy.base_adapter import (
     BaseBrokerAdapter,
@@ -145,6 +146,19 @@ async def _zmq_listener(zmq_port: int) -> None:
             except json.JSONDecodeError:
                 continue
 
+            # Centralized cache + fan-out to internal consumers (RMS, UI, etc.)
+            # This runs regardless of whether any external WS client is
+            # subscribed — the cache is the single source of live data.
+            try:
+                get_market_data_cache().process_market_data({
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "mode": mode,
+                    "data": market_data,
+                })
+            except Exception as e:
+                logger.debug("MarketDataCache ingest error: %s", e)
+
             # Route to subscribers — mode hierarchy: DEPTH includes QUOTE includes LTP
             all_clients: dict[str, int] = {}
             for m in range(1, mode + 1):
@@ -226,6 +240,7 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
 
                             # Start ZMQ listener
                             _zmq_task = asyncio.create_task(_zmq_listener(zmq_port))
+                            get_market_data_cache().set_connected(True, authenticated=True)
                             logger.info("Adapter %s created and connected (ZMQ port %d)", broker_name, zmq_port)
                         except Exception as e:
                             logger.exception("Failed to create adapter: %s", e)
@@ -242,6 +257,7 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
                                 except Exception:
                                     pass
                             _adapter = None
+                            get_market_data_cache().set_connected(False)
                             await _send_json(ws, {"type": "auth", "status": "error", "message": "Broker connection failed"})
                             continue
 
@@ -365,6 +381,7 @@ async def shutdown_ws_proxy() -> None:
             pass
         _adapter.cleanup_zmq()
         _adapter = None
+        get_market_data_cache().set_connected(False)
 
     if _server:
         _server.close()

@@ -16,6 +16,7 @@ import TradeBook from "@/pages/TradeBook";
 import Positions from "@/pages/Positions";
 import Holdings from "@/pages/Holdings";
 import Search from "@/pages/Search";
+import WebSocketTest from "@/pages/WebSocketTest";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -104,6 +105,14 @@ function App() {
                   element={
                     <ProtectedRoute requiresBroker>
                       <Holdings />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/websocket/test"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <WebSocketTest />
                     </ProtectedRoute>
                   }
                 />

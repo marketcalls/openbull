@@ -25,7 +25,18 @@
       "Read(//tmp/**)",
       "Bash(echo \"Started PID $!\")",
       "Bash(kill %1)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Read(//d/FullStack Options/Day12/openalgo/websocket_proxy/**)",
+      "Read(//d/FullStack Options/Day12/openalgo/broker/upstox/streaming/**)",
+      "Read(//d/FullStack Options/Day12/openalgo/broker/zerodha/streaming/**)",
+      "Bash(npx tsc *)",
+      "Bash(uv --version)",
+      "Bash(echo \"exit=$?\")",
+      "PowerShell(Get-ChildItem Env: | Where-Object { $_.Name -match '^\\(VIRTUAL_ENV|PYTHON|UV_|PATH\\)$' } | Format-Table -AutoSize -Wrap)",
+      "PowerShell(uv run *)",
+      "PowerShell(& \".\\\\.venv\\\\Scripts\\\\python.exe\" -c \"import sys; print\\(sys.executable\\); print\\(sys.prefix\\); print\\(sys.version\\)\")",
+      "Bash(cat vite.config.ts)",
+      "Bash(cat vite.config.js)"
     ]
   }
 }

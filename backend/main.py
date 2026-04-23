@@ -1,10 +1,7 @@
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -160,22 +157,13 @@ from backend.api import api_v1_router
 app.include_router(api_key_router)
 app.include_router(api_v1_router)
 
+# WebSocket support endpoints (config, health, cached ticks)
+from backend.routers.websocket import router as websocket_router
+
+app.include_router(websocket_router)
+
 
 # Health check
 @app.get("/health")
 async def health():
     return {"status": "ok", "app": "OpenBull", "version": "0.1.0"}
-
-
-# Serve React frontend in production (from frontend/dist/)
-frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
-if frontend_dist.exists():
-    app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="static")
-
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        # Serve index.html for all non-API routes (SPA catch-all)
-        index_file = frontend_dist / "index.html"
-        if index_file.exists():
-            return FileResponse(str(index_file))
-        return JSONResponse(status_code=404, content={"detail": "Frontend not built"})
