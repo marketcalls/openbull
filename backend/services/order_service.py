@@ -63,12 +63,26 @@ def place_order_with_auth(
     auth_token: str,
     broker: str,
     config: dict | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
     """Place an order using provided auth token.
 
     Returns:
         (success, response_data, http_status_code)
     """
+    # Sandbox dispatch: if trading mode is sandbox and we know the user, route
+    # to the simulated engine. Live broker API is not called.
+    if user_id is not None:
+        try:
+            from backend.services.trading_mode_service import get_trading_mode_sync
+
+            if get_trading_mode_sync() == "sandbox":
+                from backend.services.sandbox_service import place_order as sbx_place
+
+                return sbx_place(user_id, order_data)
+        except Exception:
+            logger.exception("sandbox dispatch failed; falling back to live")
+
     broker_module = _import_broker_module(broker)
     if broker_module is None:
         return False, {"status": "error", "message": "Broker-specific module not found"}, 404
@@ -98,6 +112,7 @@ def place_order(
     auth_token: str | None = None,
     broker: str | None = None,
     config: dict | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
     """Place an order. Supports both API-key and direct auth token calls.
 
@@ -110,7 +125,7 @@ def place_order(
         return False, {"status": "error", "message": error_message}, 400
 
     if auth_token and broker:
-        return place_order_with_auth(order_data, auth_token, broker, config)
+        return place_order_with_auth(order_data, auth_token, broker, config, user_id=user_id)
 
     return (
         False,
@@ -152,8 +167,20 @@ def modify_order_service(
     auth_token: str,
     broker: str,
     config: dict | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
     """Modify an existing order."""
+    if user_id is not None:
+        try:
+            from backend.services.trading_mode_service import get_trading_mode_sync
+
+            if get_trading_mode_sync() == "sandbox":
+                from backend.services.sandbox_service import modify_order as sbx_mod
+
+                return sbx_mod(user_id, data)
+        except Exception:
+            logger.exception("sandbox dispatch failed; falling back to live")
+
     broker_module = _import_broker_module(broker)
     if broker_module is None:
         return False, {"status": "error", "message": "Broker-specific module not found"}, 404
@@ -172,8 +199,20 @@ def cancel_order_service(
     auth_token: str,
     broker: str,
     config: dict | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
     """Cancel a specific order."""
+    if user_id is not None:
+        try:
+            from backend.services.trading_mode_service import get_trading_mode_sync
+
+            if get_trading_mode_sync() == "sandbox":
+                from backend.services.sandbox_service import cancel_order as sbx_cancel
+
+                return sbx_cancel(user_id, orderid)
+        except Exception:
+            logger.exception("sandbox dispatch failed; falling back to live")
+
     broker_module = _import_broker_module(broker)
     if broker_module is None:
         return False, {"status": "error", "message": "Broker-specific module not found"}, 404
@@ -191,8 +230,20 @@ def cancel_all_orders_service(
     auth_token: str,
     broker: str,
     config: dict | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
     """Cancel all open orders."""
+    if user_id is not None:
+        try:
+            from backend.services.trading_mode_service import get_trading_mode_sync
+
+            if get_trading_mode_sync() == "sandbox":
+                from backend.services.sandbox_service import cancel_all_orders as sbx_cancel_all
+
+                return sbx_cancel_all(user_id)
+        except Exception:
+            logger.exception("sandbox dispatch failed; falling back to live")
+
     broker_module = _import_broker_module(broker)
     if broker_module is None:
         return False, {"status": "error", "message": "Broker-specific module not found"}, 404
@@ -213,8 +264,20 @@ def close_all_positions_service(
     auth_token: str,
     broker: str,
     config: dict | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
     """Close all open positions."""
+    if user_id is not None:
+        try:
+            from backend.services.trading_mode_service import get_trading_mode_sync
+
+            if get_trading_mode_sync() == "sandbox":
+                from backend.services.sandbox_service import close_all_positions as sbx_close
+
+                return sbx_close(user_id)
+        except Exception:
+            logger.exception("sandbox dispatch failed; falling back to live")
+
     broker_module = _import_broker_module(broker)
     if broker_module is None:
         return False, {"status": "error", "message": "Broker-specific module not found"}, 404

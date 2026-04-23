@@ -50,13 +50,24 @@ def _import_broker_modules(broker_name: str) -> dict[str, Any] | None:
 
 
 def get_tradebook_with_auth(
-    auth_token: str, broker: str, config: dict | None = None
+    auth_token: str, broker: str, config: dict | None = None, user_id: int | None = None
 ) -> tuple[bool, dict[str, Any], int]:
     """Get trade book using provided auth token.
 
     Returns:
         (success, response_data, http_status_code)
     """
+    if user_id is not None:
+        try:
+            from backend.services.trading_mode_service import get_trading_mode_sync
+
+            if get_trading_mode_sync() == "sandbox":
+                from backend.services.sandbox_service import get_tradebook as sbx_tb
+
+                return sbx_tb(user_id)
+        except Exception:
+            logger.exception("sandbox dispatch failed; falling back to live")
+
     broker_funcs = _import_broker_modules(broker)
     if broker_funcs is None:
         return False, {"status": "error", "message": "Broker-specific module not found"}, 404
@@ -88,10 +99,11 @@ def get_tradebook(
     auth_token: str | None = None,
     broker: str | None = None,
     config: dict | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
     """Get trade book. Supports both API-key and direct auth token calls."""
     if auth_token and broker:
-        return get_tradebook_with_auth(auth_token, broker, config)
+        return get_tradebook_with_auth(auth_token, broker, config, user_id=user_id)
 
     return (
         False,

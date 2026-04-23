@@ -19,6 +19,7 @@ import Holdings from "@/pages/Holdings";
 import Search from "@/pages/Search";
 import WebSocketTest from "@/pages/WebSocketTest";
 import Logs from "@/pages/Logs";
+import Sandbox from "@/pages/Sandbox";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -124,6 +125,14 @@ function App() {
                   element={
                     <ProtectedRoute>
                       <Logs />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/sandbox"
+                  element={
+                    <ProtectedRoute>
+                      <Sandbox />
                     </ProtectedRoute>
                   }
                 />

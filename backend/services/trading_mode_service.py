@@ -57,6 +57,42 @@ def invalidate_cache() -> None:
         _cache_expiry = 0.0
 
 
+def get_trading_mode_sync() -> str:
+    """Sync counterpart of :func:`get_trading_mode` for use from sync service
+    code (existing place_order_service etc.). Reads cache only — if the cache
+    is cold it falls back to ``"live"`` rather than opening a DB connection
+    from sync context. Acceptable because the cache is populated on the first
+    async read (dashboard load, ``GET /web/trading-mode`` from the UI) and
+    stays warm for 10 s.
+
+    If you need an authoritative read from sync context, use the sync
+    SQLAlchemy engine in :mod:`backend.sandbox._db` — but for dispatch
+    decisions the cache is fine.
+    """
+    now = time.monotonic()
+    with _cache_lock:
+        if _cached_mode is not None and now < _cache_expiry:
+            return _cached_mode
+    # Fall back to sync DB read — used on the first call before any async
+    # consumer primed the cache. Uses the same sync engine as the sandbox layer.
+    try:
+        from sqlalchemy import select as _select
+
+        from backend.sandbox._db import session_scope
+
+        with session_scope() as db:
+            row = db.execute(
+                _select(AppSettings).where(AppSettings.key == TRADING_MODE_KEY)
+            ).scalar_one_or_none()
+            value = row.value if row else TRADING_MODE_LIVE
+            if value not in VALID_TRADING_MODES:
+                value = TRADING_MODE_LIVE
+            _set_cache(value)
+            return value
+    except Exception:
+        return TRADING_MODE_LIVE
+
+
 async def get_trading_mode(db: AsyncSession | None = None) -> str:
     """Return the current mode (``"live"`` or ``"sandbox"``).
 

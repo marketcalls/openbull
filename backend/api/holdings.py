@@ -44,6 +44,7 @@ async def api_holdings(request: Request):
         auth_token=auth_token,
         broker=broker_name,
         config=config,
+        user_id=user_id,
     )
 
     return JSONResponse(content=response_data, status_code=status_code)

@@ -22,7 +22,7 @@ def _import_broker_module(broker_name: str):
 
 
 def get_funds_with_auth(
-    auth_token: str, broker: str, config: dict | None = None
+    auth_token: str, broker: str, config: dict | None = None, user_id: int | None = None
 ) -> tuple[bool, dict[str, Any], int]:
     """Get account funds using provided auth token.
 
@@ -34,6 +34,17 @@ def get_funds_with_auth(
     Returns:
         (success, response_data, http_status_code)
     """
+    if user_id is not None:
+        try:
+            from backend.services.trading_mode_service import get_trading_mode_sync
+
+            if get_trading_mode_sync() == "sandbox":
+                from backend.services.sandbox_service import get_funds as sbx_funds
+
+                return sbx_funds(user_id)
+        except Exception:
+            logger.exception("sandbox dispatch failed; falling back to live")
+
     broker_module = _import_broker_module(broker)
     if broker_module is None:
         return False, {"status": "error", "message": "Broker-specific module not found"}, 404
@@ -52,6 +63,7 @@ def get_funds(
     auth_token: str | None = None,
     broker: str | None = None,
     config: dict | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
     """Get account funds. Supports both API-key and direct auth token calls.
 
@@ -65,7 +77,7 @@ def get_funds(
         (success, response_data, http_status_code)
     """
     if auth_token and broker:
-        return get_funds_with_auth(auth_token, broker, config)
+        return get_funds_with_auth(auth_token, broker, config, user_id=user_id)
 
     return (
         False,

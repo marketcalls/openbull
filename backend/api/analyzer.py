@@ -20,7 +20,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from backend.services.trading_mode_service import (
     get_trading_mode,
@@ -47,23 +47,11 @@ async def _read_body(request: Request) -> dict:
 
 
 async def _total_sandbox_logs(db) -> int:
-    """Count of sandbox orders logged so far.
-
-    Phase 1 has no ``sandbox_orders`` table yet — return 0 until Phase 2
-    ships. Probed by table existence so this code keeps working after
-    Phase 2 adds the table.
-    """
+    """Count of simulated orders logged so far (all users)."""
     try:
-        from backend.models.audit import ApiLog  # always exists
+        from backend.sandbox.order_manager import count_all_orders
 
-        stmt = select(func.count()).select_from(ApiLog).where(
-            # Will exist once the mode column lands (Phase 3). Until then,
-            # this filter is a no-op and count = 0 is fine.
-            ApiLog.path.ilike("/api/v1/placeorder%")
-        )
-        # Placeholder until sandbox_orders exists; intentionally conservative.
-        _ = stmt
-        return 0
+        return count_all_orders()
     except Exception:
         return 0
 

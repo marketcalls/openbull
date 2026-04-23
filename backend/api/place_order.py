@@ -71,6 +71,7 @@ async def api_place_order(request: Request):
         auth_token=auth_token,
         broker=broker_name,
         config=config,
+        user_id=user_id,
     )
 
     return JSONResponse(content=response_data, status_code=status_code)
@@ -140,6 +141,7 @@ async def api_modify_order(request: Request):
         auth_token=auth_token,
         broker=broker_name,
         config=config,
+        user_id=user_id,
     )
 
     return JSONResponse(content=response_data, status_code=status_code)
@@ -171,6 +173,7 @@ async def api_cancel_order(request: Request):
         auth_token=auth_token,
         broker=broker_name,
         config=config,
+        user_id=user_id,
     )
 
     return JSONResponse(content=response_data, status_code=status_code)
@@ -194,6 +197,7 @@ async def api_cancel_all_orders(request: Request):
         auth_token=auth_token,
         broker=broker_name,
         config=config,
+        user_id=user_id,
     )
 
     return JSONResponse(content=response_data, status_code=status_code)
@@ -219,6 +223,7 @@ async def api_close_all_positions(request: Request):
         auth_token=auth_token,
         broker=broker_name,
         config=config,
+        user_id=user_id,
     )
 
     return JSONResponse(content=response_data, status_code=status_code)

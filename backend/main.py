@@ -41,6 +41,20 @@ async def lifespan(app: FastAPI):
     init_api_log_writer(settings.sync_database_url, settings.api_log_db_max_rows)
     logger.info("ApiLogWriter started (max_rows=%d)", settings.api_log_db_max_rows)
 
+    # Seed sandbox_config defaults (starting capital, leverage, squareoff
+    # times) if the row isn't already there, and start the tick-driven
+    # sandbox execution engine. Safe to call even when trading_mode=live —
+    # the engine only fires when sandbox orders exist.
+    try:
+        from backend.sandbox.config import seed_defaults
+        from backend.sandbox.execution_engine import start as start_sandbox_engine
+
+        seed_defaults()
+        start_sandbox_engine()
+        logger.info("Sandbox execution engine started")
+    except Exception:
+        logger.exception("Failed to start sandbox execution engine")
+
     # Load broker plugins
     plugins = load_all_plugins()
     logger.info("Loaded %d broker plugins: %s", len(plugins), list(plugins.keys()))
@@ -77,6 +91,12 @@ async def lifespan(app: FastAPI):
     w = get_api_log_writer()
     if w is not None:
         w.stop(timeout=2.0)
+    try:
+        from backend.sandbox.execution_engine import stop as stop_sandbox_engine
+
+        stop_sandbox_engine()
+    except Exception:
+        logger.exception("Error stopping sandbox engine")
     await engine.dispose()
     logger.info("OpenBull shut down")
     # Flush DB error sink before the process exits so in-flight queued
@@ -189,6 +209,11 @@ app.include_router(api_logs_router)
 from backend.routers.trading_mode import router as trading_mode_router
 
 app.include_router(trading_mode_router)
+
+# Sandbox configuration + reset
+from backend.routers.sandbox import router as sandbox_router
+
+app.include_router(sandbox_router)
 
 
 # Health check

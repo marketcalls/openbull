@@ -21,6 +21,7 @@ async def holdings(ctx: BrokerContext = Depends(get_broker_context)):
         auth_token=ctx.auth_token,
         broker=ctx.broker_name,
         config=ctx.broker_config,
+        user_id=ctx.user.id,
     )
 
     if not success:
