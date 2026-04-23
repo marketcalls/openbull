@@ -35,6 +35,15 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables ready")
 
+    # In-place schema micro-migrations (column adds on existing tables that
+    # create_all does not touch). Idempotent — safe on every restart.
+    try:
+        from backend.utils.schema_migrations import run_startup_migrations
+
+        run_startup_migrations()
+    except Exception:
+        logger.exception("Startup migrations raised")
+
     # Start the async-safe DB writer for api_logs. The middleware enqueues
     # rows non-blocking; a daemon thread drains the queue and trims the
     # table to settings.api_log_db_max_rows.

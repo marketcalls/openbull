@@ -30,9 +30,11 @@ import { cn } from "@/lib/utils";
 
 const METHODS = ["", "GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const STATUS_CLASSES = ["", "2xx", "3xx", "4xx", "5xx"] as const;
+const MODES = ["", "live", "sandbox"] as const;
 
 type Filters = {
   method: string;
+  mode: string;
   status_class: string;
   path_contains: string;
   start: string;
@@ -72,6 +74,7 @@ function fmtTime(iso: string | null): string {
 export default function Logs() {
   const [filters, setFilters] = useState<Filters>({
     method: "",
+    mode: "",
     status_class: "",
     path_contains: "",
     start: "",
@@ -86,6 +89,7 @@ export default function Logs() {
       limit: 100,
       before_id: cursor ?? undefined,
       method: filters.method || undefined,
+      mode: (filters.mode || undefined) as ListApiLogsParams["mode"],
       status_class: (filters.status_class || undefined) as ListApiLogsParams["status_class"],
       path_contains: filters.path_contains || undefined,
       start: filters.start ? new Date(filters.start).toISOString() : undefined,
@@ -123,6 +127,7 @@ export default function Logs() {
   const resetFilters = useCallback(() => {
     setFilters({
       method: "",
+      mode: "",
       status_class: "",
       path_contains: "",
       start: "",
@@ -214,6 +219,25 @@ export default function Logs() {
                 {STATUS_CLASSES.map((s) => (
                   <option key={s || "any"} value={s}>
                     {s || "Any"}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <Label htmlFor="log-mode">Mode</Label>
+              <select
+                id="log-mode"
+                value={filters.mode}
+                onChange={(e) => setFilter("mode", e.target.value)}
+                className={cn(
+                  "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                )}
+              >
+                {MODES.map((m) => (
+                  <option key={m || "any"} value={m}>
+                    {m === "" ? "Any" : m === "live" ? "Live" : "Sandbox"}
                   </option>
                 ))}
               </select>
@@ -315,6 +339,7 @@ export default function Logs() {
                     <TableHead className="w-[90px] text-right">Latency</TableHead>
                     <TableHead className="w-[80px] text-right">User</TableHead>
                     <TableHead className="w-[90px]">Auth</TableHead>
+                    <TableHead className="w-[90px]">Mode</TableHead>
                     <TableHead className="w-[110px]">IP</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -388,11 +413,26 @@ function LogRowBlock({
         <TableCell className="text-xs">
           <Badge variant="secondary">{row.auth_method ?? "—"}</Badge>
         </TableCell>
+        <TableCell className="text-xs">
+          {row.mode ? (
+            <Badge
+              variant={row.mode === "sandbox" ? "default" : "outline"}
+              className={cn(
+                row.mode === "sandbox" &&
+                  "bg-amber-500 text-white hover:bg-amber-500/90"
+              )}
+            >
+              {row.mode}
+            </Badge>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
         <TableCell className="font-mono text-xs">{row.client_ip ?? "—"}</TableCell>
       </TableRow>
       {expanded && (
         <TableRow>
-          <TableCell colSpan={8} className="bg-muted/30 p-0">
+          <TableCell colSpan={9} className="bg-muted/30 p-0">
             <div className="grid grid-cols-1 gap-3 p-4 lg:grid-cols-2">
               <DetailBlock title="Request" content={prettyJson(row.request_body)} />
               <DetailBlock title="Response" content={prettyJson(row.response_body)} />

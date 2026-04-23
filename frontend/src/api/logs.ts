@@ -5,6 +5,7 @@ export interface ApiLogRow {
   created_at: string | null;
   user_id: number | null;
   auth_method: string | null;
+  mode: "live" | "sandbox" | null;
   method: string;
   path: string;
   status_code: number;
@@ -34,6 +35,7 @@ export interface ListApiLogsParams {
   limit?: number;
   before_id?: number | null;
   method?: string;
+  mode?: "live" | "sandbox";
   status?: number;
   status_class?: "1xx" | "2xx" | "3xx" | "4xx" | "5xx";
   path_contains?: string;

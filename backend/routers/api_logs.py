@@ -33,6 +33,7 @@ def _row_to_dict(r: ApiLog) -> dict:
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "user_id": r.user_id,
         "auth_method": r.auth_method,
+        "mode": r.mode,
         "method": r.method,
         "path": r.path,
         "status_code": r.status_code,
@@ -56,6 +57,8 @@ def _apply_filters(stmt, *, user: User, filters: dict):
 
     if filters.get("method"):
         stmt = stmt.where(ApiLog.method == filters["method"].upper())
+    if filters.get("mode"):
+        stmt = stmt.where(ApiLog.mode == filters["mode"])
     if filters.get("status") is not None:
         stmt = stmt.where(ApiLog.status_code == filters["status"])
     if filters.get("status_class"):
@@ -81,6 +84,7 @@ async def list_api_logs(
     limit: int = Query(100, ge=1, le=1000),
     before_id: int | None = Query(None, ge=1),
     method: str | None = Query(None, max_length=8),
+    mode: str | None = Query(None, pattern=r"^(live|sandbox)$"),
     status: int | None = Query(None, ge=100, le=599),
     status_class: str | None = Query(None, pattern=r"^[1-5]xx$"),
     path_contains: str | None = Query(None, max_length=200),
@@ -93,6 +97,7 @@ async def list_api_logs(
     """Paginated log list. Users see their own rows; admins see all."""
     filters = {
         "method": method,
+        "mode": mode,
         "status": status,
         "status_class": status_class,
         "path_contains": path_contains,
@@ -192,6 +197,7 @@ async def get_api_log(
 @router.get("/export.csv")
 async def export_api_logs(
     method: str | None = Query(None, max_length=8),
+    mode: str | None = Query(None, pattern=r"^(live|sandbox)$"),
     status: int | None = Query(None, ge=100, le=599),
     status_class: str | None = Query(None, pattern=r"^[1-5]xx$"),
     path_contains: str | None = Query(None, max_length=200),
@@ -204,6 +210,7 @@ async def export_api_logs(
     """Stream up to 10,000 matching rows as CSV. Respects user scope."""
     filters = {
         "method": method,
+        "mode": mode,
         "status": status,
         "status_class": status_class,
         "path_contains": path_contains,
@@ -218,7 +225,7 @@ async def export_api_logs(
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow([
-        "id", "created_at", "user_id", "auth_method", "method", "path",
+        "id", "created_at", "user_id", "auth_method", "mode", "method", "path",
         "status_code", "duration_ms", "client_ip", "request_id", "error",
         "request_body", "response_body",
     ])
@@ -228,6 +235,7 @@ async def export_api_logs(
             r.created_at.isoformat() if r.created_at else "",
             r.user_id or "",
             r.auth_method or "",
+            r.mode or "",
             r.method or "",
             r.path or "",
             r.status_code,

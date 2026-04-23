@@ -81,6 +81,10 @@ class ApiLog(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     user_id = Column(Integer, nullable=True)
     auth_method = Column(String(20), nullable=True)  # "session" | "api_key"
+    # Trading mode the request was routed under at capture time. "live" means
+    # the request hit the broker API; "sandbox" means it was simulated. Helps
+    # users filter noisy paper-trading sessions out of the main log view.
+    mode = Column(String(10), nullable=True)
     method = Column(String(8), nullable=False)
     path = Column(String(500), nullable=False)
     status_code = Column(Integer, nullable=False)
@@ -97,4 +101,5 @@ class ApiLog(Base):
         Index("idx_api_logs_status_code", "status_code"),
         Index("idx_api_logs_path", "path"),
         Index("idx_api_logs_user_created", "user_id", "created_at"),
+        Index("idx_api_logs_mode_created", "mode", "created_at"),
     )

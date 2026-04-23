@@ -213,9 +213,21 @@ class ApiLogMiddleware(BaseHTTPMiddleware):
             req_content_type = request.headers.get("content-type")
             ua = request.headers.get("user-agent", "")[:500]
 
+            # Capture the trading mode at request time so users can filter
+            # live vs. sandbox traffic on /logs. Failures here are harmless;
+            # the column is nullable.
+            mode: str | None = None
+            try:
+                from backend.services.trading_mode_service import get_trading_mode_sync
+
+                mode = get_trading_mode_sync()
+            except Exception:
+                mode = None
+
             row = {
                 "user_id": int(user_id),
                 "auth_method": (auth_method or "unknown")[:20],
+                "mode": mode[:10] if mode else None,
                 "method": method[:8],
                 "path": path[:500],
                 "status_code": int(status_code),
