@@ -188,3 +188,34 @@
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
 }
+
+/* ---------------------------------------------------------------------------
+ * Sandbox mode theme tint
+ *
+ * The TradingModeContext sets ``html[data-trading-mode="sandbox"]`` whenever
+ * the global mode is sandbox. We nudge the chrome colours amber-ward so the
+ * whole UI reads "not live" at a glance — without hiding information behind
+ * reduced contrast. Destructive (order-cancel etc.) stays red on purpose.
+ * --------------------------------------------------------------------------- */
+
+html[data-trading-mode="sandbox"] {
+  --border: oklch(0.86 0.12 85);
+  --input: oklch(0.86 0.12 85);
+  --ring: oklch(0.78 0.18 85);
+  --sidebar-border: oklch(0.86 0.12 85);
+  --sidebar-ring: oklch(0.78 0.18 85);
+  --sidebar-primary: oklch(0.72 0.20 75);
+  --sidebar-accent: oklch(0.97 0.05 85);
+  --accent: oklch(0.97 0.05 85);
+}
+
+html[data-trading-mode="sandbox"].dark {
+  --border: oklch(0.45 0.12 75);
+  --input: oklch(0.45 0.12 75);
+  --ring: oklch(0.70 0.18 75);
+  --sidebar-border: oklch(0.45 0.12 75);
+  --sidebar-ring: oklch(0.70 0.18 75);
+  --sidebar-primary: oklch(0.75 0.20 75);
+  --sidebar-accent: oklch(0.30 0.10 75);
+  --accent: oklch(0.30 0.10 75);
+}

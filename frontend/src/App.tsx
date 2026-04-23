@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { ThemeProvider } from "@/contexts/ThemeContext";
+import { TradingModeProvider } from "@/contexts/TradingModeContext";
 import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import { AppLayout } from "@/components/layout/AppLayout";
 import Home from "@/pages/Home";
@@ -35,7 +36,8 @@ function App() {
       <ThemeProvider>
         <BrowserRouter>
           <AuthProvider>
-            <Routes>
+            <TradingModeProvider>
+              <Routes>
               {/* Public routes */}
               <Route path="/" element={<Home />} />
               <Route path="/login" element={<Login />} />
@@ -130,6 +132,7 @@ function App() {
               {/* Catch-all */}
               <Route path="*" element={<NotFound />} />
             </Routes>
+            </TradingModeProvider>
           </AuthProvider>
         </BrowserRouter>
       </ThemeProvider>

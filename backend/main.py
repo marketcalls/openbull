@@ -185,6 +185,11 @@ from backend.routers.api_logs import router as api_logs_router
 
 app.include_router(api_logs_router)
 
+# Live / Sandbox trading-mode toggle
+from backend.routers.trading_mode import router as trading_mode_router
+
+app.include_router(trading_mode_router)
+
 
 # Health check
 @app.get("/health")

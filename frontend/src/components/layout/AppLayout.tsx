@@ -6,6 +6,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
 import { cn } from "@/lib/utils";
 import { MasterContractStatus } from "@/components/layout/MasterContractStatus";
+import { TradingModeSwitch } from "@/components/layout/TradingModeSwitch";
+import { SandboxBanner } from "@/components/layout/SandboxBanner";
 
 interface NavItem {
   label: string;
@@ -143,6 +145,8 @@ export function AppLayout() {
           </div>
 
           <div className="flex items-center gap-2">
+            <TradingModeSwitch />
+            <Separator orientation="vertical" className="mx-1 h-6" />
             <MasterContractStatus />
             <Separator orientation="vertical" className="mx-1 h-6" />
             <Button variant="outline" size="sm" onClick={toggleTheme}>
@@ -157,6 +161,9 @@ export function AppLayout() {
             </Button>
           </div>
         </header>
+
+        {/* Sandbox mode banner — above scrollable content so it stays visible */}
+        <SandboxBanner />
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto p-4 md:p-6">
