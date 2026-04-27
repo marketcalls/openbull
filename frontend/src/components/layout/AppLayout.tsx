@@ -35,6 +35,14 @@ const navItems: NavItem[] = [
     ],
   },
   {
+    label: "Sandbox",
+    to: "/sandbox",
+    children: [
+      { label: "Configuration", to: "/sandbox" },
+      { label: "My P&L", to: "/sandbox/mypnl" },
+    ],
+  },
+  {
     label: "Settings",
     to: "/broker/config",
     children: [
