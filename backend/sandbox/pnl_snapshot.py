@@ -32,7 +32,13 @@ def snapshot_for_date(snapshot_date: date | None = None) -> int:
     Returns the number of rows written. Skips users whose snapshot for the
     given date already exists so re-runs are safe.
     """
-    target_date = (snapshot_date or date.today()).isoformat()
+    # The snapshot table's ``snapshot_date`` column is VARCHAR(10) (an
+    # ISO-formatted string), while ``func.date(timestamp)`` in Postgres
+    # returns a real DATE. We need both forms — the string for the table
+    # comparison, the date object for the trade-count subquery — otherwise
+    # Postgres errors out with "operator does not exist: date = varchar".
+    target_date_obj = snapshot_date or date.today()
+    target_iso = target_date_obj.isoformat()
 
     written = 0
     with session_scope() as db:
@@ -46,7 +52,7 @@ def snapshot_for_date(snapshot_date: date | None = None) -> int:
             exists = db.execute(
                 select(SandboxDailyPnL.id).where(
                     SandboxDailyPnL.user_id == user_id,
-                    SandboxDailyPnL.snapshot_date == target_date,
+                    SandboxDailyPnL.snapshot_date == target_iso,
                 )
             ).scalar_one_or_none()
             if exists is not None:
@@ -76,7 +82,7 @@ def snapshot_for_date(snapshot_date: date | None = None) -> int:
                 db.execute(
                     select(func.count()).select_from(SandboxTrade).where(
                         SandboxTrade.user_id == user_id,
-                        func.date(SandboxTrade.timestamp) == target_date,
+                        func.date(SandboxTrade.timestamp) == target_date_obj,
                     )
                 ).scalar()
                 or 0
@@ -91,7 +97,7 @@ def snapshot_for_date(snapshot_date: date | None = None) -> int:
             db.add(
                 SandboxDailyPnL(
                     user_id=user_id,
-                    snapshot_date=target_date,
+                    snapshot_date=target_iso,
                     starting_capital=round(start, 2),
                     available=round(available, 2),
                     used_margin=round(used, 2),
@@ -106,5 +112,5 @@ def snapshot_for_date(snapshot_date: date | None = None) -> int:
             written += 1
 
     if written:
-        logger.info("sandbox daily P&L: wrote %d snapshots for %s", written, target_date)
+        logger.info("sandbox daily P&L: wrote %d snapshots for %s", written, target_iso)
     return written
