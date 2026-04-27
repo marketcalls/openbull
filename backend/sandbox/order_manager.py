@@ -319,19 +319,31 @@ def to_dict(order: SandboxOrder) -> dict[str, Any]:
 
 
 def trade_to_dict(trade: SandboxTrade) -> dict[str, Any]:
+    """Tradebook row in the same shape live brokers' transform layers return.
+
+    Field names + types match :func:`backend.broker.zerodha.mapping.order_data.transform_tradebook_data`
+    (and the upstox equivalent), so the same React table renders both.
+    Missing this contract — specifically the ``trade_value`` field — used to
+    crash the TradeBook page with a ``toFixed`` of ``undefined`` error.
+    """
+    qty = trade.quantity or 0
+    avg = trade.average_price or 0.0
+    ts = (
+        trade.timestamp.strftime("%d-%b-%Y %H:%M:%S")
+        if isinstance(trade.timestamp, datetime)
+        else ""
+    )
     return {
         "tradeid": trade.tradeid,
         "orderid": trade.orderid,
         "symbol": trade.symbol,
         "exchange": trade.exchange,
         "action": trade.action,
-        "quantity": trade.quantity,
-        "average_price": round(trade.average_price, 2),
         "product": trade.product,
+        "quantity": int(qty),
+        "average_price": round(float(avg), 2),
+        "trade_value": round(float(qty) * float(avg), 2),
         "strategy": trade.strategy or "",
-        "trade_timestamp": (
-            trade.timestamp.strftime("%d-%b-%Y %H:%M:%S")
-            if isinstance(trade.timestamp, datetime)
-            else None
-        ),
+        "timestamp": ts,
+        "trade_timestamp": ts,
     }
