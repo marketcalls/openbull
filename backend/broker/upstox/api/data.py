@@ -61,15 +61,18 @@ def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None 
     if data.get("status") != "success" or not data.get("data"):
         raise ValueError(data.get("message", "Failed to fetch quotes"))
 
-    quote_data = None
-    for key, val in data["data"].items():
-        quote_data = val
-        break
+    # Upstox sometimes returns the symbol key with a null payload (unknown /
+    # expired / illiquid instrument). Skip null entries when picking the first
+    # value so we don't AttributeError on `.get()` below.
+    quote_data = next(
+        (val for val in data["data"].values() if val is not None),
+        None,
+    )
 
     if not quote_data:
         raise ValueError("No quote data in response")
 
-    ohlc = quote_data.get("ohlc", {})
+    ohlc = quote_data.get("ohlc") or {}
     return {
         "ltp": quote_data.get("last_price", 0),
         "open": ohlc.get("open", 0),
@@ -110,6 +113,12 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
 
     results = []
     for response_key, quote_data in data["data"].items():
+        # Upstox returns null for unknown/expired/illiquid instrument keys.
+        # Skip those silently — without this guard the .get() calls below
+        # throw "'NoneType' object has no attribute 'get'" and the whole
+        # batch fails, zeroing every leg's quote.
+        if not quote_data:
+            continue
         info = keys_map.get(response_key)
         if not info:
             # Upstox returns keys like "NSE_FO:Nifty 50" — try matching by the
@@ -128,11 +137,13 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
         if not info:
             continue
 
-        ohlc = quote_data.get("ohlc", {})
-        # Top-of-book from the same payload (no extra round-trip).
-        depth = quote_data.get("depth", {})
-        bids = depth.get("buy", []) or []
-        asks = depth.get("sell", []) or []
+        # `or {}` covers both missing-key (default kicks in) and explicit-None
+        # value (default is skipped — Upstox sometimes returns "ohlc": null
+        # for illiquid contracts, which would otherwise AttributeError below).
+        ohlc = quote_data.get("ohlc") or {}
+        depth = quote_data.get("depth") or {}
+        bids = depth.get("buy") or []
+        asks = depth.get("sell") or []
         top_bid = bids[0] if bids else {}
         top_ask = asks[0] if asks else {}
         results.append({
@@ -172,24 +183,26 @@ def get_market_depth(symbol: str, exchange: str, auth_token: str, config: dict |
     if data.get("status") != "success" or not data.get("data"):
         raise ValueError(data.get("message", "Failed to fetch market depth"))
 
-    quote_data = None
-    for key, val in data["data"].items():
-        quote_data = val
-        break
+    quote_data = next(
+        (val for val in data["data"].values() if val is not None),
+        None,
+    )
 
     if not quote_data:
         raise ValueError("No depth data in response")
 
-    depth = quote_data.get("depth", {})
-    ohlc = quote_data.get("ohlc", {})
+    depth = quote_data.get("depth") or {}
+    ohlc = quote_data.get("ohlc") or {}
 
     bids = [
         {"price": b.get("price", 0), "quantity": b.get("quantity", 0), "orders": b.get("orders", 0)}
-        for b in depth.get("buy", [])
+        for b in (depth.get("buy") or [])
+        if b is not None
     ]
     asks = [
         {"price": a.get("price", 0), "quantity": a.get("quantity", 0), "orders": a.get("orders", 0)}
-        for a in depth.get("sell", [])
+        for a in (depth.get("sell") or [])
+        if a is not None
     ]
 
     return {

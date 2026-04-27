@@ -10,6 +10,12 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // Pre-bundle the Plotly CJS bundles so dev and prod see identical default-
+  // export shapes — without this Vite occasionally returns the namespace
+  // object instead of the default function and the chart fails to mount.
+  optimizeDeps: {
+    include: ["react-plotly.js/factory", "plotly.js-cartesian-dist-min"],
+  },
   server: {
     host: "127.0.0.1", // force IPv4 loopback — Node on Windows binds "localhost" to ::1-only
     port: 5173,

@@ -71,23 +71,25 @@ def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None 
     if data.get("status") != "success" or not data.get("data"):
         raise ValueError(data.get("message", "Failed to fetch quotes"))
 
-    # Data is keyed by "EXCHANGE:SYMBOL"
-    quote_data = None
-    for key, val in data["data"].items():
-        quote_data = val
-        break
+    # Data is keyed by "EXCHANGE:SYMBOL". Skip null entries — Kite returns
+    # them for unknown / expired / illiquid instruments, and a downstream
+    # `.get()` would AttributeError.
+    quote_data = next(
+        (val for val in data["data"].values() if val is not None),
+        None,
+    )
 
     if not quote_data:
         raise ValueError("No quote data in response")
 
-    ohlc = quote_data.get("ohlc", {})
+    ohlc = quote_data.get("ohlc") or {}
     return {
         "ltp": quote_data.get("last_price", 0),
         "open": ohlc.get("open", 0),
         "high": ohlc.get("high", 0),
         "low": ohlc.get("low", 0),
         "close": ohlc.get("close", 0),
-        "prev_close": quote_data.get("ohlc", {}).get("close", 0),
+        "prev_close": ohlc.get("close", 0),
         "volume": quote_data.get("volume", 0),
         "oi": quote_data.get("oi", 0),
     }
@@ -120,15 +122,22 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
 
     results = []
     for key, quote_data in data["data"].items():
+        # Zerodha returns null for unknown/expired/illiquid instruments —
+        # without skipping these the .get() calls below AttributeError and
+        # the entire batch raises, zeroing every leg.
+        if not quote_data:
+            continue
         info = params_map.get(key)
         if not info:
             continue
 
-        ohlc = quote_data.get("ohlc", {})
-        # Top-of-book from the same payload (no extra round-trip).
-        depth = quote_data.get("depth", {})
-        bids = depth.get("buy", []) or []
-        asks = depth.get("sell", []) or []
+        # `or {}` covers both missing-key and explicit-None values — Kite
+        # sometimes returns "ohlc": null on illiquid contracts, which would
+        # AttributeError below.
+        ohlc = quote_data.get("ohlc") or {}
+        depth = quote_data.get("depth") or {}
+        bids = depth.get("buy") or []
+        asks = depth.get("sell") or []
         top_bid = bids[0] if bids else {}
         top_ask = asks[0] if asks else {}
         results.append({
@@ -164,24 +173,26 @@ def get_market_depth(symbol: str, exchange: str, auth_token: str, config: dict |
     if data.get("status") != "success" or not data.get("data"):
         raise ValueError(data.get("message", "Failed to fetch market depth"))
 
-    quote_data = None
-    for key, val in data["data"].items():
-        quote_data = val
-        break
+    quote_data = next(
+        (val for val in data["data"].values() if val is not None),
+        None,
+    )
 
     if not quote_data:
         raise ValueError("No depth data in response")
 
-    depth = quote_data.get("depth", {})
-    ohlc = quote_data.get("ohlc", {})
+    depth = quote_data.get("depth") or {}
+    ohlc = quote_data.get("ohlc") or {}
 
     bids = [
         {"price": b.get("price", 0), "quantity": b.get("quantity", 0), "orders": b.get("orders", 0)}
-        for b in depth.get("buy", [])
+        for b in (depth.get("buy") or [])
+        if b is not None
     ]
     asks = [
         {"price": a.get("price", 0), "quantity": a.get("quantity", 0), "orders": a.get("orders", 0)}
-        for a in depth.get("sell", [])
+        for a in (depth.get("sell") or [])
+        if a is not None
     ]
 
     return {
