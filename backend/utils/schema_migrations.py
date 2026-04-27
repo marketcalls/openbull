@@ -71,6 +71,24 @@ def run_startup_migrations() -> None:
         _add_index_if_missing(
             engine, "api_logs", "idx_api_logs_mode_created", ["mode", "created_at"]
         )
+
+        # Phase 2c: sandbox margin model now matches openalgo's transfer-on-fill
+        # design. Margin is locked against the position once an order fills, and
+        # pro-rata released on reduce/close. New columns:
+        _add_column_if_missing(
+            engine, "sandbox_positions", "margin_blocked", "DOUBLE PRECISION NOT NULL DEFAULT 0"
+        )
+        _add_column_if_missing(
+            engine, "sandbox_positions", "today_realized_pnl", "DOUBLE PRECISION NOT NULL DEFAULT 0"
+        )
+        _add_column_if_missing(
+            engine, "sandbox_funds", "today_realized_pnl", "DOUBLE PRECISION NOT NULL DEFAULT 0"
+        )
+        # Phase 2c continued: holdings get a settlement_date so the UI can
+        # show the T+1 settle day. Nullable — historical rows won't have it.
+        _add_column_if_missing(
+            engine, "sandbox_holdings", "settlement_date", "VARCHAR(10)"
+        )
     except Exception:
         logger.exception("Startup schema migration failed")
     finally:

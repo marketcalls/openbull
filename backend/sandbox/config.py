@@ -17,9 +17,10 @@ logger = logging.getLogger(__name__)
 def seed_defaults() -> None:
     """Insert any missing default keys. Safe to call at every app startup."""
     with session_scope() as db:
-        existing = {
-            row.key for row in db.execute(select(SandboxConfig.key)).scalars().all()
-        }
+        # ``select(SandboxConfig.key).scalars()`` already yields the raw key
+        # strings — earlier code did ``row.key for row in ...`` which crashed
+        # because each scalar IS the key string, not a row object.
+        existing = set(db.execute(select(SandboxConfig.key)).scalars().all())
         added = 0
         for key, value, desc in DEFAULT_CONFIGS:
             if key not in existing:
@@ -58,7 +59,52 @@ def get_starting_capital(db: Session | None = None) -> float:
 
 
 def get_leverage(product: str, db: Session | None = None) -> float:
+    """Legacy product-only leverage — kept so existing callers (squareoff, weekly
+    reset) keep working. Prefer :func:`get_leverage_for` which is
+    instrument-aware (option BUY vs SELL, futures vs equity, etc)."""
     key = LEVERAGE_KEYS.get(product.upper(), "leverage_nrml")
+    if db is None:
+        with session_scope() as s:
+            return _read_float(s, key, 1.0)
+    return _read_float(db, key, 1.0)
+
+
+def get_leverage_for(
+    *,
+    exchange: str,
+    product: str,
+    instrument_type: str,
+    action: str,
+    db: Session | None = None,
+) -> float:
+    """Resolve the right leverage knob for a fully-specified order.
+
+    Selection mirrors openalgo:
+
+    * Option BUY  → ``option_buy_leverage``
+    * Option SELL → ``option_sell_leverage``
+    * Future      → ``futures_leverage``
+    * Equity MIS  → ``equity_mis_leverage``
+    * Equity CNC  → ``equity_cnc_leverage``
+
+    Falls back to the legacy product-only key if the instrument can't be
+    classified (e.g. symbol missing from the master) so an unknown order
+    still gets *some* sensible margin rather than a zero-margin placement.
+    """
+    instrument_type = (instrument_type or "").upper()
+    action = (action or "").upper()
+    product = (product or "").upper()
+    exchange = (exchange or "").upper()
+
+    if instrument_type in ("CE", "PE"):
+        key = "option_buy_leverage" if action == "BUY" else "option_sell_leverage"
+    elif instrument_type == "FUT" or instrument_type.endswith("FUT"):
+        key = "futures_leverage"
+    elif exchange in ("NSE", "BSE"):
+        key = "equity_mis_leverage" if product == "MIS" else "equity_cnc_leverage"
+    else:
+        key = LEVERAGE_KEYS.get(product, "leverage_nrml")
+
     if db is None:
         with session_scope() as s:
             return _read_float(s, key, 1.0)
@@ -70,6 +116,13 @@ def get_order_check_interval(db: Session | None = None) -> int:
         with session_scope() as s:
             return max(1, _read_int(s, "order_check_interval_seconds", 5))
     return max(1, _read_int(db, "order_check_interval_seconds", 5))
+
+
+def get_mtm_update_interval(db: Session | None = None) -> int:
+    if db is None:
+        with session_scope() as s:
+            return max(1, _read_int(s, "mtm_update_interval_seconds", 5))
+    return max(1, _read_int(db, "mtm_update_interval_seconds", 5))
 
 
 def get_all_configs() -> dict[str, dict[str, str | bool]]:

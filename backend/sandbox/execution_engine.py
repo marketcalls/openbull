@@ -90,7 +90,24 @@ def _fill_price(order, ltp: float) -> float | None:
 
 
 def _try_fill_order(order, ltp: float) -> bool:
-    """Attempt to fill a single order at current LTP. Returns True if filled."""
+    """Attempt to fill a single order at current LTP. Returns True if filled.
+
+    Fund movement on fill follows openalgo's transfer-on-fill model:
+
+    * If the fill **adds** to (or opens) a position, the order's
+      ``margin_blocked`` is moved from the order row into the position row.
+      Nothing leaves ``used_margin`` — the cash is still locked, only the
+      bucket changes (handled inside ``position_manager.apply_fill``).
+    * If the fill **reduces or closes** a position, ``apply_fill`` returns
+      the pro-rata margin slice that should be released; we hand it to
+      ``release_margin`` together with the realized PnL so cash and PnL
+      land on the funds row in a single transaction.
+
+    The per-user lock in ``fund_manager`` keeps concurrent ticks for the
+    same user serialized — every helper here that mutates the funds row
+    acquires that lock and releases it on exit (including on exception)
+    via the context-manager pattern.
+    """
     price = _fill_price(order, ltp)
     if price is None:
         return False
@@ -100,8 +117,10 @@ def _try_fill_order(order, ltp: float) -> bool:
     if filled_row is None or trade is None:
         return False
 
-    # Update position book
-    realized = position_manager.apply_fill(
+    # Update position book — also handles the order→position margin transfer
+    # for the same-direction path. Returns the slice of margin to release for
+    # the opposite-direction (reduce/close/reverse) path.
+    realized, margin_to_release = position_manager.apply_fill(
         user_id=order.user_id,
         symbol=order.symbol,
         exchange=order.exchange,
@@ -109,19 +128,21 @@ def _try_fill_order(order, ltp: float) -> bool:
         action=order.action,
         quantity=trade.quantity,
         price=price,
+        order_margin=float(order.margin_blocked or 0.0),
     )
 
-    # Fund movement:
-    # - Release the margin blocked at order-entry
-    # - Credit / debit realized PnL from the offset portion of the fill
-    if order.margin_blocked:
-        fund_manager.release_margin(order.user_id, order.margin_blocked)
-    if realized:
-        fund_manager.apply_realized_pnl(order.user_id, realized)
+    # Fund movement: release pro-rata position margin + book realized PnL
+    # in a single transaction. Pure same-direction fills hit neither branch
+    # because the margin already lives on the position row.
+    if margin_to_release > 0 or realized:
+        fund_manager.release_margin(
+            order.user_id, float(margin_to_release), float(realized)
+        )
 
     logger.info(
-        "sandbox: filled %s %s %s qty=%d @ %.2f (realized=%.2f)",
-        order.orderid, order.action, order.symbol, trade.quantity, price, realized,
+        "sandbox: filled %s %s %s qty=%d @ %.2f (realized=%.2f, released=%.2f)",
+        order.orderid, order.action, order.symbol, trade.quantity, price,
+        realized, margin_to_release,
     )
     return True
 
@@ -152,9 +173,13 @@ def _on_tick(data: dict[str, Any]) -> None:
 # -- polling fallback -----------------------------------------------------
 
 def _poll_loop() -> None:
-    from backend.services.market_data_cache import get_market_data_cache
+    """Fallback poll loop. Tries cached LTP first; falls back to a broker
+    quote keyed off the order's user. Without the broker fallback, MARKET
+    orders placed after market hours (when no tick stream is running) would
+    sit at ``open`` forever — same bug openalgo solved with its multiquotes
+    fallback in the execution engine."""
+    from backend.sandbox.quote_helper import get_ltp as get_ltp_with_fallback
 
-    mds = get_market_data_cache()
     while not _stop_event.is_set():
         try:
             interval = max(1, get_order_check_interval())
@@ -163,7 +188,7 @@ def _poll_loop() -> None:
         try:
             pending = order_manager.list_pending_orders()
             for order in pending:
-                ltp = mds.get_ltp_value(order.symbol, order.exchange)
+                ltp = get_ltp_with_fallback(order.user_id, order.symbol, order.exchange)
                 if ltp is None or ltp <= 0:
                     continue
                 _try_fill_order(order, float(ltp))

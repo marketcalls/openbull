@@ -57,14 +57,22 @@ async def lifespan(app: FastAPI):
     try:
         from backend.sandbox.config import seed_defaults
         from backend.sandbox.execution_engine import start as start_sandbox_engine
+        from backend.sandbox.mtm_updater import start as start_sandbox_mtm
         from backend.sandbox.scheduler import start as start_sandbox_scheduler
+        from backend.sandbox.catch_up import run_catch_up_tasks
 
         seed_defaults()
+        # Catch up any scheduled work the app missed while it was down: stale
+        # MIS positions, T+1 CNC settlement, today_realized_pnl reset, expired
+        # F&O contracts. Runs *before* the engine/scheduler so the first tick
+        # sees a consistent book.
+        run_catch_up_tasks()
         start_sandbox_engine()
         start_sandbox_scheduler()
-        logger.info("Sandbox execution engine + scheduler started")
+        start_sandbox_mtm()
+        logger.info("Sandbox: catch-up done; engine + scheduler + MTM updater started")
     except Exception:
-        logger.exception("Failed to start sandbox engine/scheduler")
+        logger.exception("Failed to start sandbox engine/scheduler/MTM")
 
     # Load broker plugins
     plugins = load_all_plugins()
@@ -104,12 +112,14 @@ async def lifespan(app: FastAPI):
         w.stop(timeout=2.0)
     try:
         from backend.sandbox.execution_engine import stop as stop_sandbox_engine
+        from backend.sandbox.mtm_updater import stop as stop_sandbox_mtm
         from backend.sandbox.scheduler import stop as stop_sandbox_scheduler
 
         stop_sandbox_scheduler()
+        stop_sandbox_mtm()
         stop_sandbox_engine()
     except Exception:
-        logger.exception("Error stopping sandbox engine/scheduler")
+        logger.exception("Error stopping sandbox engine/scheduler/MTM")
     await engine.dispose()
     logger.info("OpenBull shut down")
     # Flush DB error sink before the process exits so in-flight queued

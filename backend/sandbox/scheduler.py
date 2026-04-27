@@ -32,7 +32,13 @@ from sqlalchemy import select
 
 from backend.models.sandbox import SandboxConfig
 from backend.sandbox._db import session_scope
-from backend.sandbox import pnl_snapshot, squareoff, t1_settle, weekly_reset
+from backend.sandbox import (
+    daily_reset,
+    pnl_snapshot,
+    squareoff,
+    t1_settle,
+    weekly_reset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +165,25 @@ def _tick() -> None:
             lambda: pnl_snapshot.snapshot_for_date(date.fromisoformat(today_iso)),
         )
         _mark_ran(eod_job, today_iso)
+
+    # --- Daily today_realized_pnl reset (00:00 IST) ---
+    # ``today_realized_pnl`` is a per-session bucket for Position + Fund rows.
+    # The accumulated ``realized_pnl`` is preserved; only the today bucket
+    # zeroes out so tomorrow's session starts at 0 even if the app stayed up.
+    # The same hook also re-runs the expired-F&O-contract auto-close in case
+    # any contract crossed its expiry mid-session — startup catch-up handles
+    # this on restart, the daily hook handles it for long-running processes.
+    daily_job = "daily_reset"
+    if _due_today("00:00", now, _read_last_run(daily_job) == today_iso):
+        _run_once_safely("daily_reset", daily_reset.reset_today_pnl)
+        try:
+            from backend.sandbox import catch_up
+            _run_once_safely(
+                "expired_fno_close", catch_up._close_expired_fno_positions
+            )
+        except Exception:
+            logger.exception("daily expired-FnO close raised")
+        _mark_ran(daily_job, today_iso)
 
     # --- Weekly reset ---
     reset_job = "weekly_reset"

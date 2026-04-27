@@ -105,7 +105,13 @@ class SandboxPosition(Base):
     ltp = Column(Float, nullable=False, default=0.0)
     pnl = Column(Float, nullable=False, default=0.0)  # unrealized + realized for this symbol
     realized_pnl = Column(Float, nullable=False, default=0.0)
+    today_realized_pnl = Column(Float, nullable=False, default=0.0)
     unrealized_pnl = Column(Float, nullable=False, default=0.0)
+
+    # Margin currently locked against this position. Transferred from
+    # ``SandboxOrder.margin_blocked`` when the order fills; pro-rata released
+    # back to ``SandboxFund.available`` when the position is reduced or closed.
+    margin_blocked = Column(Float, nullable=False, default=0.0)
 
     # Intraday tracking — reset daily by squareoff scheduler (Phase 2b)
     day_buy_quantity = Column(Integer, nullable=False, default=0)
@@ -138,6 +144,11 @@ class SandboxHolding(Base):
     pnl = Column(Float, nullable=False, default=0.0)
     pnlpercent = Column(Float, nullable=False, default=0.0)
 
+    # T+1 settlement date — populated when the position is moved into
+    # holdings by the EOD scheduler. Lets the UI show "settled on dd-MMM-yyyy"
+    # the same way openalgo's holdings table does.
+    settlement_date = Column(String(10), nullable=True)  # "YYYY-MM-DD" IST
+
     added_on = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
@@ -157,6 +168,7 @@ class SandboxFund(Base):
     available = Column(Float, nullable=False, default=10_000_000.0)
     used_margin = Column(Float, nullable=False, default=0.0)
     realized_pnl = Column(Float, nullable=False, default=0.0)
+    today_realized_pnl = Column(Float, nullable=False, default=0.0)
     unrealized_pnl = Column(Float, nullable=False, default=0.0)
 
     reset_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

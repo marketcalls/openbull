@@ -12,6 +12,7 @@ order's trigger condition is met.
 from __future__ import annotations
 
 import logging
+import random
 import secrets
 from datetime import datetime
 from typing import Any
@@ -26,12 +27,19 @@ logger = logging.getLogger(__name__)
 
 
 def new_orderid() -> str:
-    """Short, URL-safe, client-friendly simulated orderid."""
-    return "SBX-" + secrets.token_hex(6).upper()
+    """Sandbox orderid in openalgo's format: ``YYMMDD`` prefix + 8-digit
+    sequence (6-digit microseconds + 2-digit random). Sortable by date and
+    free of vendor prefixes — matches openalgo's
+    ``OrderManager._generate_order_id`` exactly so reports / logs / tooling
+    that splits on the date prefix work the same way."""
+    now = datetime.now()
+    return f"{now.strftime('%y%m%d')}{now.microsecond:06d}{random.randint(0, 99):02d}"
 
 
 def new_tradeid() -> str:
-    return "SBT-" + secrets.token_hex(6).upper()
+    """Trade id matching openalgo: ``TRADE-YYYYMMDD-HHMMSS-<8 hex>``."""
+    now = datetime.now()
+    return f"TRADE-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4).upper()}"
 
 
 def create_order(

@@ -167,3 +167,87 @@ async def wipe_all(user: User = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Admin access required")
     affected = weekly_reset.wipe_all_users()
     return {"status": "success", "users_wiped": affected}
+
+
+# ---------------------------------------------------------------------------
+# Squareoff scheduler introspection — matches openalgo's
+# /sandbox/squareoff-status and /sandbox/reload-squareoff endpoints.
+# ---------------------------------------------------------------------------
+
+@router.get("/squareoff-status")
+async def squareoff_status(user: User = Depends(get_current_user)):
+    """Return each squareoff bucket's configured cut-off time and whether the
+    job has already run today. Lets the UI render a "next run at HH:MM" badge
+    without restarting the scheduler."""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select
+    from backend.models.sandbox import SandboxConfig
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(tz=IST)
+    today_iso = now.date().isoformat()
+
+    buckets = (
+        ("nse_nfo_bse_bfo", "squareoff_nse_nfo_bse_bfo", "15:15"),
+        ("cds", "squareoff_cds", "16:45"),
+        ("mcx", "squareoff_mcx", "23:30"),
+    )
+
+    out: list[dict] = []
+    with session_scope() as db:
+        rows_by_key = {
+            r.key: r.value
+            for r in db.execute(select(SandboxConfig)).scalars().all()
+        }
+        for bucket, cfg_key, default in buckets:
+            cutoff_str = rows_by_key.get(cfg_key, default)
+            last_run = rows_by_key.get(f"_sched_last_squareoff_{bucket}", "")
+            already_ran_today = last_run == today_iso
+            out.append({
+                "bucket": bucket,
+                "cutoff_time": cutoff_str,
+                "ran_today": already_ran_today,
+                "last_run": last_run,
+            })
+    return {
+        "status": "success",
+        "now_ist": now.isoformat(timespec="seconds"),
+        "buckets": out,
+    }
+
+
+@router.post("/reload-squareoff")
+async def reload_squareoff(user: User = Depends(get_current_user)):
+    """Acknowledge that the scheduler should pick up new squareoff times on
+    its next tick. The scheduler reads config every loop iteration so this
+    is a no-op confirmation; admin-gated to match openalgo's surface."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {
+        "status": "success",
+        "message": "Squareoff schedule reloads automatically on the next "
+                   "60s scheduler tick — no restart required.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Margin reconciliation — matches openalgo's reconcile_margin admin call.
+# ---------------------------------------------------------------------------
+
+@router.post("/reconcile-margin")
+async def reconcile_margin_endpoint(
+    auto_fix: bool = True,
+    user: User = Depends(get_current_user),
+):
+    """Compare ``fund.used_margin`` against the sum of position margins for
+    the calling user. Releases stuck margin to *available* if ``auto_fix``
+    is true and a positive drift is found."""
+    consistent, drift, details = fund_manager.reconcile_margin(
+        user.id, auto_fix=auto_fix
+    )
+    return {
+        "status": "success",
+        "consistent": consistent,
+        "discrepancy": drift,
+        "details": details,
+    }
