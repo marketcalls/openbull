@@ -5,6 +5,7 @@ import type {
   OptionChainResponse,
   PlaceOrderRequest,
   PlaceOrderResponse,
+  UnderlyingsResponse,
 } from "@/types/optionchain";
 
 let cachedApiKey: string | null = null;
@@ -47,6 +48,13 @@ export async function fetchExpiries(params: {
     apikey,
     instrumenttype: params.instrumenttype ?? "options",
     ...params,
+  });
+  return response.data;
+}
+
+export async function fetchUnderlyings(exchange: "NFO" | "BFO"): Promise<UnderlyingsResponse> {
+  const response = await api.get<UnderlyingsResponse>("/web/symbols/underlyings", {
+    params: { exchange },
   });
   return response.data;
 }

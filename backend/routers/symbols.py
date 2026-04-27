@@ -9,7 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.dependencies import get_broker_context, get_current_user, BrokerContext
 from backend.models.user import User
-from backend.services.symbol_service import download_master_contracts, search_symbols
+from backend.services.symbol_service import (
+    download_master_contracts,
+    get_option_underlyings,
+    search_symbols,
+)
 from backend.services.master_contract_status import get_download_status
 
 logger = logging.getLogger(__name__)
@@ -32,6 +36,18 @@ async def symbol_search(
     """Search for symbols in the master contract database."""
     results = await search_symbols(query=q, exchange=exchange, broker_name=ctx.broker_name)
     return {"status": "success", "data": results}
+
+
+@router.get("/underlyings")
+async def option_underlyings(
+    exchange: str = Query(..., min_length=1, max_length=10, description="Option exchange (NFO, BFO)"),
+    user: User = Depends(get_current_user),
+):
+    """List distinct option underlyings for an exchange (CE/PE 'name' column)."""
+    if exchange.upper() not in {"NFO", "BFO"}:
+        raise HTTPException(status_code=400, detail="exchange must be NFO or BFO")
+    names = get_option_underlyings(exchange)
+    return {"status": "success", "data": names}
 
 
 @router.post("/download")

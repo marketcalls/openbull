@@ -162,6 +162,10 @@ def get_option_chain(
                     "prev_close": q.get("prev_close", 0),
                     "volume": q.get("volume", 0),
                     "oi": q.get("oi", 0),
+                    "bid": q.get("bid", 0),
+                    "ask": q.get("ask", 0),
+                    "bid_qty": q.get("bid_qty", 0),
+                    "ask_qty": q.get("ask_qty", 0),
                     "lotsize": meta["lotsize"],
                     "tick_size": meta["tick_size"],
                 }

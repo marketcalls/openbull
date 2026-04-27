@@ -129,6 +129,12 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
             continue
 
         ohlc = quote_data.get("ohlc", {})
+        # Top-of-book from the same payload (no extra round-trip).
+        depth = quote_data.get("depth", {})
+        bids = depth.get("buy", []) or []
+        asks = depth.get("sell", []) or []
+        top_bid = bids[0] if bids else {}
+        top_ask = asks[0] if asks else {}
         results.append({
             "symbol": info["symbol"],
             "exchange": info["exchange"],
@@ -140,6 +146,10 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
             "prev_close": quote_data.get("prev_close", ohlc.get("close", 0)),
             "volume": quote_data.get("volume", 0),
             "oi": quote_data.get("oi", 0),
+            "bid": top_bid.get("price", 0),
+            "ask": top_ask.get("price", 0),
+            "bid_qty": top_bid.get("quantity", 0),
+            "ask_qty": top_ask.get("quantity", 0),
         })
 
     return results
