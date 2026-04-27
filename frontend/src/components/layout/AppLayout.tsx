@@ -43,6 +43,14 @@ const navItems: NavItem[] = [
     ],
   },
   {
+    label: "Tools",
+    to: "/tools",
+    children: [
+      { label: "All Tools", to: "/tools" },
+      { label: "Option Chain", to: "/tools/optionchain" },
+    ],
+  },
+  {
     label: "Settings",
     to: "/broker/config",
     children: [

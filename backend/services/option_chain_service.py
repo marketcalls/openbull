@@ -105,6 +105,7 @@ def get_option_chain(
 
         underlying_data = qdata.get("data", {})
         underlying_ltp = underlying_data.get("ltp")
+        underlying_prev_close = underlying_data.get("prev_close", underlying_data.get("close", 0))
         if underlying_ltp is None:
             return False, {"status": "error", "message": "Underlying LTP unavailable"}, 500
 
@@ -171,6 +172,7 @@ def get_option_chain(
             "status": "success",
             "underlying": base_symbol,
             "underlying_ltp": float(underlying_ltp),
+            "underlying_prev_close": float(underlying_prev_close or 0),
             "expiry_date": final_expiry,
             "atm_strike": atm,
             "chain": chain,

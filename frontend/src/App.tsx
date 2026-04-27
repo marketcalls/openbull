@@ -21,7 +21,10 @@ import WebSocketTest from "@/pages/WebSocketTest";
 import Logs from "@/pages/Logs";
 import Sandbox from "@/pages/Sandbox";
 import SandboxMyPnL from "@/pages/SandboxMyPnL";
+import Tools from "@/pages/Tools";
+import OptionChain from "@/pages/tools/OptionChain";
 import NotFound from "@/pages/NotFound";
+import { Toaster } from "@/components/ui/sonner";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -145,11 +148,28 @@ function App() {
                     </ProtectedRoute>
                   }
                 />
+                <Route
+                  path="/tools"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Tools />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/optionchain"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <OptionChain />
+                    </ProtectedRoute>
+                  }
+                />
               </Route>
 
               {/* Catch-all */}
               <Route path="*" element={<NotFound />} />
             </Routes>
+            <Toaster />
             </TradingModeProvider>
           </AuthProvider>
         </BrowserRouter>
