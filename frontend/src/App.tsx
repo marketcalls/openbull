@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider } from "@/contexts/AuthContext";
@@ -22,9 +23,21 @@ import Logs from "@/pages/Logs";
 import Sandbox from "@/pages/Sandbox";
 import SandboxMyPnL from "@/pages/SandboxMyPnL";
 import Tools from "@/pages/Tools";
-import OptionChain from "@/pages/tools/OptionChain";
 import NotFound from "@/pages/NotFound";
 import { Toaster } from "@/components/ui/sonner";
+
+// Code-split heavy tool pages — Plotly weighs ~600 KB gz, only fetch it when
+// the user navigates to a chart tool.
+const OptionChain = lazy(() => import("@/pages/tools/OptionChain"));
+const OITracker = lazy(() => import("@/pages/tools/OITracker"));
+
+function ToolFallback() {
+  return (
+    <div className="flex h-[500px] items-center justify-center">
+      <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
+    </div>
+  );
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -160,7 +173,19 @@ function App() {
                   path="/tools/optionchain"
                   element={
                     <ProtectedRoute requiresBroker>
-                      <OptionChain />
+                      <Suspense fallback={<ToolFallback />}>
+                        <OptionChain />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/oitracker"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <OITracker />
+                      </Suspense>
                     </ProtectedRoute>
                   }
                 />

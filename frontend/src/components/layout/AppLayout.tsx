@@ -48,6 +48,7 @@ const navItems: NavItem[] = [
     children: [
       { label: "All Tools", to: "/tools" },
       { label: "Option Chain", to: "/tools/optionchain" },
+      { label: "OI Tracker", to: "/tools/oitracker" },
     ],
   },
   {

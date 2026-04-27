@@ -18,6 +18,13 @@ const TOOLS: ToolDef[] = [
       "Live CE/PE chain with strikes around ATM, OI bars, PCR, and one-click order placement.",
     status: "available",
   },
+  {
+    to: "/tools/oitracker",
+    title: "OI Tracker",
+    description:
+      "Open Interest snapshot per strike (CE vs PE), futures price, PCR (OI + Volume) and ATM marker.",
+    status: "available",
+  },
 ];
 
 export default function Tools() {
