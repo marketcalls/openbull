@@ -58,24 +58,30 @@ function buildPlot(
   const yIndices = data.expiries.map((_, i) => i);
   const yLabels = data.expiries.map((e) => `${e.date} (${e.dte}d)`);
 
+  // Customdata mirrors openalgo: a 2D array matching surface shape so each
+  // cell's hover shows its row's expiry date.
+  const customdata = data.surface.map((_, i) =>
+    Array(data.strikes.length).fill(data.expiries[i]?.date ?? ""),
+  );
+
   const traces: unknown[] = [
     {
       type: "surface",
       x: data.strikes,
       y: yIndices,
       z: data.surface,
+      customdata,
       colorscale: isDark ? "Viridis" : "YlOrRd",
       showscale: true,
+      opacity: 0.95,
       colorbar: {
-        title: { text: "IV (%)", font: { color: colors.text } },
+        title: { text: "IV %", font: { color: colors.text, size: 12 } },
         tickfont: { color: colors.text },
+        outlinewidth: 0,
+        len: 0.6,
       },
       hovertemplate:
-        "Strike %{x}<br>Expiry %{customdata}<br>IV: %{z:.2f}%<extra></extra>",
-      customdata: data.expiries.map((e) => e.date),
-      contours: {
-        z: { show: true, usecolormap: true, highlightcolor: "#ffffff", project: { z: true } },
-      },
+        "Strike: %{x}<br>Expiry: %{customdata}<br>IV: %{z:.2f}%<extra></extra>",
     },
   ];
 
@@ -87,17 +93,25 @@ function buildPlot(
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
     font: { color: colors.text, family: "system-ui, sans-serif" },
-    margin: { l: 20, r: 20, t: 50, b: 20 },
+    margin: { l: 0, r: 0, t: 50, b: 0 },
     scene: {
+      // Manual aspect ratio is critical — without it Plotly autoscales each
+      // axis to fit, which collapses the Z (IV%) range to a paper-thin sheet
+      // because strike values are ~1000x larger than IV values numerically.
+      aspectmode: "manual",
+      aspectratio: { x: 2, y: 1.2, z: 0.8 },
       camera: { eye: { x: 1.6, y: -1.6, z: 0.7 } },
+      bgcolor: "rgba(0,0,0,0)",
       xaxis: {
-        title: "Strike",
+        title: { text: "Strike", font: { color: colors.text, size: 12 } },
+        tickfont: { color: colors.text, size: 10 },
         backgroundcolor: colors.axisBg,
         gridcolor: colors.grid,
         color: colors.text,
       },
       yaxis: {
-        title: "Expiry",
+        title: { text: "Expiry", font: { color: colors.text, size: 12 } },
+        tickfont: { color: colors.text, size: 10 },
         backgroundcolor: colors.axisBg,
         gridcolor: colors.grid,
         color: colors.text,
@@ -106,7 +120,8 @@ function buildPlot(
         ticktext: yLabels,
       },
       zaxis: {
-        title: "IV (%)",
+        title: { text: "IV (%)", font: { color: colors.text, size: 12 } },
+        tickfont: { color: colors.text, size: 10 },
         backgroundcolor: colors.axisBg,
         gridcolor: colors.grid,
         color: colors.text,
