@@ -51,6 +51,10 @@ const navItems: NavItem[] = [
       { label: "OI Tracker", to: "/tools/oitracker" },
       { label: "Max Pain", to: "/tools/maxpain" },
       { label: "Option Greeks", to: "/tools/greeks" },
+      { label: "IV Smile", to: "/tools/ivsmile" },
+      { label: "Vol Surface", to: "/tools/volsurface" },
+      { label: "Straddle Chart", to: "/tools/straddle" },
+      { label: "GEX Dashboard", to: "/tools/gex" },
     ],
   },
   {

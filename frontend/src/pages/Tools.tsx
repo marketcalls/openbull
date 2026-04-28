@@ -39,6 +39,34 @@ const TOOLS: ToolDef[] = [
       "Intraday IV, Delta, Gamma, Theta and Vega for ATM CE & PE — Black-76 computed from candle history.",
     status: "available",
   },
+  {
+    to: "/tools/ivsmile",
+    title: "IV Smile",
+    description:
+      "Call vs Put IV across strikes for a single expiry, with ATM IV and 25-delta proxy skew.",
+    status: "available",
+  },
+  {
+    to: "/tools/volsurface",
+    title: "Volatility Surface",
+    description:
+      "3D IV surface across strikes × expiries — OTM convention (CE for K≥ATM, PE for K<ATM).",
+    status: "available",
+  },
+  {
+    to: "/tools/straddle",
+    title: "Straddle Chart",
+    description:
+      "Dynamic ATM straddle (CE+PE) time series with synthetic-future overlay (K + CE − PE).",
+    status: "available",
+  },
+  {
+    to: "/tools/gex",
+    title: "GEX Dashboard",
+    description:
+      "Gamma Exposure per strike (γ × OI × lot size) plus OI walls and top |γ| strikes table.",
+    status: "available",
+  },
 ];
 
 export default function Tools() {

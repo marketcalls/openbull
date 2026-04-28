@@ -34,6 +34,10 @@ from backend.api.optiongreeks import router as optiongreeks_router
 from backend.api.oitracker import router as oitracker_router
 from backend.api.maxpain import router as maxpain_router
 from backend.api.ivchart import router as ivchart_router
+from backend.api.ivsmile import router as ivsmile_router
+from backend.api.volsurface import router as volsurface_router
+from backend.api.straddle import router as straddle_router
+from backend.api.gex import router as gex_router
 from backend.api.analyzer import router as analyzer_router
 
 api_v1_router = APIRouter(prefix="/api/v1", tags=["api-v1"])
@@ -67,4 +71,8 @@ api_v1_router.include_router(optiongreeks_router)
 api_v1_router.include_router(oitracker_router)
 api_v1_router.include_router(maxpain_router)
 api_v1_router.include_router(ivchart_router)
+api_v1_router.include_router(ivsmile_router)
+api_v1_router.include_router(volsurface_router)
+api_v1_router.include_router(straddle_router)
+api_v1_router.include_router(gex_router)
 api_v1_router.include_router(analyzer_router)

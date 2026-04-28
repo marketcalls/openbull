@@ -32,6 +32,10 @@ const OptionChain = lazy(() => import("@/pages/tools/OptionChain"));
 const OITracker = lazy(() => import("@/pages/tools/OITracker"));
 const MaxPain = lazy(() => import("@/pages/tools/MaxPain"));
 const OptionGreeks = lazy(() => import("@/pages/tools/OptionGreeks"));
+const IVSmile = lazy(() => import("@/pages/tools/IVSmile"));
+const VolSurface = lazy(() => import("@/pages/tools/VolSurface"));
+const StraddleChart = lazy(() => import("@/pages/tools/StraddleChart"));
+const GEXDashboard = lazy(() => import("@/pages/tools/GEXDashboard"));
 
 function ToolFallback() {
   return (
@@ -207,6 +211,46 @@ function App() {
                     <ProtectedRoute requiresBroker>
                       <Suspense fallback={<ToolFallback />}>
                         <OptionGreeks />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/ivsmile"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <IVSmile />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/volsurface"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <VolSurface />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/straddle"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <StraddleChart />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/gex"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <GEXDashboard />
                       </Suspense>
                     </ProtectedRoute>
                   }
