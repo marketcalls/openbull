@@ -12,6 +12,7 @@ from backend.services.option_symbol_service import (
     _apply_offset,
     _fetch_available_strikes,
     _find_atm,
+    _find_near_month_futures,
     _format_strike,
     _option_exchange_for,
     _parse_underlying,
@@ -92,9 +93,25 @@ def get_option_chain(
         quote_exchange = _quote_exchange_for(base_symbol, exchange)
         options_exchange = _option_exchange_for(quote_exchange)
 
-        quote_symbol = base_symbol if quote_exchange in ("NSE_INDEX", "BSE_INDEX", "NSE", "BSE") else underlying.upper()
+        # Resolve the instrument that provides the ATM-pricing LTP. Indices
+        # and equities quote on the spot exchange. Commodities/currencies have
+        # no spot, so we auto-pick the near-month FUT unless the caller passed
+        # an explicit FUT contract via ``underlying="BASE{DDMMMYY}FUT"``.
+        if quote_exchange in ("NSE_INDEX", "BSE_INDEX", "NSE", "BSE"):
+            pricing_symbol, pricing_exchange = base_symbol, quote_exchange
+        elif embedded_expiry:
+            pricing_symbol, pricing_exchange = underlying.upper(), quote_exchange
+        else:
+            fut = _find_near_month_futures(base_symbol, quote_exchange)
+            if not fut:
+                return False, {
+                    "status": "error",
+                    "message": f"No FUT contract found for {base_symbol} on {quote_exchange} to use as underlying",
+                }, 404
+            pricing_symbol, pricing_exchange = fut["symbol"], fut["exchange"]
+
         ok, qdata, status_code = get_quotes_with_auth(
-            symbol=quote_symbol, exchange=quote_exchange,
+            symbol=pricing_symbol, exchange=pricing_exchange,
             auth_token=auth_token, broker=broker, config=config,
         )
         if not ok:
@@ -177,6 +194,8 @@ def get_option_chain(
             "underlying": base_symbol,
             "underlying_ltp": float(underlying_ltp),
             "underlying_prev_close": float(underlying_prev_close or 0),
+            "quote_symbol": pricing_symbol,
+            "quote_exchange": pricing_exchange,
             "expiry_date": final_expiry,
             "atm_strike": atm,
             "chain": chain,

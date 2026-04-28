@@ -27,6 +27,11 @@ export interface OptionChainResponse {
   underlying: string;
   underlying_ltp: number;
   underlying_prev_close: number;
+  // Symbol/exchange the backend actually quoted for ATM pricing — the spot
+  // for indices/equities, or the auto-resolved near-month FUT for MCX/CDS.
+  // Used by the WebSocket layer to subscribe to live underlying ticks.
+  quote_symbol?: string;
+  quote_exchange?: string;
   expiry_date: string;
   atm_strike: number;
   chain: OptionStrike[];
@@ -70,14 +75,17 @@ export interface PlaceOrderRequest {
   disclosed_quantity?: number | string;
 }
 
-export const FNO_EXCHANGES: ReadonlyArray<{ value: "NFO" | "BFO"; label: string }> = [
+export type FnoExchange = "NFO" | "BFO" | "MCX";
+
+export const FNO_EXCHANGES: ReadonlyArray<{ value: FnoExchange; label: string }> = [
   { value: "NFO", label: "NFO" },
   { value: "BFO", label: "BFO" },
+  { value: "MCX", label: "MCX" },
 ];
 
 // Fallback list shown before the underlyings API responds — replaced once the
 // /web/symbols/underlyings call returns the distinct option-ticker prefixes.
-export const FALLBACK_UNDERLYINGS: Record<"NFO" | "BFO", UnderlyingOption[]> = {
+export const FALLBACK_UNDERLYINGS: Record<FnoExchange, UnderlyingOption[]> = {
   NFO: [
     { symbol: "NIFTY", name: "NIFTY 50" },
     { symbol: "BANKNIFTY", name: "NIFTY BANK" },
@@ -87,6 +95,12 @@ export const FALLBACK_UNDERLYINGS: Record<"NFO" | "BFO", UnderlyingOption[]> = {
   BFO: [
     { symbol: "SENSEX", name: "BSE SENSEX" },
     { symbol: "BANKEX", name: "BSE BANKEX" },
+  ],
+  MCX: [
+    { symbol: "CRUDEOIL", name: "CRUDEOIL" },
+    { symbol: "NATURALGAS", name: "NATURALGAS" },
+    { symbol: "GOLD", name: "GOLD" },
+    { symbol: "SILVER", name: "SILVER" },
   ],
 };
 
@@ -116,6 +130,10 @@ export const BSE_INDEX_SYMBOLS = new Set(["SENSEX", "BANKEX", "SENSEX50"]);
 export function getUnderlyingExchange(symbol: string, optionExchange: string): string {
   if (NSE_INDEX_SYMBOLS.has(symbol)) return "NSE_INDEX";
   if (BSE_INDEX_SYMBOLS.has(symbol)) return "BSE_INDEX";
+  // MCX/CDS commodities have no spot — the backend response carries the
+  // resolved FUT symbol/exchange, so the WS layer should prefer that. As a
+  // safety fallback, return the option exchange itself.
+  if (optionExchange === "MCX" || optionExchange === "CDS") return optionExchange;
   if (optionExchange === "BFO") return "BSE";
   return "NSE";
 }

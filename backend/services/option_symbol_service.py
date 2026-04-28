@@ -7,6 +7,7 @@ import asyncio
 import concurrent.futures
 import logging
 import re
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -100,6 +101,54 @@ def _fetch_available_strikes(
         len(strikes), base_symbol, expiry_ddmmmyy, option_type, exchange,
     )
     return strikes
+
+
+def _find_near_month_futures(base_symbol: str, exchange: str) -> dict | None:
+    """Pick the nearest non-expired FUT contract for a base symbol on an exchange.
+
+    Used as the ATM-pricing source for option chains on exchanges that don't
+    have a tradable spot (MCX, CDS) — callers pass ``underlying="CRUDEOIL"``
+    and we resolve ``CRUDEOIL{DDMMMYY}FUT`` for the soonest expiry that hasn't
+    rolled off yet.
+    """
+    rows = _run_query(
+        "SELECT symbol, exchange, expiry FROM symtoken "
+        "WHERE symbol LIKE :pattern AND exchange = :exch AND instrumenttype = 'FUT' "
+        "AND expiry IS NOT NULL AND expiry != ''",
+        {"pattern": f"{base_symbol.upper()}%FUT", "exch": exchange.upper()},
+    )
+    if not rows:
+        return None
+
+    today = datetime.now().date()
+
+    def parse_exp(expiry_str: str):
+        try:
+            return datetime.strptime(expiry_str, "%d-%b-%y").date()
+        except (ValueError, TypeError):
+            return None
+
+    candidates = []
+    for sym, exch, exp in rows:
+        d = parse_exp(exp or "")
+        if d is None:
+            continue
+        if d >= today:
+            candidates.append((d, sym, exch))
+
+    if not candidates:
+        # All FUT contracts have expired — fall back to the latest known one
+        # so the chain page still renders something instead of 404'ing.
+        for sym, exch, exp in rows:
+            d = parse_exp(exp or "")
+            if d is not None:
+                candidates.append((d, sym, exch))
+        if not candidates:
+            return None
+
+    candidates.sort(key=lambda c: c[0])
+    _date, sym, exch = candidates[0]
+    return {"symbol": sym, "exchange": exch}
 
 
 def _find_atm(ltp: float, strikes: list[float]) -> float | None:

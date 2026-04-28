@@ -38,14 +38,20 @@ async def symbol_search(
     return {"status": "success", "data": results}
 
 
+_OPTION_UNDERLYING_EXCHANGES = {"NFO", "BFO", "MCX", "CDS"}
+
+
 @router.get("/underlyings")
 async def option_underlyings(
-    exchange: str = Query(..., min_length=1, max_length=10, description="Option exchange (NFO, BFO)"),
+    exchange: str = Query(..., min_length=1, max_length=10, description="Option exchange (NFO, BFO, MCX, CDS)"),
     user: User = Depends(get_current_user),
 ):
     """List distinct option underlyings for an exchange (CE/PE 'name' column)."""
-    if exchange.upper() not in {"NFO", "BFO"}:
-        raise HTTPException(status_code=400, detail="exchange must be NFO or BFO")
+    if exchange.upper() not in _OPTION_UNDERLYING_EXCHANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"exchange must be one of {sorted(_OPTION_UNDERLYING_EXCHANGES)}",
+        )
     names = get_option_underlyings(exchange)
     return {"status": "success", "data": names}
 

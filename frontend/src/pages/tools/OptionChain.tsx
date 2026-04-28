@@ -30,6 +30,7 @@ import {
   STRIKE_COUNTS,
   VISIBLE_COLUMNS_STORAGE_KEY,
   type ColumnKey,
+  type FnoExchange,
   type OptionLeg,
   type OptionStrike,
   type UnderlyingOption,
@@ -37,8 +38,6 @@ import {
 import { PlaceOrderDialog } from "@/components/trading/PlaceOrderDialog";
 import { UnderlyingCombobox } from "@/components/trading/UnderlyingCombobox";
 import { cn } from "@/lib/utils";
-
-type FnoExchange = "NFO" | "BFO";
 
 function formatInLakhs(num: number | null | undefined): string {
   if (!num) return "0";
@@ -611,7 +610,11 @@ export default function OptionChain() {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Card>
             <CardContent className="p-4">
-              <div className="text-xs text-muted-foreground">{data.underlying} Spot</div>
+              <div className="text-xs text-muted-foreground">
+                {data.quote_symbol && data.quote_symbol !== data.underlying
+                  ? `${data.underlying} Futures (${data.quote_symbol})`
+                  : `${data.underlying} Spot`}
+              </div>
               <div className="text-2xl font-bold text-primary">
                 {formatPrice(data.underlying_ltp)}
               </div>

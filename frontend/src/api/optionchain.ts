@@ -2,6 +2,7 @@ import api from "@/config/api";
 import { getApiKey } from "@/api/apikey";
 import type {
   ExpiryResponse,
+  FnoExchange,
   OptionChainResponse,
   PlaceOrderRequest,
   PlaceOrderResponse,
@@ -52,7 +53,7 @@ export async function fetchExpiries(params: {
   return response.data;
 }
 
-export async function fetchUnderlyings(exchange: "NFO" | "BFO"): Promise<UnderlyingsResponse> {
+export async function fetchUnderlyings(exchange: FnoExchange): Promise<UnderlyingsResponse> {
   const response = await api.get<UnderlyingsResponse>("/web/symbols/underlyings", {
     params: { exchange },
   });

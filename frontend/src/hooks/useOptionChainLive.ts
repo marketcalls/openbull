@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { fetchOptionChain } from "@/api/optionchain";
 import {
+  type FnoExchange,
   type OptionChainResponse,
   type OptionStrike,
   getUnderlyingExchange,
@@ -40,7 +41,7 @@ function roundToTick(price: number | undefined, tickSize: number | undefined): n
  */
 export function useOptionChainLive(params: {
   underlying: string;
-  exchange: "NFO" | "BFO";
+  exchange: FnoExchange;
   expiryDate: string;
   strikeCount: number;
   options?: UseOptionChainLiveOptions;
@@ -80,12 +81,18 @@ export function useOptionChainLive(params: {
 
   const polled = chainQuery.data?.status === "success" ? chainQuery.data : null;
 
-  // Build the symbol set to stream — underlying spot + every CE/PE leg.
+  // Build the symbol set to stream — underlying (spot or FUT) + every CE/PE leg.
+  // Prefer the response's resolved quote_symbol/quote_exchange (set by the
+  // backend for MCX/CDS where the underlying is auto-mapped to the near-month
+  // FUT) — fall back to the existing index/equity heuristic for older
+  // responses that don't carry those fields.
   const wsSymbols = useMemo<Array<{ symbol: string; exchange: string }>>(() => {
     if (!polled) return [];
     const out: Array<{ symbol: string; exchange: string }> = [];
-    const underlyingExch = getUnderlyingExchange(underlying, exchange);
-    out.push({ symbol: underlying, exchange: underlyingExch });
+    const underlyingSym = polled.quote_symbol ?? underlying;
+    const underlyingExch =
+      polled.quote_exchange ?? getUnderlyingExchange(underlying, exchange);
+    out.push({ symbol: underlyingSym, exchange: underlyingExch });
     for (const strike of polled.chain) {
       if (strike.ce?.symbol) out.push({ symbol: strike.ce.symbol, exchange });
       if (strike.pe?.symbol) out.push({ symbol: strike.pe.symbol, exchange });
@@ -151,9 +158,13 @@ export function useOptionChainLive(params: {
       setLastTickAt(new Date(newest));
     }
 
-    // Live underlying spot from WS (if present).
-    const underlyingExch = getUnderlyingExchange(underlying, exchange);
-    const u = wsData.get(`${underlyingExch}:${underlying}`);
+    // Live underlying ticks from WS (if present). Mirrors the wsSymbols
+    // resolution above — uses the resolved quote_symbol/quote_exchange so
+    // MCX/CDS chains get FUT ticks instead of looking up a non-existent spot.
+    const underlyingSym = polled.quote_symbol ?? underlying;
+    const underlyingExch =
+      polled.quote_exchange ?? getUnderlyingExchange(underlying, exchange);
+    const u = wsData.get(`${underlyingExch}:${underlyingSym}`);
     const underlyingLtp = u?.data?.ltp ?? polled.underlying_ltp;
 
     setMerged({
