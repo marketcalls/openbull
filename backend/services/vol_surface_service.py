@@ -139,7 +139,10 @@ def get_vol_surface_data(
                     sym = r.get("symbol")
                     if not sym:
                         continue
-                    data = r.get("data") or {}
+                    # openbull's multi-quote results are FLAT (ltp/close/...
+                    # at the top level); openalgo's nest under `data`. Support
+                    # both shapes via fallback to the row itself.
+                    data = r.get("data", r)
                     # Off-hours: LTP is 0 but close/prev_close still carry the
                     # last traded price. Fall back so the surface has values
                     # outside market hours.
