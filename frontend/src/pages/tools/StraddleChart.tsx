@@ -147,15 +147,30 @@ export default function StraddleChart() {
         timeVisible: true,
         secondsVisible: false,
         tickMarkFormatter: (time: number) => {
-          const d = new Date(time * 1000);
-          const hh = d.getHours().toString().padStart(2, "0");
-          const mm = d.getMinutes().toString().padStart(2, "0");
+          // Force IST regardless of user machine TZ. Backend ts is Unix
+          // seconds; shift by 5.5h then read UTC parts.
+          const ist = new Date(time * 1000 + 5.5 * 60 * 60 * 1000);
+          const hh = ist.getUTCHours().toString().padStart(2, "0");
+          const mm = ist.getUTCMinutes().toString().padStart(2, "0");
           if (days > 1) {
-            const dd = d.getDate().toString().padStart(2, "0");
-            const mo = (d.getMonth() + 1).toString().padStart(2, "0");
+            const dd = ist.getUTCDate().toString().padStart(2, "0");
+            const mo = (ist.getUTCMonth() + 1).toString().padStart(2, "0");
             return `${dd}/${mo} ${hh}:${mm}`;
           }
           return `${hh}:${mm}`;
+        },
+      },
+      // Crosshair tooltip — defaults to UTC otherwise, which shows wrong time
+      // for non-IST viewers and a confusing mismatch even on IST machines.
+      localization: {
+        timeFormatter: (time: number) => {
+          const ist = new Date(time * 1000 + 5.5 * 60 * 60 * 1000);
+          const dd = ist.getUTCDate().toString().padStart(2, "0");
+          const mo = (ist.getUTCMonth() + 1).toString().padStart(2, "0");
+          const yy = ist.getUTCFullYear().toString().slice(-2);
+          const hh = ist.getUTCHours().toString().padStart(2, "0");
+          const mm = ist.getUTCMinutes().toString().padStart(2, "0");
+          return `${dd}/${mo}/${yy} ${hh}:${mm} IST`;
         },
       },
       crosshair: { mode: CrosshairMode.Normal },

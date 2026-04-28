@@ -140,7 +140,16 @@ def get_vol_surface_data(
                     if not sym:
                         continue
                     data = r.get("data") or {}
-                    quotes_map[sym] = float(data.get("ltp", 0) or 0)
+                    # Off-hours: LTP is 0 but close/prev_close still carry the
+                    # last traded price. Fall back so the surface has values
+                    # outside market hours.
+                    px = (
+                        data.get("ltp")
+                        or data.get("close")
+                        or data.get("prev_close")
+                        or 0
+                    )
+                    quotes_map[sym] = float(px or 0)
 
             iv_row: list[float | None] = []
             for strike in common_strikes:

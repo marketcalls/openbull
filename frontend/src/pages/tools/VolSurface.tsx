@@ -33,11 +33,21 @@ function convertExpiryForApi(expiry: string): string {
   return expiry.replace(/-/g, "").toUpperCase();
 }
 
+function hasAnyValue(surface: (number | null)[][]): boolean {
+  for (const row of surface) {
+    for (const v of row) {
+      if (v !== null && v !== undefined && !Number.isNaN(v)) return true;
+    }
+  }
+  return false;
+}
+
 function buildPlot(
   data: VolSurfaceData | null,
   isDark: boolean,
 ): { data: unknown[]; layout: Record<string, unknown> } {
   if (!data?.surface || data.surface.length === 0) return { data: [], layout: {} };
+  if (!hasAnyValue(data.surface)) return { data: [], layout: {} };
 
   const colors = {
     text: isDark ? "#e0e0e0" : "#333",
@@ -318,7 +328,7 @@ export default function VolSurface() {
             <div className="flex h-[700px] items-center justify-center text-muted-foreground">
               Computing surface…
             </div>
-          ) : data?.surface && data.surface.length > 0 ? (
+          ) : data?.surface && data.surface.length > 0 && plot.data.length > 0 ? (
             <Plot3D
               data={plot.data}
               layout={plot.layout}
@@ -327,10 +337,20 @@ export default function VolSurface() {
               style={{ width: "100%", height: "700px" }}
             />
           ) : (
-            <div className="flex h-[700px] items-center justify-center text-muted-foreground">
-              {selectedExpiries.length === 0
-                ? "Select expiries and click Load Surface."
-                : "No surface data."}
+            <div className="flex h-[700px] flex-col items-center justify-center gap-2 text-muted-foreground">
+              {selectedExpiries.length === 0 ? (
+                <span>Select expiries and click Load Surface.</span>
+              ) : data?.surface && data.surface.length > 0 ? (
+                <>
+                  <span>Surface has no IV values for the selected expiries.</span>
+                  <span className="text-xs">
+                    The option chain has no live quotes — likely outside market
+                    hours. Try during NSE/BSE session.
+                  </span>
+                </>
+              ) : (
+                <span>No surface data.</span>
+              )}
             </div>
           )}
         </CardContent>
