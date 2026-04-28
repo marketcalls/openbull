@@ -49,6 +49,8 @@ const navItems: NavItem[] = [
       { label: "All Tools", to: "/tools" },
       { label: "Option Chain", to: "/tools/optionchain" },
       { label: "OI Tracker", to: "/tools/oitracker" },
+      { label: "Max Pain", to: "/tools/maxpain" },
+      { label: "Option Greeks", to: "/tools/greeks" },
     ],
   },
   {

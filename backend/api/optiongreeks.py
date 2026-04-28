@@ -1,7 +1,7 @@
 """
 External API - Option Greeks endpoint.
-Returns Black-76 Greeks (delta, gamma, theta, vega, rho) and implied volatility
-for a given option symbol.
+Mirrors openalgo restx_api/option_greeks.py: same request body, response shape,
+and Black-76 model (NFO/BFO/CDS/MCX).
 """
 
 import logging
@@ -14,9 +14,32 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _coerce_optional_float(value, field: str) -> tuple[float | None, str | None]:
+    if value is None:
+        return None, None
+    try:
+        return float(value), None
+    except (TypeError, ValueError):
+        return None, f"{field} must be a number"
+
+
 @router.post("/optiongreeks")
 async def api_option_greeks(request: Request):
-    """Compute Greeks + IV for an option symbol."""
+    """Calculate Option Greeks (Δ/Γ/Θ/V/ρ) and Implied Volatility.
+
+    Request body:
+      - apikey (str): API key (auth handled upstream)
+      - symbol (str): Option symbol e.g. NIFTY28NOV2424000CE
+      - exchange (str): NFO / BFO / CDS / MCX
+      - interest_rate (float, optional): Risk-free rate %; defaults to 0.
+      - forward_price (float, optional): Custom forward / synthetic futures price.
+        If provided, the underlying fetch is skipped.
+      - underlying_symbol (str, optional): Override underlying symbol used for
+        the spot quote (e.g. "NIFTY28NOV24FUT").
+      - underlying_exchange (str, optional): Override underlying exchange.
+      - expiry_time (str, optional): Custom expiry time HH:MM (overrides the
+        per-exchange default — 15:30 for NFO/BFO, 12:30 for CDS, 23:30 for MCX).
+    """
     from backend.dependencies import get_api_user, get_db
     from backend.services.option_greeks_service import get_option_greeks
 
@@ -46,16 +69,25 @@ async def api_option_greeks(request: Request):
             status_code=400,
         )
 
-    interest_rate = body.get("interest_rate")
-    spot_price = body.get("spot_price")
-    option_price = body.get("option_price")
+    interest_rate, err = _coerce_optional_float(body.get("interest_rate"), "interest_rate")
+    if err:
+        return JSONResponse(content={"status": "error", "message": err}, status_code=400)
+    forward_price, err = _coerce_optional_float(body.get("forward_price"), "forward_price")
+    if err:
+        return JSONResponse(content={"status": "error", "message": err}, status_code=400)
+
+    underlying_symbol = body.get("underlying_symbol")
+    underlying_exchange = body.get("underlying_exchange")
+    expiry_time = body.get("expiry_time")
 
     success, response_data, status_code = get_option_greeks(
-        symbol=symbol, exchange=exchange,
-        interest_rate=float(interest_rate) if interest_rate is not None else None,
-        spot_price=float(spot_price) if spot_price is not None else None,
-        option_price=float(option_price) if option_price is not None else None,
+        option_symbol=symbol,
+        exchange=exchange,
+        interest_rate=interest_rate,
+        forward_price=forward_price,
+        underlying_symbol=underlying_symbol,
+        underlying_exchange=underlying_exchange,
+        expiry_time=expiry_time,
         auth_token=auth_token, broker=broker_name, config=config,
     )
-
     return JSONResponse(content=response_data, status_code=status_code)

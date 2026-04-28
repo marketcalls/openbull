@@ -25,6 +25,20 @@ const TOOLS: ToolDef[] = [
       "Open Interest snapshot per strike (CE vs PE), futures price, PCR (OI + Volume) and ATM marker.",
     status: "available",
   },
+  {
+    to: "/tools/maxpain",
+    title: "Max Pain",
+    description:
+      "Strike where total option-writer payout to buyers is minimized — the settle level most adverse to net buyers.",
+    status: "available",
+  },
+  {
+    to: "/tools/greeks",
+    title: "Option Greeks (Historical)",
+    description:
+      "Intraday IV, Delta, Gamma, Theta and Vega for ATM CE & PE — Black-76 computed from candle history.",
+    status: "available",
+  },
 ];
 
 export default function Tools() {

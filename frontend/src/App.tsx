@@ -30,6 +30,8 @@ import { Toaster } from "@/components/ui/sonner";
 // the user navigates to a chart tool.
 const OptionChain = lazy(() => import("@/pages/tools/OptionChain"));
 const OITracker = lazy(() => import("@/pages/tools/OITracker"));
+const MaxPain = lazy(() => import("@/pages/tools/MaxPain"));
+const OptionGreeks = lazy(() => import("@/pages/tools/OptionGreeks"));
 
 function ToolFallback() {
   return (
@@ -185,6 +187,26 @@ function App() {
                     <ProtectedRoute requiresBroker>
                       <Suspense fallback={<ToolFallback />}>
                         <OITracker />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/maxpain"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <MaxPain />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/greeks"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <OptionGreeks />
                       </Suspense>
                     </ProtectedRoute>
                   }

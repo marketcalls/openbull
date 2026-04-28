@@ -32,6 +32,8 @@ from backend.api.optionsorder import router as optionsorder_router
 from backend.api.optionsmultiorder import router as optionsmultiorder_router
 from backend.api.optiongreeks import router as optiongreeks_router
 from backend.api.oitracker import router as oitracker_router
+from backend.api.maxpain import router as maxpain_router
+from backend.api.ivchart import router as ivchart_router
 from backend.api.analyzer import router as analyzer_router
 
 api_v1_router = APIRouter(prefix="/api/v1", tags=["api-v1"])
@@ -63,4 +65,6 @@ api_v1_router.include_router(optionsorder_router)
 api_v1_router.include_router(optionsmultiorder_router)
 api_v1_router.include_router(optiongreeks_router)
 api_v1_router.include_router(oitracker_router)
+api_v1_router.include_router(maxpain_router)
+api_v1_router.include_router(ivchart_router)
 api_v1_router.include_router(analyzer_router)
