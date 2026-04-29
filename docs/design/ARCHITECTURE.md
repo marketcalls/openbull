@@ -86,7 +86,8 @@ openbull/
 │   │   ├── broker_config.py
 │   │   ├── settings.py              # app_settings (trading_mode, sandbox_config)
 │   │   ├── symbol.py                # symtoken master contract
-│   │   └── sandbox.py               # sandbox_orders/trades/positions/funds/holdings
+│   │   ├── sandbox.py               # sandbox_orders/trades/positions/funds/holdings
+│   │   └── strategies.py            # saved multi-leg option strategies (JSONB legs)
 │   ├── schemas/                     # Pydantic request/response
 │   ├── routers/                     # Web routes (JWT cookie auth)
 │   │   ├── auth.py, broker_config.py, broker_oauth.py
@@ -96,7 +97,9 @@ openbull/
 │   │   ├── symbols.py               # OpenAlgo-style symbol search
 │   │   ├── api_logs.py, error_logs.py   # Auth-gated log viewers
 │   │   ├── trading_mode.py          # GET/PUT live|sandbox toggle
-│   │   └── sandbox.py               # /sandbox config + reset
+│   │   ├── sandbox.py               # /sandbox config + reset
+│   │   ├── strategies.py            # /web/strategies CRUD
+│   │   └── strategybuilder.py       # /web/strategybuilder/{snapshot,chart}
 │   ├── api/                         # External API (/api/v1, API key auth)
 │   │   ├── place_order.py, basket_order.py, split_order.py
 │   │   ├── orderbook.py, tradebook.py, positions.py, holdings.py
@@ -124,7 +127,9 @@ openbull/
 │   │   ├── market_data_cache.py     # Singleton in-process tick cache
 │   │   ├── master_contract_status.py
 │   │   ├── trading_mode_service.py  # live|sandbox cache + dispatch_by_mode
-│   │   └── sandbox_service.py       # Async wrapper over backend/sandbox/*
+│   │   ├── sandbox_service.py       # Async wrapper over backend/sandbox/*
+│   │   ├── strategy_builder_service.py  # Live snapshot: spot+legs+greeks+totals
+│   │   └── strategy_chart_service.py    # Historical combined-premium series
 │   ├── sandbox/                     # Simulated trading engine
 │   │   ├── _db.py                   # Sync sessionmaker for engine threads
 │   │   ├── config.py, defaults.py   # sandbox_config seed + accessors
@@ -173,19 +178,31 @@ openbull/
 │   │   │   └── tools/               # Plotly-based analytics pages
 │   │   │       ├── OptionChain.tsx, OITracker.tsx, MaxPain.tsx
 │   │   │       ├── OptionGreeks.tsx, IVSmile.tsx, VolSurface.tsx
-│   │   │       └── StraddleChart.tsx, GEXDashboard.tsx
+│   │   │       ├── StraddleChart.tsx, GEXDashboard.tsx
+│   │   │       ├── StrategyBuilder.tsx           # 5-tab multi-leg designer
+│   │   │       └── StrategyPortfolio.tsx         # Saved strategies + live P&L
 │   │   ├── components/
 │   │   │   ├── auth/, layout/, trading/
 │   │   │   ├── charts/{Plot,Plot3D}.tsx        # Plotly wrappers
+│   │   │   ├── ErrorBoundary.tsx               # Wraps chart panels
+│   │   │   ├── strategy-builder/   # PayoffChart, GreeksPanel, PnLTab,
+│   │   │   │                       # StrategyChartTab, WhatIfPanel,
+│   │   │   │                       # LegRow, LivePriceCell, etc.
+│   │   │   ├── strategy-portfolio/ # StrategyCard, CloseStrategyDialog
 │   │   │   └── ui/                  # shadcn primitives
 │   │   ├── contexts/
 │   │   │   ├── AuthContext.tsx, ThemeContext.tsx
 │   │   │   └── TradingModeContext.tsx           # Live/sandbox toggle + tint
 │   │   ├── hooks/
 │   │   │   ├── useMarketData.ts, useOptionChainLive.ts
+│   │   │   ├── useChainContext.ts, useStrategySnapshot.ts
 │   │   │   └── usePageVisibility.ts
 │   │   ├── api/                     # Typed fetch wrappers per feature
-│   │   └── lib/utils.ts
+│   │   └── lib/
+│   │       ├── utils.ts
+│   │       ├── black76.ts                       # Pure-TS Black-76 + payoff math
+│   │       ├── probabilityOfProfit.ts           # Lognormal POP integrator
+│   │       └── strategyTemplates.ts             # 14-template registry
 ├── collections/                     # Bruno API collection
 ├── docs/
 ├── logs/                            # Runtime: openbull.log, openbull-error.log
@@ -523,6 +540,8 @@ The `frontend/src/pages/tools/` directory hosts eight Plotly-backed analytics pa
 | Vol Surface       | `vol_surface_service`            | `/api/v1/volsurface`               |
 | Straddle Chart    | `straddle_chart_service`         | `/api/v1/straddle`                 |
 | GEX Dashboard     | `gex_service`                    | `/api/v1/gex`                      |
+| Strategy Builder  | `strategy_builder_service` + `strategy_chart_service` | `/web/strategybuilder/{snapshot,chart}` (session) |
+| Strategy Portfolio| (CRUD via `routers/strategies`)  | `/web/strategies/*` (session)      |
 
 All analytics services share these conventions:
 
@@ -534,3 +553,35 @@ All analytics services share these conventions:
 Order placement is integrated directly: the Option Chain page can open a one-click `PlaceOrderDialog` which routes through the same `/api/v1/placeorder` path -- so it respects the live/sandbox toggle automatically.
 
 The Option Chain page also opens its own WS subscription to the proxy (`useOptionChainLive`) for live LTP / bid / ask on every visible strike. MCX support resolves the near-month FUT contract automatically as the underlying for the chain.
+
+### Strategy Builder + Portfolio
+
+Two paired pages that together implement the multi-leg-strategy lifecycle: design → save → live monitor → close.
+
+**Strategy Builder (`/tools/strategybuilder`)** is a five-tab page (Legs / Greeks / Payoff / Chart / P&L) that owns the entire builder state in one component. Components are presentation-only with `value + onChange` props so the URL `?load=<id>` round-trip stays trivial.
+
+- **Legs tab** — manual leg edit + 14-template preset registry (Long/Short Straddle, Strangle, Iron Condor, Iron Butterfly, Bull/Bear spreads, Calendar/Diagonal, single legs). Templates use *relative* offsets (`ATM`, `OTM2`, `ITM3`) which the page resolves to absolute strikes via `useChainContext` (chain query → ATM + strike grid + per-strike LTPs). Entry prices auto-prefill from the live LTP at the chosen strike.
+- **Greeks tab** — per-leg row plus a sticky aggregate row, fed by the snapshot endpoint. Shows the same `totals` the backend returns, so cross-tab numbers match.
+- **Payoff tab** — Plotly Scattergl with three computed curves (At-Expiry intrinsic, T+0 mark-to-market via local Black-76, optional what-if simulated point) plus profit/loss zone shading, ±1σ/±2σ bands sized off the shortest-DTE leg, breakeven verticals, and a "POP N.N%" corner badge (lognormal CDF over profit regions). "Unlimited loss/profit" annotations driven by `asymptoticSlopes()`.
+- **Chart tab** — historical combined-premium with optional underlying overlay on a secondary y-axis; per-leg dotted lines toggle on; PnL/Premium view switch; IST tick formatting via `+05:30` unix shift.
+- **P&L tab** — tab-scoped `useMarketData("Quote")` subscription. Per-leg row with flash-on-tick `LivePriceCell` for live LTP and signed P&L. Stale-tick warning when no symbol has updated in 30s+.
+
+The builder also hosts a **What-if simulator** (Spot ±10% / IV ±10pp / Days forward) that drives the chart's simulation marker via local-only Black-76 — no broker round-trips per slider tick. Saved strategies hit `POST /web/strategies`; basket execute fires `POST /api/v1/basketorder` with absolute symbols (NOT `optionsmultiorder`, which would re-resolve from offset+ATM at execute time and risk a different strike).
+
+**Strategy Portfolio (`/tools/strategyportfolio`)** lists every saved strategy for the current user with live aggregate P&L per card. Architecture choices:
+
+- **One shared WebSocket** across the page — collects unique `(symbol, exchange)` tuples from every visible *active* strategy's open legs and passes them to a single `useMarketData` call. A symbol used in three strategies streams once, not three times. The tick map is projected to a `Map<key, ltp>` and passed down to every `StrategyCard` so cards stay presentation-only.
+- **Filters** by mode (live/sandbox/all), status (active/closed/expired/all), and underlying-substring; defaults follow the global trading-mode toggle so a sandbox session naturally surfaces sandbox strategies.
+- **Active strategies** show unrealized P&L (LTP − entry); **closed/expired** show realized P&L (exit_price − entry, frozen).
+- **Optimistic UI** updates on close + delete via `queryClient.setQueriesData` so rows re-render instantly while a background invalidate reconciles with the server.
+- **Close dialog** reuses the same shared `liveLtpMap` for exit-price defaults — no extra fetches for the modal.
+
+**Persistence model** lives in `backend/models/strategies.py` — one `strategies` table with `user_id` FK, JSONB `legs` column, and a composite `(user_id, mode, status)` index. JSON keeps the schema loose so future leg metadata (broker order ids on basket-execute, custom tags, manual exit prices) can land without per-feature migrations. Alembic revision `20260429_strategies` chains from `20260427_sbx_margin`.
+
+**Math separation** — Black-76 is implemented twice:
+- `backend/services/option_greeks_service.py` (pure-Python `math.erf`) — source of truth for snapshot pricing.
+- `frontend/src/lib/black76.ts` — frontend mirror used by the what-if sliders for instant feedback. Same model, same units (theta/day, vega/1%, rho/1%) so simulator and snapshot Greeks agree at zero-shift.
+
+`frontend/src/lib/probabilityOfProfit.ts` runs lognormal CDF integration over profit regions identified on the at-expiry curve. Verified offline: long straddle POP matches expected ±premium breakevens; iron condor POP matches expected `strike ± net_credit` breakevens.
+
+A small `ErrorBoundary` (`frontend/src/components/ErrorBoundary.tsx`) wraps the chart-heavy panels so a Plotly render error doesn't unmount the whole page — local fallback with a Retry button instead.

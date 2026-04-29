@@ -1,21 +1,34 @@
-# OpenBull (Option Trading Platform)
+# OpenBull (Options Trading Platform)
 
-Options trading platform for Indian brokers. Single-user application with plug-and-play broker integration, supporting Upstox and Zerodha. OpenAlgo-compatible API format for cross-compatibility with existing trading tools.
+OpenBull is a self-hosted options trading platform for Indian markets. Multi-user, multi-broker, with a typed external API that mirrors OpenAlgo so existing trading tools work unchanged. Ships with a full options-analytics suite (option chain, IV smile, vol surface, GEX, OI tracker, …), a multi-leg **Strategy Builder + Portfolio** with live Greeks and historical charting, a tick-driven **Sandbox** simulated trading engine, live WebSocket market data, and a Redis-backed cache layer.
+
+## Highlights
+
+- **Five broker plugins** out of the box — Upstox, Zerodha, Angel One (SmartAPI), Dhan, Fyers. Plug-and-play architecture: a new broker = one folder + a `plugin.json`.
+- **Multi-user**, per-user broker credentials, JWT cookie auth, broker-token revalidation on session resume. OAuth callback redirects use the request hostname so cookies survive the round-trip even when the user mixes `127.0.0.1` and `localhost`.
+- **Live / Sandbox trading-mode toggle** — global setting; every order/info path dispatches through `dispatch_by_mode` so the same UI drives real or simulated orders. Sandbox engine simulates fills via live ticks (or a 5s polling fallback), full T+1 settlement, scheduled squareoff, daily P&L snapshots.
+- **Eight Plotly-backed analytics tools** + the **Strategy Builder + Portfolio** pair (multi-leg designer with live Greeks, At-Expiry / T+0 payoff curves, breakeven markers, sigma bands, Probability of Profit badge, what-if sliders for spot/IV/DTE, historical combined-premium chart, WS-streamed live P&L tab, basket execute, save/reload, close-at-exit).
+- **Unified WebSocket proxy** on port 8765 — single ZeroMQ pub/sub bus fanning broker ticks (Upstox protobuf, Zerodha binary) out to authenticated clients with mode hierarchy (DEPTH includes QUOTE includes LTP) and per-symbol throttling.
+- **Process-wide MarketDataCache** singleton — every tick hits one in-process map; sandbox MTM updater, RMS, and analytics tools read from it instead of re-hitting brokers.
+- **Redis cache layer** — API key, broker context, and master-contract symtoken cached with TTLs and invalidation on logout / OAuth.
+- **Centralized logging** — request-id stamping, sensitive-data redaction, bounded rotating files, DB-backed `error_logs` and `api_logs` tables with worker-trimmed row caps. `/logs` viewer in-app.
+- **Production install scripts** — `install/install.sh`, `install/update.sh`, `install/perftuning.sh` — Cloudflare-aware, A-grade nginx security headers, certbot-friendly.
 
 ## Tech Stack
 
-- **Backend:** FastAPI, SQLAlchemy (async), PostgreSQL
-- **Frontend:** React 19, Vite, TypeScript, ShadcnUI, Tailwind CSS, TanStack Query
-- **Streaming:** ZeroMQ PUB/SUB, websocket-client, protobuf (Upstox v3)
-- **Security:** Argon2 password hashing, Fernet encryption, JWT (httpOnly cookies), CSP, CORS, rate limiting
-- **Package Manager:** uv (Python), npm (Node)
+- **Backend:** FastAPI, SQLAlchemy 2.x async, PostgreSQL, asyncpg, Alembic
+- **Cache:** Redis (async, with in-process fallback)
+- **Streaming:** ZeroMQ PUB/SUB, websocket-client, protobuf (Upstox v3), Zerodha KiteTicker binary
+- **Frontend:** React 19, Vite, TypeScript (strict), TanStack Query, Tailwind CSS, shadcn/ui, Base UI primitives, Plotly (cartesian + 3D), `lightweight-charts`, Sonner toasts
+- **Security:** Argon2id password hashing + pepper, Fernet encryption at rest for broker secrets, JWT in httpOnly cookies, server-side session revocation via JTI, CSP / X-Frame-Options / nosniff headers, SlowAPI rate limiting
+- **Package managers:** [uv](https://docs.astral.sh/uv/) (Python), npm (Node)
 
 ## Prerequisites
 
 - Python 3.12+
 - Node.js 20+
 - PostgreSQL 15+
-- [uv](https://docs.astral.sh/uv/) package manager
+- Redis 7+ (any reachable instance — local, WSL, Docker, managed; configured via `REDIS_URL`)
 
 ## Quick Start
 
@@ -31,22 +44,23 @@ psql -U postgres -c "CREATE DATABASE openbull"
 cp .env.example .env
 ```
 
-Edit `.env` and generate unique secrets:
+Generate two unique secrets and paste them into `.env`:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Set the output as `APP_SECRET_KEY` and generate another for `ENCRYPTION_PEPPER`.
+Set the output as `APP_SECRET_KEY`; generate another for `ENCRYPTION_PEPPER`. Set `REDIS_URL` to your Redis instance (default `redis://127.0.0.1:6379/0`).
 
 ### 3. Install and run the backend
 
 ```bash
 uv sync
+uv run migrate_all.py            # create tables, run schema-migrations, alembic upgrade head
 uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-The database tables are created automatically on first startup. The WebSocket proxy starts on port 8765.
+`migrate_all.py` is idempotent — safe to re-run on every deploy. The WebSocket proxy starts alongside on port 8765.
 
 ### 4. Install and run the frontend
 
@@ -58,155 +72,225 @@ npm run dev
 
 ### 5. Open the app
 
-Visit **http://localhost:5173**
+Visit **http://127.0.0.1:5173** (the Vite server binds to IPv4 loopback only).
 
-- First visit: create admin account at `/setup`
-- Login, then configure broker credentials at `/broker/config`
-- Select broker and complete OAuth at `/broker/select`
-- Dashboard shows live funds after successful broker login
+- First visit: create the admin account at `/setup`.
+- Login, configure broker credentials at `/broker/config`.
+- Select a broker and complete OAuth at `/broker/select`.
+- Dashboard shows live funds; the topbar toggles Live ↔ Sandbox.
 
-## API Endpoints (31 endpoints)
+## Production deployment
 
-Full documentation: [docs/api/README.md](docs/api/README.md)
+`install/install.sh` is a Cloudflare-aware Ubuntu installer that sets up Postgres, Redis, nginx with A-grade security headers, systemd units, certbot, and the swap file (helpful on small VMs). Re-run `install/update.sh` to pull, run `migrate_all.py`, build the frontend, and reload services. `install/perftuning.sh` applies sensible Postgres/Redis kernel + ulimit tuning.
 
-### Order Management
-| POST | Path | Description |
-|------|------|-------------|
-| | `/api/v1/placeorder` | Place order |
-| | `/api/v1/placesmartorder` | Position-aware smart order |
-| | `/api/v1/basketorder` | Multiple orders concurrently |
-| | `/api/v1/splitorder` | Split large order into chunks |
-| | `/api/v1/optionsorder` | Options order via offset (ATM/ITM/OTM) |
-| | `/api/v1/optionsmultiorder` | Multi-leg options strategy |
-| | `/api/v1/modifyorder` | Modify existing order |
-| | `/api/v1/cancelorder` | Cancel specific order |
-| | `/api/v1/cancelallorder` | Cancel all open orders |
-| | `/api/v1/closeposition` | Close all positions |
+```bash
+sudo ./install/install.sh
+# follow the certbot prompts; nginx proxies /auth, /web, /upstox, /zerodha, /ws to the backend
+```
 
-### Account & Order Info
-| POST | Path | Description |
-|------|------|-------------|
-| | `/api/v1/funds` | Account funds/margin |
-| | `/api/v1/margin` | Pre-trade margin calculator |
-| | `/api/v1/orderbook` | All orders for the day |
-| | `/api/v1/tradebook` | All trades for the day |
-| | `/api/v1/positions` | Current positions |
-| | `/api/v1/positionbook` | Positions (OpenAlgo alias) |
-| | `/api/v1/holdings` | Portfolio holdings |
-| | `/api/v1/orderstatus` | Status of specific order |
-| | `/api/v1/openposition` | Net qty for symbol |
+## API endpoints (33+)
 
-### Market Data
-| POST | Path | Description |
-|------|------|-------------|
-| | `/api/v1/quotes` | LTP/OHLC quotes |
-| | `/api/v1/multiquotes` | Multi-symbol quotes |
-| | `/api/v1/depth` | 5-level market depth |
-| | `/api/v1/history` | Historical OHLCV candles |
-| | `/api/v1/intervals` | Supported intervals |
+Full per-endpoint docs: [docs/api/README.md](docs/api/README.md). Bruno collection: `collections/openbull/`.
 
-### Symbol & Options
-| POST | Path | Description |
-|------|------|-------------|
-| | `/api/v1/symbol` | Full symbol info |
-| | `/api/v1/search` | Symbol search |
-| | `/api/v1/expiry` | Expiry dates (options/futures) |
-| | `/api/v1/optionsymbol` | Resolve option symbol from offset |
-| | `/api/v1/optionchain` | Option chain with live CE+PE quotes |
-| | `/api/v1/optiongreeks` | Black-76 Greeks and IV |
-| | `/api/v1/syntheticfuture` | Synthetic future price + basis |
+### External API — `/api/v1/*` (API-key auth)
+
+| Group | Endpoints |
+|------|-----------|
+| Order management | `placeorder`, `placesmartorder`, `basketorder`, `splitorder`, `optionsorder`, `optionsmultiorder`, `modifyorder`, `cancelorder`, `cancelallorder`, `closeposition` |
+| Account & info | `funds`, `margin`, `orderbook`, `tradebook`, `positions` (`positionbook`), `holdings`, `orderstatus`, `openposition` |
+| Market data | `quotes`, `multiquotes`, `depth`, `history`, `intervals` |
+| Symbols & options | `symbol`, `search`, `expiry`, `optionsymbol`, `optionchain`, `syntheticfuture`, `optiongreeks` |
+| Analytics tools | `oitracker`, `maxpain`, `ivchart`, `ivsmile`, `volsurface`, `straddle`, `gex` |
+| Utility | `ping`, `analyzer` |
+
+### Web API — `/web/*` (session cookie auth)
+
+| Group | Endpoints |
+|------|-----------|
+| Auth / setup | `auth/check-setup`, `auth/setup`, `auth/login`, `auth/logout`, `auth/me`, `auth/broker-redirect`, broker callbacks |
+| Strategies | `strategies` (CRUD), `strategybuilder/snapshot`, `strategybuilder/chart` |
+| Trading mode | `trading-mode` (GET/POST) |
+| Sandbox | `sandbox/config`, `sandbox/reset`, `sandbox/summary`, `sandbox/mypnl`, `sandbox/squareoff-now`, `sandbox/settle-now` |
+| Logs | `api-logs`, `error-logs` |
+| Symbols | `symbols/search`, `symbols/underlyings`, `symbols/status` (master-contract download status) |
 
 ### WebSocket Streaming (port 8765)
-| Mode | Data |
-|------|------|
-| LTP | Last traded price, 50ms throttle |
-| Quote | OHLCV + OI + volume |
-| Depth | 5-level bid/ask market depth |
+
+```json
+{"action": "authenticate", "api_key": "..."}
+{"action": "subscribe", "symbols": [{"symbol": "NIFTY", "exchange": "NSE_INDEX"}], "mode": "Quote"}
+```
+
+| Mode | Wire string | Data |
+|------|-------------|------|
+| LTP | `"LTP"` | Last traded price + change/cp/ltq, 50ms throttle |
+| Quote | `"QUOTE"` | OHLCV + OI + volume + bid/ask totals |
+| Depth | `"DEPTH"` / `"FULL"` | 5-level bid/ask market depth |
+
+Mode hierarchy: subscribing to DEPTH includes QUOTE includes LTP automatically. Limits: 10 concurrent client connections, 64 KB max message size, 1000 symbols per subscribe call. Full protocol: [docs/design/websockets-format.md](docs/design/websockets-format.md).
+
+## Features
+
+### Strategy Builder + Strategy Portfolio (`/tools/strategybuilder` + `/tools/strategyportfolio`)
+
+The flagship feature pair, shipped over 11 phases:
+
+- **14 templates** — Long/Short Straddle/Strangle, Iron Condor, Iron Butterfly, Bull Call / Bear Put / Bull Put / Bear Call spreads, Calendar/Diagonal, single legs. Templates use *relative* offsets (`ATM`, `OTM2`, `ITM3`) which the UI resolves to absolute strikes via the live option chain. Entry prices auto-prefill from the per-strike LTP.
+- **Five tabs**: Legs, Greeks (per-leg + aggregate), Payoff (At-Expiry + T+0 + sigma bands + breakevens + POP badge + "Unlimited" annotations), Chart (historical combined premium with optional underlying overlay), P&L (WS-streamed live MTM with flash cells).
+- **What-if simulator**: Spot ±10%, IV ±10pp, Days forward sliders drive a magenta marker on the payoff chart via local-only Black-76 — instant feedback, no broker round-trips.
+- **Save / load** via `/web/strategies/*` (per-user, JSONB legs, tagged with trading mode). Reload into builder via `?load=<id>`.
+- **Basket execute** via `/api/v1/basketorder` — BUY-before-SELL ordering enforced server-side. Sandbox-aware (the same button drives simulated orders when sandbox mode is active).
+- **Strategy Portfolio**: list with mode/status/underlying filters, expandable cards, **one shared WebSocket** across the page (a symbol used in three strategies streams once), live aggregate P&L per card, close-at-exit dialog with editable per-leg exit prices, hard delete.
+
+### Analytics Tools (`/tools`)
+
+| Page | Backend service | API |
+|---|---|---|
+| Option Chain | `option_chain_service` | `/api/v1/optionchain` (+ live WS) |
+| OI Tracker | `oi_tracker_service` | `/api/v1/oitracker` |
+| Max Pain | `max_pain_service` | `/api/v1/maxpain` |
+| Option Greeks (historical) | `option_greeks_service` | `/api/v1/optiongreeks` |
+| IV Smile | `iv_smile_service` | `/api/v1/ivsmile` |
+| Vol Surface (3D) | `vol_surface_service` | `/api/v1/volsurface` |
+| Straddle Chart | `straddle_chart_service` | `/api/v1/straddle` |
+| GEX Dashboard | `gex_service` | `/api/v1/gex` |
+
+All analytics pages are `React.lazy` so Plotly's heavy bundle is fetched only on navigation. IST timestamp handling is consistent across every chart. CE = RED (`#ef4444`) and PE = GREEN (`#22c55e`) by convention — high CE OI is bearish.
+
+### Sandbox Simulated Trading
+
+A tick-driven simulation engine (`backend/sandbox/`) with full lifecycle parity to live trading. Every order/info service routes through `dispatch_by_mode` so the same UI / API drives either real or simulated orders.
+
+- **Per-user simulated capital + margin lifecycle** — margin booked at order placement, transferred to position on fill, released pro-rata on reduce/close.
+- **Tick-driven fills** with a 5-second polling fallback when the WS feed is quiet.
+- **Scheduled squareoff** (per-bucket: NSE/NFO/BSE/BFO at 15:15, CDS at 16:45, MCX at 23:30 — configurable in `/sandbox`).
+- **T+1 settlement** — CNC fills move to a holdings table on EOD; daily P&L snapshots persisted.
+- **Catch-up on restart** — stale MIS positions, T+1 settlement, today_realized_pnl reset, expired F&O contracts all reconciled before the engine starts ticking.
+
+`/sandbox` config page lets admins tune starting capital, leverage, squareoff times. `/sandbox/mypnl` shows the per-user daily P&L history.
+
+### Symbol Search (`/search`)
+
+OpenAlgo-style tokenized async search across the full master-contract table. Multi-token AND matching, exchange filters, instrument-type filters. The same search powers the Underlying combobox in every options tool.
+
+### Live / Sandbox Toggle
+
+Topbar switch. Persists in `app_settings` (single global flag), with a 10s in-memory cache to avoid a DB hit per request. The frontend tints the theme amber when sandbox is active and shows a banner above the page content. Strategies saved while sandbox is on are tagged accordingly so the Portfolio's "live" filter doesn't bleed.
+
+### MarketDataCache + WebSocket Test (`/websocket/test`)
+
+Process-wide `MarketDataCache` singleton receives every tick from the WS proxy and exposes them to internal consumers (sandbox MTM updater, ticker pages). The `/websocket/test` dev page reads cached ticks for arbitrary symbols and shows the connection state — useful when diagnosing broker-side issues without opening a fresh subscription.
+
+### Logging & Audit
+
+- **Request-id stamping** — every log line is correlated to a request via a contextvar; copies into the response header.
+- **Sensitive-data redaction** — automatic stripping of `access_token`, `api_secret`, etc. from log payloads.
+- **Bounded rotating files** — `openbull.log` and `openbull-error.log` capped at 10×10 MB each (200 MB total on disk).
+- **DB-backed `error_logs` and `api_logs` tables** with worker-trimmed row caps so attacker floods can't blow up the table.
+- **`/logs` viewer** in-app — filter by trading mode, status, time range; auth-gated.
 
 ## Project Structure
 
+Full directory tree: [docs/design/ARCHITECTURE.md](docs/design/ARCHITECTURE.md). Top-level summary:
+
 ```
 openbull/
+├── alembic/                    # Migrations (idempotent under migrate_all.py)
+├── install/                    # install.sh, update.sh, perftuning.sh
 ├── backend/
-│   ├── main.py                # FastAPI app, middleware, lifespan
-│   ├── config.py              # Pydantic Settings (.env)
-│   ├── database.py            # SQLAlchemy async engine
-│   ├── security.py            # Argon2, Fernet, JWT
-│   ├── dependencies.py        # FastAPI DI (auth, DB sessions)
-│   ├── models/                # SQLAlchemy ORM models
-│   ├── schemas/               # Pydantic request/response models
-│   ├── routers/               # Web routes (JWT cookie auth)
-│   ├── api/                   # External API (/api/v1, 31 endpoints)
-│   ├── services/              # Business logic layer (23 services)
-│   ├── broker/                # Plug-and-play broker plugins
-│   │   ├── upstox/            # REST + protobuf streaming
-│   │   └── zerodha/           # REST + KiteTicker binary streaming
-│   ├── websocket_proxy/       # Unified WS proxy (ZeroMQ architecture)
-│   └── utils/                 # Helpers, constants, plugin loader
-├── frontend/                  # React SPA
-├── collections/               # Bruno API collection (30 requests)
-├── docs/                      # Documentation
-│   ├── api/                   # 33 API endpoint docs
-│   ├── design/                # Architecture, services docs
-│   └── PRODUCT.md             # Product overview
-├── alembic/                   # Database migrations
-└── .env.example               # Environment template
+│   ├── main.py                 # FastAPI app, lifespan, middleware order
+│   ├── config.py               # Pydantic Settings
+│   ├── database.py             # SQLAlchemy async engine + Base
+│   ├── security.py             # Argon2, Fernet, JWT
+│   ├── dependencies.py         # FastAPI DI + Redis cache-aside
+│   ├── middleware*.py          # Request-id, access log, DB-backed api_logs
+│   ├── models/                 # SQLAlchemy ORM (users, broker_*, sandbox_*, strategies, ...)
+│   ├── schemas/                # Pydantic request/response
+│   ├── routers/                # Web routes (cookie auth)
+│   ├── api/                    # External API (/api/v1, key auth)
+│   ├── services/               # Business logic — order, options, analytics,
+│   │                           #   strategy_builder, strategy_chart, sandbox,
+│   │                           #   trading_mode, market_data_cache
+│   ├── sandbox/                # Simulated trading engine
+│   ├── broker/                 # 5 broker plugins
+│   │   ├── upstox/, zerodha/, angel/, dhan/, fyers/
+│   ├── websocket_proxy/        # Unified WS proxy (ZeroMQ architecture)
+│   └── utils/                  # logging, redis_client, symtoken_cache, plugin_loader
+├── frontend/
+│   └── src/
+│       ├── pages/              # incl. tools/StrategyBuilder, tools/StrategyPortfolio
+│       ├── components/         # incl. strategy-builder/, strategy-portfolio/
+│       ├── hooks/              # useMarketData, useChainContext, useStrategySnapshot
+│       ├── api/                # Typed wrappers per feature
+│       └── lib/                # black76, probabilityOfProfit, strategyTemplates
+├── collections/                # Bruno API collection
+├── docs/                       # api/, design/ (ARCHITECTURE, SERVICES, websockets, symbol-format)
+└── .env.example
 ```
 
 ## Broker Plugin System
 
-Each broker lives in `backend/broker/{name}/` with:
+Each broker lives in `backend/broker/{name}/`:
 
 ```
 broker/{name}/
-├── plugin.json                # Metadata, supported exchanges
+├── plugin.json                 # name, display_name, supported_exchanges, oauth_type
 ├── api/
-│   ├── auth_api.py            # OAuth token exchange
-│   ├── order_api.py           # Place/modify/cancel orders
-│   ├── funds.py               # Account funds/margin
-│   ├── data.py                # Quotes, depth, history
-│   └── margin_api.py          # Margin calculator
+│   ├── auth_api.py             # OAuth token exchange
+│   ├── order_api.py            # place / modify / cancel
+│   ├── funds.py                # account funds + margin
+│   ├── data.py                 # quotes / depth / history; SUPPORTED_INTERVALS map
+│   └── margin_api.py           # pre-trade margin calculator
 ├── mapping/
-│   ├── transform_data.py      # OpenBull <-> broker format
-│   ├── order_data.py          # Order/position data mapping
-│   └── margin_data.py         # Margin request/response mapping
+│   ├── transform_data.py       # OpenBull <-> broker order fields
+│   ├── order_data.py           # response mapping (token <-> symbol)
+│   └── margin_data.py          # margin request/response normalization
 ├── streaming/
-│   └── {broker}_adapter.py    # WebSocket streaming adapter
+│   └── {broker}_adapter.py     # WebSocket → ZMQ adapter
 └── database/
-    └── master_contract_db.py  # Symbol download and normalization
+    └── master_contract_db.py   # Symbol download + symtoken bulk insert
 ```
 
-To add a new broker: create the directory, implement the modules, add a `plugin.json`, and list it in `VALID_BROKERS` in `.env`.
+To add a broker: create the directory, implement the modules, drop a `plugin.json`, and add the name to `VALID_BROKERS` in `.env`. The plugin loader picks it up on next startup.
 
 ## WebSocket Architecture
 
 ```
-Client WS (port 8765) <-> WS Proxy Server (asyncio)
-    <-> ZeroMQ SUB <-> PUB <-> Broker Adapter (thread)
-        <-> Upstox protobuf / Zerodha binary WS
+Client WS (port 8765)
+    ⇅ JSON                                                    
+WS Proxy (asyncio + websockets)
+    ⇅ ZeroMQ SUB <—— PUB ⇅
+                          Broker Adapter (background thread)
+                          ⇅ broker-native protocol
+                          Upstox protobuf v3 / Zerodha binary
+                                ⇣
+                          MarketDataCache singleton (every tick)
 ```
+
+`MarketDataCache` is the single source of live data for internal consumers. The proxy supports DEPTH ⊇ QUOTE ⊇ LTP hierarchy so subscribing to DEPTH delivers all three message types automatically.
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `APP_SECRET_KEY` | JWT signing key |
-| `ENCRYPTION_PEPPER` | Fernet/Argon2 pepper |
-| `DATABASE_URL` | PostgreSQL async connection string |
-| `CORS_ORIGINS` | Allowed CORS origins (comma-separated) |
-| `VALID_BROKERS` | Enabled brokers (comma-separated) |
-| `SESSION_EXPIRY_TIME` | Daily session expiry in IST (default: `03:00`) |
-| `WEBSOCKET_HOST` | WS proxy bind host (default: `127.0.0.1`) |
-| `WEBSOCKET_PORT` | WS proxy port (default: `8765`) |
-| `WEBSOCKET_URL` | External WS URL (default: `ws://127.0.0.1:8765`) |
-| `ZMQ_HOST` / `ZMQ_PORT` | ZeroMQ bus (default: `127.0.0.1:5555`) |
-| `MAX_SYMBOLS_PER_WEBSOCKET` | Symbols per WS connection (default: `1000`) |
+Selected — see `.env.example` for the full list.
 
-See `.env.example` for all options.
-
-## Bruno API Collection
-
-Import in Bruno: `collections/openbull/` — 30 pre-built requests with tested payloads covering all endpoints.
+| Variable | Description | Default |
+|---|---|---|
+| `APP_SECRET_KEY` | JWT signing key (required) | — |
+| `ENCRYPTION_PEPPER` | Fernet/Argon2 pepper (required) | — |
+| `DATABASE_URL` | PostgreSQL async DSN | `postgresql+asyncpg://postgres:123456@localhost/openbull` |
+| `REDIS_URL` | Redis (cache + symtoken mirror) | `redis://127.0.0.1:6379/0` |
+| `FRONTEND_URL` | OAuth-redirect base (host substituted dynamically per request) | `http://127.0.0.1:5173` |
+| `CORS_ORIGINS` | Allowed origins, comma-separated | `http://127.0.0.1:5173,http://localhost:5173` |
+| `VALID_BROKERS` | Enabled broker plugins | `upstox,zerodha` |
+| `COOKIE_SECURE` | Set true in production over HTTPS | `false` |
+| `SESSION_EXPIRY_TIME` | Daily session expiry IST | `03:00` |
+| `WEBSOCKET_HOST` / `WEBSOCKET_PORT` | WS proxy bind | `127.0.0.1:8765` |
+| `WEBSOCKET_URL` | External WS URL (for SDK consumers) | `ws://127.0.0.1:8765` |
+| `ZMQ_HOST` / `ZMQ_PORT` | ZeroMQ bus | `127.0.0.1:5555` |
+| `MAX_SYMBOLS_PER_WEBSOCKET` | Symbols per WS connection | `1000` |
+| `MAX_WEBSOCKET_CONNECTIONS` | Concurrent WS clients | `3` |
+| `LOG_FILE_MAX_MB` / `LOG_FILE_BACKUP_COUNT` | Rotating log size + retention | `10` / `9` |
+| `ERROR_LOG_DB_MAX_ROWS` / `API_LOG_DB_MAX_ROWS` | DB-backed log table caps | `50000` / `100000` |
 
 ## Production Build
 
@@ -215,14 +299,17 @@ cd frontend && npm run build && cd ..
 uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
-FastAPI serves the built frontend from `frontend/dist/` automatically. WebSocket proxy starts alongside on port 8765.
+FastAPI serves `frontend/dist/` automatically. The WebSocket proxy starts alongside on port 8765. Behind nginx, proxy `/auth`, `/web`, `/upstox`, `/zerodha`, `/api`, `/health`, `/ws` to the backend (`install/install.sh` does this for you).
 
 ## Documentation
 
-- [API Reference](docs/api/README.md) — 33 endpoint docs with tested request/response samples
-- [Architecture](docs/design/ARCHITECTURE.md) — System design, data flows, patterns
-- [Services](docs/design/SERVICES.md) — Business logic layer documentation
-- [Product Overview](docs/PRODUCT.md) — Capabilities and feature summary
+- [API Reference](docs/api/README.md) — per-endpoint docs with tested request/response samples
+- [Architecture](docs/design/ARCHITECTURE.md) — system design, data flows, design patterns, caching layer, logging & audit, trading modes, analytics tools, Strategy Builder
+- [Services](docs/design/SERVICES.md) — business logic layer, ~30 services
+- [WebSocket Protocol](docs/design/websockets-format.md) — wire format, modes, limits
+- [Symbol Format](docs/design/symbol-format.md) — OpenAlgo-compatible symbology
+- [Order Constants](docs/design/order-constants.md) — valid exchanges, products, pricetypes, actions
+- [Product Overview](docs/PRODUCT.md) — feature-level summary
 
 ## License
 

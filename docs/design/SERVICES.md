@@ -60,8 +60,12 @@ Unlike the OpenAlgo SDK, OpenBull services do **not** accept an `api_key` parame
    - [GEX](#gex)
 8. [Sandbox Service](#sandbox-service)
 9. [Trading Mode Service](#trading-mode-service)
-10. [Market Data Cache](#market-data-cache)
-11. [Common Patterns](#common-patterns)
+10. [Strategy Builder & Portfolio](#strategy-builder--portfolio)
+    - [SaveStrategy / List / Get / Update / Delete](#savestrategy--list--get--update--delete)
+    - [StrategySnapshot](#strategysnapshot)
+    - [StrategyChart](#strategychart)
+11. [Market Data Cache](#market-data-cache)
+12. [Common Patterns](#common-patterns)
 
 ---
 
@@ -2055,6 +2059,274 @@ A 10-second in-memory cache (`_CACHE_TTL_SECONDS`) avoids a DB hit per request. 
 | `invalidate_cache()` | line 53 | Force the cache to refetch on next read. |
 
 `VALID_TRADING_MODES = {"live", "sandbox"}` is defined in `backend/models/settings.py`.
+
+---
+
+## Strategy Builder & Portfolio
+
+User-curated multi-leg option strategies with persistent storage, live snapshot pricing, and historical combined-premium charting. Backs the `/tools/strategybuilder` and `/tools/strategyportfolio` UI pages. Three distinct service surfaces:
+
+1. **CRUD** over the `strategies` table — `backend/routers/strategies.py` calls SQLAlchemy directly (no separate service module — the persistence is thin enough to live in the router).
+2. **Snapshot** — `backend/services/strategy_builder_service.py:get_strategy_snapshot()` — single round-trip live pricing for a leg set.
+3. **Chart** — `backend/services/strategy_chart_service.py:get_strategy_chart_data()` — generalises `straddle_chart_service` to an arbitrary leg list.
+
+All three are session-cookie-authed under `/web/*` (not `/api/v1/*`) — these are internal UI endpoints, not external API. Per-user isolation: every CRUD query filters on the authenticated user's id.
+
+### SaveStrategy / List / Get / Update / Delete
+
+REST CRUD over the `strategies` table.
+
+**Router:** `backend/routers/strategies.py` (no separate service file).
+
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/web/strategies` | List for the current user (filters: `mode`, `status`, `underlying`). Newest first. |
+| `GET` | `/web/strategies/{id}` | Fetch one (404 if not owned by the user). |
+| `POST` | `/web/strategies` | Create. |
+| `PUT` | `/web/strategies/{id}` | Partial update. Setting `status="closed"` from any other status auto-stamps `closed_at`. |
+| `DELETE` | `/web/strategies/{id}` | Hard delete. |
+
+**Schemas (`backend/schemas/strategies.py`):**
+
+`StrategyLeg` is the unit of persistence inside the JSONB column:
+
+```python
+class StrategyLeg(BaseModel):
+    id: Optional[str]               # client UUID for stable React keys
+    action: Literal["BUY", "SELL"]
+    option_type: Literal["CE", "PE"]
+    strike: float
+    lots: int
+    lot_size: Optional[int]
+    expiry_date: Optional[str]      # per-leg "DDMMMYY" — supports calendar/diagonal
+    symbol: Optional[str]           # resolved option symbol
+    entry_price: float = 0.0
+    exit_price: Optional[float]
+    status: Literal["open", "closed", "expired"] = "open"
+    entry_time: Optional[datetime]
+    exit_time: Optional[datetime]
+```
+
+`StrategyCreate` requires `name`, `underlying`, `exchange`, `legs: List[StrategyLeg]`. Optional: `expiry_date`, `mode` (`"live"` / `"sandbox"`, default `"live"`), `notes`.
+
+`StrategyUpdate` is fully partial — only fields present in the body are touched. The router also validates that `status` transitions follow `{active, closed, expired}` and stamps `closed_at` server-side.
+
+**Example — list active sandbox strategies on NIFTY:**
+
+```bash
+curl -b "access_token=..." \
+  "http://127.0.0.1:8000/web/strategies?mode=sandbox&status=active&underlying=NIFTY"
+```
+
+```json
+{
+  "status": "success",
+  "strategies": [
+    {
+      "id": 7,
+      "user_id": 1,
+      "name": "Iron Condor 02-MAY",
+      "underlying": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "expiry_date": "02MAY26",
+      "mode": "sandbox",
+      "status": "active",
+      "legs": [
+        {"action":"BUY","option_type":"CE","strike":26000,"lots":1,"lot_size":75,"symbol":"NIFTY02MAY2626000CE","entry_price":20.0,"status":"open"},
+        {"action":"SELL","option_type":"CE","strike":25500,"lots":1,"lot_size":75,"symbol":"NIFTY02MAY2625500CE","entry_price":60.0,"status":"open"},
+        {"action":"SELL","option_type":"PE","strike":24500,"lots":1,"lot_size":75,"symbol":"NIFTY02MAY2624500PE","entry_price":80.0,"status":"open"},
+        {"action":"BUY","option_type":"PE","strike":24000,"lots":1,"lot_size":75,"symbol":"NIFTY02MAY2624000PE","entry_price":30.0,"status":"open"}
+      ],
+      "notes": null,
+      "created_at": "2026-04-29T20:54:36+05:30",
+      "updated_at": "2026-04-29T20:54:36+05:30",
+      "closed_at": null
+    }
+  ]
+}
+```
+
+---
+
+### StrategySnapshot
+
+Single-shot live pricing for a leg set: spot + per-leg LTP + IV + Greeks + position-aggregated totals.
+
+**Function:** `get_strategy_snapshot(legs, underlying, exchange, auth_token, broker, config=None, options_exchange=None, interest_rate=None, expiry_time=None)`
+
+**Location:** `backend/services/strategy_builder_service.py:97`
+
+**Endpoint:** `POST /web/strategybuilder/snapshot`
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `underlying` | str | Yes | Base symbol (e.g. `NIFTY`). |
+| `exchange` | str | No | Spot/forward exchange (auto-resolved from underlying if omitted). |
+| `options_exchange` | str | No | Default leg exchange — `NFO`, `BFO`, `CDS`, `MCX`. Default `NFO`. |
+| `interest_rate` | float | No | Annualized %; per-exchange default if omitted (`0` for NFO/BFO/CDS/MCX). |
+| `expiry_time` | str | No | `HH:MM` — overrides the per-exchange expiry time used for `T`. |
+| `legs` | array | Yes | One or more `SnapshotLeg`. |
+
+**SnapshotLeg fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `symbol` | str | Yes | Resolved option symbol (e.g. `NIFTY02MAY2625000CE`). |
+| `action` | `"BUY"` / `"SELL"` | Yes | Sign convention: BUY = +1, SELL = −1. |
+| `lots` | int | Yes | Number of lots. |
+| `lot_size` | int | Yes | Shares per lot. |
+| `exchange` | str | No | Per-leg exchange override (rare; default = `options_exchange`). |
+| `entry_price` | float | No | Supplying this turns on `unrealized_pnl` per leg and in totals. |
+
+**How it works (lines 97-263):**
+
+1. Validate every leg's basic shape up front so we never fan out a partial fetch.
+2. Fetch the underlying spot via `get_quotes_with_auth(underlying, spot_exchange)` — one broker call.
+3. Build a deduped multi-quotes request for every leg's symbol; fetch via `get_multi_quotes_with_auth()` — one broker call regardless of leg count.
+4. For each leg, run the pure-math `option_greeks_service.calculate_greeks()` against the live spot + LTP. No re-hits to the broker.
+5. Aggregate position-level Greeks: `Σ (sign × lots × lot_size × leg_greek)`.
+6. Net premium: `Σ (sign × lots × lot_size × ltp)`. Positive = net debit, negative = net credit.
+7. Stamp `as_of` in IST so the UI doesn't have to TZ-convert.
+
+**Per-leg errors are non-fatal** — a leg with an unparseable symbol or below-intrinsic LTP returns the leg with an `error` or `note` field and zero Greeks; the rest of the snapshot still renders. This matches the deep-ITM theoretical-Greeks fallback in `option_greeks_service`.
+
+**Example response (NIFTY long straddle, spot=24177.65, K=25000, 5.77 DTE):**
+
+```json
+{
+  "status": "success",
+  "underlying": "NIFTY",
+  "exchange": "NSE_INDEX",
+  "spot_price": 24177.65,
+  "as_of": "2026-04-29T20:54:36+05:30",
+  "legs": [
+    {
+      "index": 0,
+      "symbol": "NIFTY05MAY2625000CE",
+      "exchange": "NFO",
+      "action": "BUY",
+      "lots": 1,
+      "lot_size": 75,
+      "underlying": "NIFTY",
+      "strike": 25000.0,
+      "option_type": "CE",
+      "expiry_date": "05-May-2026",
+      "days_to_expiry": 5.7746,
+      "ltp": 120.0,
+      "implied_volatility": 32.84,
+      "greeks": {"delta": 0.215, "gamma": 0.000293, "theta": -25.27, "vega": 8.89, "rho": -0.019},
+      "position_premium": 9000.0,
+      "entry_price": 100.0,
+      "unrealized_pnl": 1500.0
+    },
+    {
+      "index": 1,
+      "symbol": "NIFTY05MAY2625000PE",
+      "exchange": "NFO",
+      "action": "BUY",
+      "lots": 1,
+      "lot_size": 75,
+      "strike": 25000.0,
+      "option_type": "PE",
+      "ltp": 95.0,
+      "implied_volatility": 0.0,
+      "greeks": {"delta": -1.0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0},
+      "note": "Deep ITM option with no time value - theoretical Greeks returned",
+      "position_premium": 7125.0,
+      "entry_price": 110.0,
+      "unrealized_pnl": -1125.0
+    }
+  ],
+  "totals": {
+    "premium_paid": 16125.0,
+    "delta": -58.875,
+    "gamma": 0.022,
+    "theta": -1895.59,
+    "vega": 666.49,
+    "rho": -1.42,
+    "unrealized_pnl": 375.0
+  }
+}
+```
+
+**Returns:** `(success, response_data, http_status_code)`.
+
+---
+
+### StrategyChart
+
+Historical combined-premium time series for an arbitrary leg list — generalises `straddle_chart_service` (which walks the underlying and recomputes ATM per candle) to a fixed-leg setup.
+
+**Function:** `get_strategy_chart_data(legs, underlying, exchange, interval, auth_token, broker, config=None, options_exchange=None, days=5, include_underlying=True)`
+
+**Location:** `backend/services/strategy_chart_service.py:67`
+
+**Endpoint:** `POST /web/strategybuilder/chart`
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `underlying` | str | Yes | Base symbol. |
+| `exchange` | str | No | Spot exchange — auto-resolved if omitted. |
+| `options_exchange` | str | No | Default leg exchange. |
+| `interval` | str | Yes | Broker-specific interval (`1m`, `5m`, `1h`, `D`, ...). |
+| `days` | int | No | Trading-day window (1-60). Default 5. |
+| `include_underlying` | bool | No | Set false to skip the underlying overlay fetch. |
+| `legs` | array | Yes | Same `ChartLeg` shape as `SnapshotLeg`. |
+
+**How it works (lines 67-228):**
+
+1. Validate leg shape; reject empties so we never fan out a partial fetch.
+2. Calendar window: `today − (days × 2 + 2)` so a 1-day request still finds Friday's session on a Monday morning.
+3. Fetch the underlying history via `get_history_with_auth()`. On failure (Zerodha indices on `1m`, e.g.), set `underlying_available=false` and continue — leg-only chart still renders.
+4. Fetch each leg's history sequentially. Build a `{ts -> close}` map per leg.
+5. **Intersect timestamps** across every populated leg map. Any timestamp where one leg lacks a close is dropped — eliminates phantom dips when one broker candle is delayed (the same correctness call OpenAlgo's strategy chart makes).
+6. For each surviving timestamp, compute `value = Σ (sign × lots × lot_size × close)`. If every leg has `entry_price`, also stamp `pnl = value(t) − entry_premium_constant`.
+7. Trim to the last `days` distinct trading dates so the day window is honored, propagating the cutoff to per-leg + underlying series.
+8. Fetch current `underlying_ltp` for the header card.
+
+**Sign convention** matches `StrategySnapshot.totals.premium_paid` exactly so cross-tab numbers agree.
+
+**Example response (long straddle, 5m × 5d):**
+
+```json
+{
+  "status": "success",
+  "data": {
+    "underlying": "NIFTY",
+    "underlying_ltp": 24177.65,
+    "exchange": "NSE_INDEX",
+    "interval": "5m",
+    "days": 5,
+    "underlying_available": true,
+    "underlying_series": [{"time": 1714330000, "close": 24100.0}, ...],
+    "leg_series": [
+      {
+        "index": 0, "symbol": "NIFTY05MAY2625000CE", "exchange": "NFO",
+        "action": "BUY", "lots": 1, "lot_size": 75,
+        "series": [{"time": 1714330000, "close": 95.0}, ...],
+        "entry_price": 100.0
+      },
+      {"index": 1, "symbol": "NIFTY05MAY2625000PE", ...}
+    ],
+    "combined_series": [
+      {"time": 1714330000, "value": 15375.0, "pnl": -375.0},
+      {"time": 1714330300, "value": 15375.0, "pnl": -375.0},
+      {"time": 1714330600, "value": 15750.0, "pnl": 0.0}
+    ],
+    "entry_premium": 15750.0
+  }
+}
+```
+
+`entry_premium` is null when any leg lacks `entry_price`. In that case `combined_series[*].pnl` is also absent — the chart falls back to the value series.
+
+**Returns:** `(success, response_data, http_status_code)`. The 200 path is wrapped in a `data` key (matches the OpenAlgo straddle-chart shape); error responses are flat `{status, message}`.
 
 ---
 
