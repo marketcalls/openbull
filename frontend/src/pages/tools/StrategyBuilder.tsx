@@ -31,6 +31,7 @@ import { ExpiryPicker, convertExpiryForApi } from "@/components/strategy-builder
 import { GreeksPanel } from "@/components/strategy-builder/GreeksPanel";
 import { LegRow, type BuilderLeg } from "@/components/strategy-builder/LegRow";
 import { PayoffChart } from "@/components/strategy-builder/PayoffChart";
+import { PnLTab, type PnlLeg } from "@/components/strategy-builder/PnLTab";
 import { SaveStrategyDialog } from "@/components/strategy-builder/SaveStrategyDialog";
 import { StrategyTemplatePicker } from "@/components/strategy-builder/StrategyTemplatePicker";
 import { UnderlyingPicker } from "@/components/strategy-builder/UnderlyingPicker";
@@ -204,6 +205,28 @@ export default function StrategyBuilder() {
     }
     return out;
   }, [legs]);
+
+  // Adapter for the P&L tab — maps builder legs to the streaming-table shape.
+  // Skips legs without a resolved symbol (the WS subscriber would reject them
+  // anyway). Uses the page's options exchange as the leg's WS exchange so a
+  // BFO basket subscribes on BFO, not NFO.
+  const pnlLegs = useMemo<PnlLeg[]>(
+    () =>
+      legs
+        .filter((l) => l.symbol && l.entry_price > 0)
+        .map((l) => ({
+          id: l.id,
+          symbol: l.symbol,
+          exchange: exchange,
+          action: l.action,
+          optionType: l.option_type,
+          strike: l.strike,
+          lots: l.lots,
+          lotSize: l.lot_size,
+          entryPrice: l.entry_price,
+        })),
+    [legs, exchange],
+  );
 
   // ── Load saved strategy from `?load=<id>` ────────────────────────────
   useEffect(() => {
@@ -659,13 +682,13 @@ export default function StrategyBuilder() {
           />
         </TabsContent>
 
-        {/* Phase 7 — WebSocket-streamed P&L */}
+        {/* P&L tab — WebSocket-streamed leg LTPs */}
         <TabsContent value="pnl">
-          <PlaceholderTab
-            title="Live P&L"
-            phase="Phase 7"
-            note="WebSocket-streamed leg LTPs with flash-on-tick cells; aggregated P&L vs entry prices ticking in real time."
-          />
+          <Card>
+            <CardContent className="p-3 sm:p-4">
+              <PnLTab legs={pnlLegs} enabled={activeTab === "pnl"} />
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
 
