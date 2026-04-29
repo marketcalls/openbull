@@ -1,0 +1,10 @@
+{
+    "name": "fyers",
+    "display_name": "Fyers",
+    "description": "Fyers broker integration for OpenBull",
+    "version": "1.0",
+    "supported_exchanges": ["NSE", "BSE", "NFO", "BFO", "CDS", "MCX", "NSE_INDEX", "BSE_INDEX"],
+    "broker_type": "IN_stock",
+    "oauth_type": "auth_code",
+    "auth_url_template": "https://api-t1.fyers.in/api/v3/generate-authcode?client_id={api_key}&redirect_uri={redirect_url}&response_type=code&state=sample"
+}

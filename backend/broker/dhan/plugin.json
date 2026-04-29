@@ -1,0 +1,10 @@
+{
+    "name": "dhan",
+    "display_name": "Dhan",
+    "description": "Dhan broker integration for OpenBull",
+    "version": "1.0",
+    "supported_exchanges": ["NSE", "BSE", "NFO", "BFO", "CDS", "BCD", "MCX", "NSE_INDEX", "BSE_INDEX"],
+    "broker_type": "IN_stock",
+    "oauth_type": "token_id",
+    "auth_url_template": "https://auth.dhan.co/login/consentApp-login?consentAppId={consent_app_id}"
+}

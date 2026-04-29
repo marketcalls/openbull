@@ -1,0 +1,10 @@
+{
+    "name": "angel",
+    "display_name": "Angel One (SmartAPI)",
+    "description": "Angel One SmartAPI broker integration for OpenBull",
+    "version": "1.0",
+    "supported_exchanges": ["NSE", "BSE", "NFO", "BFO", "CDS", "MCX", "NSE_INDEX", "BSE_INDEX", "MCX_INDEX"],
+    "broker_type": "IN_stock",
+    "oauth_type": "credentials",
+    "auth_url_template": ""
+}
