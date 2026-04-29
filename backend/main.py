@@ -238,6 +238,13 @@ from backend.routers.sandbox import router as sandbox_router
 
 app.include_router(sandbox_router)
 
+# Saved strategies (Strategy Builder + Strategy Portfolio)
+from backend.routers.strategies import router as strategies_router
+from backend.routers.strategybuilder import router as strategybuilder_router
+
+app.include_router(strategies_router)
+app.include_router(strategybuilder_router)
+
 
 # Health check
 @app.get("/health")
