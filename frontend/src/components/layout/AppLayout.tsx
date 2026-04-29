@@ -55,6 +55,7 @@ const navItems: NavItem[] = [
       { label: "Vol Surface", to: "/tools/volsurface" },
       { label: "Straddle Chart", to: "/tools/straddle" },
       { label: "GEX Dashboard", to: "/tools/gex" },
+      { label: "Strategy Builder", to: "/tools/strategybuilder" },
     ],
   },
   {

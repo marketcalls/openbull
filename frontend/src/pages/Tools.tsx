@@ -67,6 +67,13 @@ const TOOLS: ToolDef[] = [
       "Gamma Exposure per strike (γ × OI × lot size) plus OI walls and top |γ| strikes table.",
     status: "available",
   },
+  {
+    to: "/tools/strategybuilder",
+    title: "Strategy Builder",
+    description:
+      "Multi-leg option strategy designer with live Greeks, payoff chart, and one-click basket execute. Save strategies and reload them from your portfolio.",
+    status: "available",
+  },
 ];
 
 export default function Tools() {
