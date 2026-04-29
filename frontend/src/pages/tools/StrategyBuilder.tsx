@@ -39,6 +39,10 @@ import {
 import { SaveStrategyDialog } from "@/components/strategy-builder/SaveStrategyDialog";
 import { StrategyTemplatePicker } from "@/components/strategy-builder/StrategyTemplatePicker";
 import { UnderlyingPicker } from "@/components/strategy-builder/UnderlyingPicker";
+import {
+  BasketOrderDialog,
+  type BasketDialogLeg,
+} from "@/components/trading/BasketOrderDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -162,6 +166,7 @@ export default function StrategyBuilder() {
   const [strategyName, setStrategyName] = useState("");
   const [strategyNotes, setStrategyNotes] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
+  const [basketOpen, setBasketOpen] = useState(false);
   const [templateValue] = useState("");
 
   const expiryApi = useMemo(() => convertExpiryForApi(expiry), [expiry]);
@@ -225,6 +230,28 @@ export default function StrategyBuilder() {
           entry_price: l.entry_price > 0 ? l.entry_price : undefined,
         })),
     [legs],
+  );
+
+  // Adapter for the BasketOrderDialog — every leg with a resolved symbol.
+  // Unlike pnlLegs we DON'T require entry_price > 0; basket fires fresh
+  // orders that don't depend on a stored entry, so any leg with a valid
+  // symbol + lots is fireable.
+  const basketLegs = useMemo<BasketDialogLeg[]>(
+    () =>
+      legs
+        .filter((l) => l.symbol)
+        .map((l) => ({
+          id: l.id,
+          symbol: l.symbol,
+          exchange: exchange,
+          action: l.action,
+          optionType: l.option_type,
+          strike: l.strike,
+          lots: l.lots,
+          lotSize: l.lot_size,
+          entryPrice: l.entry_price,
+        })),
+    [legs, exchange],
   );
 
   // Adapter for the P&L tab — maps builder legs to the streaming-table shape.
@@ -527,6 +554,17 @@ export default function StrategyBuilder() {
             {strategyId ? "Update" : "Save"}
           </Button>
           <Button
+            onClick={() => setBasketOpen(true)}
+            disabled={basketLegs.length === 0}
+            title={
+              basketLegs.length === 0
+                ? "Add legs with resolved strikes before executing"
+                : `Fire ${basketLegs.length} legs as a basket`
+            }
+          >
+            Execute Basket
+          </Button>
+          <Button
             variant="ghost"
             onClick={handleClearAll}
             disabled={legs.length === 0 && !strategyId}
@@ -717,6 +755,15 @@ export default function StrategyBuilder() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* ── Basket execute dialog ─────────────────────────────────────── */}
+      <BasketOrderDialog
+        open={basketOpen}
+        onOpenChange={setBasketOpen}
+        legs={basketLegs}
+        strategy={strategyName || `${underlying} Strategy Builder`}
+        mode={tradingMode === "sandbox" ? "sandbox" : "live"}
+      />
 
       {/* ── Save dialog ───────────────────────────────────────────────── */}
       <SaveStrategyDialog
