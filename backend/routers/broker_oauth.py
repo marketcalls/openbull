@@ -1,6 +1,6 @@
 import logging
 from threading import Thread
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
@@ -24,6 +24,31 @@ router = APIRouter(tags=["broker-oauth"])
 # In-memory store for pending OAuth flows (broker -> {user_id, username})
 # Used when broker doesn't echo back state param (e.g. Zerodha)
 _pending_oauth: dict[str, dict] = {}
+
+
+def _frontend_url_for_request(request: Request) -> str:
+    """Build the frontend base URL using the request's actual hostname.
+
+    Browsers scope cookies by hostname, and treat 127.0.0.1 and localhost as
+    distinct hosts. The OAuth callback sets the access_token cookie on
+    whatever host the browser used to reach the backend (e.g. 127.0.0.1 when
+    the user's broker redirect_url is http://127.0.0.1:8000/<broker>/callback).
+    If we then redirect to a hardcoded settings.frontend_url with a different
+    hostname (e.g. http://localhost:5173), the browser drops the new cookie
+    and the user lands at /dashboard unauthenticated, getting bounced to
+    /login. This was the "first login fails, second succeeds" bug.
+
+    Strategy: keep scheme + port from FRONTEND_URL, but substitute the
+    hostname the request actually arrived on so the cookie survives the
+    redirect. Falls back to settings.frontend_url when the request has no
+    parseable hostname.
+    """
+    parsed = urlparse(settings.frontend_url)
+    request_hostname = request.url.hostname
+    if not request_hostname:
+        return settings.frontend_url
+    netloc = f"{request_hostname}:{parsed.port}" if parsed.port else request_hostname
+    return urlunparse((parsed.scheme, netloc, "", "", "", "")).rstrip("/")
 
 
 @router.get("/auth/broker-redirect")
@@ -141,11 +166,14 @@ async def _handle_oauth_callback(
     """Common OAuth callback handler for all brokers."""
     from backend.security import decode_access_token
 
+    frontend_base = _frontend_url_for_request(request)
+
     logger.info("=== OAuth callback START for %s ===", broker_name)
     logger.info("code_or_token present: %s", bool(code_or_token))
     logger.info("state present: %s", bool(state))
     logger.info("all query params: %s", dict(request.query_params))
     logger.info("cookies: %s", list(request.cookies.keys()))
+    logger.info("redirect base resolved to %s (request host=%s)", frontend_base, request.url.hostname)
 
     # Identify user from JWT cookie, or from OAuth state parameter as fallback
     token_cookie = request.cookies.get("access_token")
@@ -164,7 +192,7 @@ async def _handle_oauth_callback(
 
     if not payload:
         logger.error("NO user identity found - redirecting to login")
-        return RedirectResponse(url=f"{settings.frontend_url}/login", status_code=302)
+        return RedirectResponse(url=f"{frontend_base}/login", status_code=302)
 
     user_id = int(payload["sub"])
     username = payload.get("username", "unknown")
@@ -180,7 +208,7 @@ async def _handle_oauth_callback(
     broker_cfg = result.scalar_one_or_none()
     if not broker_cfg:
         logger.error("No broker config found for user %s, broker %s", user_id, broker_name)
-        return RedirectResponse(url=f"{settings.frontend_url}/broker/config?error=not_configured", status_code=302)
+        return RedirectResponse(url=f"{frontend_base}/broker/config?error=not_configured", status_code=302)
 
     logger.info("broker config found, redirect_url=%s", broker_cfg.redirect_url)
 
@@ -198,7 +226,7 @@ async def _handle_oauth_callback(
         logger.info("authenticate_broker result: token=%s, error=%s", bool(access_token), error)
     except Exception as e:
         logger.exception("Failed to import/run broker module for %s: %s", broker_name, e)
-        return RedirectResponse(url=f"{settings.frontend_url}/broker/select?error=module_error", status_code=302)
+        return RedirectResponse(url=f"{frontend_base}/broker/select?error=module_error", status_code=302)
 
     if not access_token:
         logger.error("Broker auth failed for %s: %s", broker_name, error)
@@ -211,7 +239,7 @@ async def _handle_oauth_callback(
             failure_reason=error,
         ))
         await db.commit()
-        return RedirectResponse(url=f"{settings.frontend_url}/broker/select?error=auth_failed", status_code=302)
+        return RedirectResponse(url=f"{frontend_base}/broker/select?error=auth_failed", status_code=302)
 
     # Store encrypted token - upsert
     result = await db.execute(
@@ -288,7 +316,7 @@ async def _handle_oauth_callback(
         "jti": session_token,
     })
 
-    redirect = RedirectResponse(url=f"{settings.frontend_url}/dashboard", status_code=302)
+    redirect = RedirectResponse(url=f"{frontend_base}/dashboard", status_code=302)
     redirect.set_cookie(
         key="access_token",
         value=new_token,
