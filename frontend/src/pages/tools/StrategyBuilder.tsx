@@ -28,10 +28,15 @@ import { toast } from "sonner";
 
 import { getStrategy } from "@/api/strategies";
 import { ExpiryPicker, convertExpiryForApi } from "@/components/strategy-builder/ExpiryPicker";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { GreeksPanel } from "@/components/strategy-builder/GreeksPanel";
 import { LegRow, type BuilderLeg } from "@/components/strategy-builder/LegRow";
-import { PayoffChart } from "@/components/strategy-builder/PayoffChart";
+import {
+  PayoffChart,
+  type SimulationMarker,
+} from "@/components/strategy-builder/PayoffChart";
 import { PnLTab, type PnlLeg } from "@/components/strategy-builder/PnLTab";
+import { WhatIfPanel, type SimulationOutput } from "@/components/strategy-builder/WhatIfPanel";
 import {
   StrategyChartTab,
   type ChartLegInput,
@@ -168,6 +173,7 @@ export default function StrategyBuilder() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [basketOpen, setBasketOpen] = useState(false);
   const [templateValue] = useState("");
+  const [simulation, setSimulation] = useState<SimulationOutput | null>(null);
 
   const expiryApi = useMemo(() => convertExpiryForApi(expiry), [expiry]);
 
@@ -214,6 +220,27 @@ export default function StrategyBuilder() {
     }
     return out;
   }, [legs]);
+
+  // Build the chart's simulation marker from the WhatIfPanel's output.
+  // Skip when no slider is active so the chart renders cleanly.
+  const simulationMarker = useMemo<SimulationMarker | null>(() => {
+    if (!simulation || !simulation.active) return null;
+    const parts: string[] = [];
+    if (simulation.spotShiftPct !== 0) {
+      parts.push(`spot ${simulation.spotShiftPct > 0 ? "+" : ""}${simulation.spotShiftPct.toFixed(1)}%`);
+    }
+    if (simulation.ivShiftPct !== 0) {
+      parts.push(`IV ${simulation.ivShiftPct > 0 ? "+" : ""}${simulation.ivShiftPct.toFixed(1)}pp`);
+    }
+    if (simulation.daysForward !== 0) {
+      parts.push(`${simulation.daysForward}d fwd`);
+    }
+    return {
+      spot: simulation.simulatedSpot,
+      pnl: simulation.simulatedPnl,
+      label: parts.length > 0 ? `What-if: ${parts.join(", ")}` : "What-if",
+    };
+  }, [simulation]);
 
   // Adapter for the historical chart endpoint. Same filtering as snapshotLegs
   // but keeps `entry_price` always present so the backend stamps the PnL
@@ -695,25 +722,38 @@ export default function StrategyBuilder() {
         <TabsContent value="greeks">
           <Card>
             <CardContent className="p-3 sm:p-4">
-              <GreeksPanel
-                snapshot={snapshot}
-                loading={snapshotLoading}
-                error={snapshotError}
-              />
+              <ErrorBoundary label="Greeks panel">
+                <GreeksPanel
+                  snapshot={snapshot}
+                  loading={snapshotLoading}
+                  error={snapshotError}
+                />
+              </ErrorBoundary>
             </CardContent>
           </Card>
         </TabsContent>
 
-        {/* Payoff tab — At-Expiry + T+0 curves */}
+        {/* Payoff tab — At-Expiry + T+0 curves + What-if simulator */}
         <TabsContent value="payoff">
           <Card>
-            <CardContent className="p-2 sm:p-4">
+            <CardContent className="space-y-3 p-2 sm:p-4">
               {snapshot ? (
-                <PayoffChart
-                  snapshotLegs={snapshot.legs}
-                  entryPriceBySymbol={entryPriceBySymbol}
-                  spot={snapshot.spot_price}
-                />
+                <>
+                  <ErrorBoundary label="Payoff chart">
+                    <PayoffChart
+                      snapshotLegs={snapshot.legs}
+                      entryPriceBySymbol={entryPriceBySymbol}
+                      spot={snapshot.spot_price}
+                      simulationMarker={simulationMarker}
+                    />
+                  </ErrorBoundary>
+                  <WhatIfPanel
+                    snapshotLegs={snapshot.legs}
+                    entryPriceBySymbol={entryPriceBySymbol}
+                    spot={snapshot.spot_price}
+                    onSimulationChange={setSimulation}
+                  />
+                </>
               ) : (
                 <div className="flex h-[420px] flex-col items-center justify-center gap-1 text-center text-muted-foreground">
                   <p className="text-sm">
@@ -736,12 +776,14 @@ export default function StrategyBuilder() {
         <TabsContent value="chart">
           <Card>
             <CardContent className="p-3 sm:p-4">
-              <StrategyChartTab
-                underlying={underlying}
-                optionsExchange={exchange}
-                legs={chartLegs}
-                enabled={activeTab === "chart"}
-              />
+              <ErrorBoundary label="Strategy chart">
+                <StrategyChartTab
+                  underlying={underlying}
+                  optionsExchange={exchange}
+                  legs={chartLegs}
+                  enabled={activeTab === "chart"}
+                />
+              </ErrorBoundary>
             </CardContent>
           </Card>
         </TabsContent>

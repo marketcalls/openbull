@@ -30,6 +30,7 @@ import {
   payoffAtExpiry,
   type PayoffLeg,
 } from "@/lib/black76";
+import { probabilityOfProfit } from "@/lib/probabilityOfProfit";
 import type { Greeks, SnapshotLegOutput } from "@/types/strategy";
 
 /** Like PayoffLeg, plus IV + remaining time so we can re-price for T+0. */
@@ -42,6 +43,16 @@ interface EnrichedLeg extends PayoffLeg {
   greeks: Greeks;
 }
 
+/** Marker the WhatIfPanel asks the chart to draw — a single dot at
+ *  (simulatedSpot, simulatedPnl) showing where the strategy lands under
+ *  the user's slider settings. */
+export interface SimulationMarker {
+  spot: number;
+  pnl: number | null;
+  /** Mostly-cosmetic label so the user knows which sliders are non-zero. */
+  label?: string;
+}
+
 interface Props {
   /** Snapshot legs — used as the source for IV / DTE / LTP / option metadata. */
   snapshotLegs: SnapshotLegOutput[];
@@ -52,6 +63,10 @@ interface Props {
   spotRange?: [number, number];
   /** Number of sample points on each curve. 200 is a good default. */
   steps?: number;
+  /** Optional what-if marker. When set, a magenta dot is plotted at
+   *  the simulated point with a vertical guide line. Updates cheaply
+   *  on every slider tick — no curve recomputation. */
+  simulationMarker?: SimulationMarker | null;
 }
 
 /** Build enriched legs, dropping any that don't have enough info to price. */
@@ -133,6 +148,7 @@ export function PayoffChart({
   spot,
   spotRange,
   steps = 200,
+  simulationMarker = null,
 }: Props) {
   const { theme } = useTheme();
   const isDark = theme === "dark";
@@ -146,6 +162,28 @@ export function PayoffChart({
     () => pickSpotRange(legs, spot, spotRange),
     [legs, spot, spotRange],
   );
+
+  // Probability of Profit — uses the same payoff legs and the snapshot's
+  // solved IVs / DTEs. Cheap (one extra at-expiry sweep over an 800-pt
+  // grid), so we recompute on every leg or spot change — same dep set
+  // the curve already has, so React batches.
+  const pop = useMemo(() => {
+    if (legs.length === 0) return null;
+    const payoffLegs: PayoffLeg[] = legs.map((l) => ({
+      action: l.action,
+      optionType: l.optionType,
+      strike: l.strike,
+      lots: l.lots,
+      lotSize: l.lotSize,
+      entryPrice: l.entryPrice,
+    }));
+    return probabilityOfProfit({
+      legs: payoffLegs,
+      spot,
+      legIvDecimals: legs.map((l) => l.ivDecimal),
+      legDteYears: legs.map((l) => l.dteYears),
+    });
+  }, [legs, spot]);
 
   const { xs, expiryY, t0Y, breakevens, bounds, sigmaXs } = useMemo(() => {
     const [lo, hi] = range;
@@ -213,6 +251,8 @@ export function PayoffChart({
       spot: "#f59e0b", // amber-500
       breakeven: isDark ? "#fbbf24" : "#d97706",
       sigma: isDark ? "rgba(168, 85, 247, 0.25)" : "rgba(139, 92, 246, 0.25)",
+      simMarker: "#ec4899", // pink-500 — distinct from spot/breakeven/zone fills
+      simGuide: isDark ? "rgba(236, 72, 153, 0.6)" : "rgba(236, 72, 153, 0.6)",
       hoverBg: isDark ? "#1e293b" : "#ffffff",
       hoverText: isDark ? "#e0e0e0" : "#333333",
       hoverBorder: isDark ? "#475569" : "#e2e8f0",
@@ -222,7 +262,7 @@ export function PayoffChart({
 
   const traces = useMemo<unknown[]>(() => {
     if (legs.length === 0) return [];
-    return [
+    const out: unknown[] = [
       // At-expiry curve — primary
       {
         x: xs,
@@ -245,7 +285,34 @@ export function PayoffChart({
         hovertemplate: "Spot %{x:.2f}<br>P&L %{y:.2f}<extra>T+0</extra>",
       },
     ];
-  }, [legs, xs, expiryY, t0Y, colors]);
+
+    // What-if simulation marker — single dot at the simulated point.
+    // Re-renders cheaply on every slider tick because it's just two
+    // numbers; the curves above are memoised independently.
+    if (
+      simulationMarker &&
+      simulationMarker.pnl !== null &&
+      Number.isFinite(simulationMarker.spot) &&
+      Number.isFinite(simulationMarker.pnl)
+    ) {
+      out.push({
+        x: [simulationMarker.spot],
+        y: [simulationMarker.pnl],
+        type: "scatter",
+        mode: "markers",
+        name: simulationMarker.label ?? "What-if",
+        marker: {
+          size: 12,
+          color: colors.simMarker,
+          line: { color: colors.text, width: 1 },
+          symbol: "diamond",
+        },
+        hovertemplate:
+          "Spot %{x:.2f}<br>Simulated P&L %{y:.2f}<extra>What-if</extra>",
+      });
+    }
+    return out;
+  }, [legs, xs, expiryY, t0Y, colors, simulationMarker]);
 
   const layout = useMemo<Record<string, unknown>>(() => {
     const [lo, hi] = range;
@@ -338,6 +405,24 @@ export function PayoffChart({
       });
     }
 
+    // What-if simulated-spot guide
+    if (
+      simulationMarker &&
+      Number.isFinite(simulationMarker.spot) &&
+      simulationMarker.spot >= lo &&
+      simulationMarker.spot <= hi
+    ) {
+      shapes.push({
+        type: "line",
+        x0: simulationMarker.spot,
+        x1: simulationMarker.spot,
+        yref: "paper",
+        y0: 0,
+        y1: 1,
+        line: { color: colors.simGuide, width: 1, dash: "dashdot" },
+      });
+    }
+
     const annotations: unknown[] = [];
     annotations.push({
       x: spot,
@@ -385,6 +470,24 @@ export function PayoffChart({
       });
     }
 
+    // POP corner badge
+    if (pop && pop.probability >= 0) {
+      annotations.push({
+        xref: "paper",
+        yref: "paper",
+        x: 0.99,
+        y: 0.97,
+        xanchor: "right",
+        yanchor: "top",
+        text: `POP ${(pop.probability * 100).toFixed(1)}%`,
+        showarrow: false,
+        font: { color: colors.text, size: 11 },
+        bgcolor: isDark ? "rgba(15,23,42,0.85)" : "rgba(255,255,255,0.85)",
+        bordercolor: colors.grid,
+        borderpad: 4,
+      });
+    }
+
     return {
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(0,0,0,0)",
@@ -420,7 +523,19 @@ export function PayoffChart({
       shapes,
       annotations,
     };
-  }, [range, expiryY, t0Y, sigmaXs, breakevens, bounds, spot, colors]);
+  }, [
+    range,
+    expiryY,
+    t0Y,
+    sigmaXs,
+    breakevens,
+    bounds,
+    spot,
+    colors,
+    simulationMarker,
+    pop,
+    isDark,
+  ]);
 
   const config = useMemo(
     () => ({
