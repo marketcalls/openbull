@@ -3,8 +3,8 @@ Zerodha market data API - quotes, depth, historical candles.
 """
 
 import logging
+import time
 from datetime import datetime, timedelta
-from urllib.parse import quote as url_quote
 
 from backend.broker.upstox.mapping.order_data import (
     get_brsymbol_from_cache,
@@ -13,6 +13,35 @@ from backend.broker.upstox.mapping.order_data import (
 from backend.utils.httpx_client import get_httpx_client
 
 logger = logging.getLogger(__name__)
+
+
+class ZerodhaAPIError(Exception):
+    """Base exception for Kite Connect API errors with structured error_type."""
+
+    def __init__(self, message: str, error_type: str | None = None):
+        super().__init__(message)
+        self.error_type = error_type
+
+
+class ZerodhaPermissionError(ZerodhaAPIError):
+    """Raised when Kite returns error_type == 'PermissionException'.
+
+    Distinct from generic ValueError so callers can suppress noisy
+    permission-denied logs (e.g. user without F&O segment trying to
+    fetch index option quotes).
+    """
+
+
+def _raise_for_kite_error(data: dict) -> None:
+    """Inspect a Kite envelope and raise the right exception class."""
+    if data.get("status") == "success":
+        return
+    error_type = data.get("error_type")
+    message = data.get("message") or "Kite API error"
+    if error_type == "PermissionException":
+        raise ZerodhaPermissionError(message, error_type=error_type)
+    raise ZerodhaAPIError(message, error_type=error_type)
+
 
 TIMEFRAME_MAP = {
     "1m": "minute",
@@ -30,6 +59,10 @@ SUPPORTED_INTERVALS = {
     "days": ["D"],
 }
 
+# Kite's /quote endpoint accepts up to 500 instruments per request.
+QUOTE_BATCH_SIZE = 500
+QUOTE_BATCH_DELAY = 1.0
+
 
 def _headers(auth_token: str) -> dict:
     return {
@@ -39,10 +72,23 @@ def _headers(auth_token: str) -> dict:
     }
 
 
+# Kite's /quote endpoint expects bare exchange codes (NSE/BSE/...) in the
+# `EXCHANGE:SYMBOL` param. Our cache may store INDEX-segmented variants
+# (NSE_INDEX, BSE_INDEX, ...) for clarity. Rewrite back to the bare code
+# when building URL params, or index quotes return null.
+_KITE_QUOTE_EXCHANGE = {
+    "NSE_INDEX": "NSE",
+    "BSE_INDEX": "BSE",
+    "MCX_INDEX": "MCX",
+    "CDS_INDEX": "CDS",
+}
+
+
 def _get_instrument_param(symbol: str, exchange: str) -> str:
     """Build Zerodha quote param: EXCHANGE:BRSYMBOL"""
     brsymbol = get_brsymbol_from_cache(symbol, exchange) or symbol
-    return f"{exchange}:{brsymbol}"
+    kite_exchange = _KITE_QUOTE_EXCHANGE.get(exchange, exchange)
+    return f"{kite_exchange}:{brsymbol}"
 
 
 def _get_instrument_token(symbol: str, exchange: str) -> str:
@@ -63,13 +109,17 @@ def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None 
     instrument_param = _get_instrument_param(symbol, exchange)
 
     client = get_httpx_client()
-    url = f"https://api.kite.trade/quote?i={instrument_param}"
-    response = client.get(url, headers=_headers(auth_token))
+    response = client.get(
+        "https://api.kite.trade/quote",
+        params=[("i", instrument_param)],
+        headers=_headers(auth_token),
+    )
     response.raise_for_status()
     data = response.json()
 
-    if data.get("status") != "success" or not data.get("data"):
-        raise ValueError(data.get("message", "Failed to fetch quotes"))
+    _raise_for_kite_error(data)
+    if not data.get("data"):
+        raise ZerodhaAPIError("Empty quote payload from Kite")
 
     # Data is keyed by "EXCHANGE:SYMBOL". Skip null entries — Kite returns
     # them for unknown / expired / illiquid instruments, and a downstream
@@ -80,9 +130,15 @@ def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None 
     )
 
     if not quote_data:
-        raise ValueError("No quote data in response")
+        raise ZerodhaAPIError("No quote data in response")
 
     ohlc = quote_data.get("ohlc") or {}
+    depth = quote_data.get("depth") or {}
+    bids = depth.get("buy") or []
+    asks = depth.get("sell") or []
+    top_bid = bids[0] if bids else {}
+    top_ask = asks[0] if asks else {}
+
     return {
         "ltp": quote_data.get("last_price", 0),
         "open": ohlc.get("open", 0),
@@ -92,16 +148,20 @@ def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None 
         "prev_close": ohlc.get("close", 0),
         "volume": quote_data.get("volume", 0),
         "oi": quote_data.get("oi", 0),
+        "bid": top_bid.get("price", 0),
+        "ask": top_ask.get("price", 0),
+        "bid_qty": top_bid.get("quantity", 0),
+        "ask_qty": top_ask.get("quantity", 0),
     }
 
 
-def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | None = None) -> list[dict]:
-    """Get quotes for multiple symbols using batch Kite quote API."""
-    # Build i= params: i=NSE:SBIN&i=NSE:TCS
-    # Use httpx params= so spaces (e.g. "NIFTY 24250 CE 28 APR 26") are URL-encoded.
-    params_map = {}  # instrument_param -> {symbol, exchange}
+def _process_quote_batch(
+    batch: list[dict], auth_token: str
+) -> list[dict]:
+    """Fetch a single batch of <= QUOTE_BATCH_SIZE symbols from /quote."""
+    params_map: dict = {}
     params: list[tuple[str, str]] = []
-    for item in symbols_list:
+    for item in batch:
         sym, exch = item["symbol"], item["exchange"]
         instrument_param = _get_instrument_param(sym, exch)
         params_map[instrument_param] = {"symbol": sym, "exchange": exch}
@@ -120,7 +180,7 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
     if data.get("status") != "success" or not data.get("data"):
         return []
 
-    results = []
+    results: list[dict] = []
     for key, quote_data in data["data"].items():
         # Zerodha returns null for unknown/expired/illiquid instruments —
         # without skipping these the .get() calls below AttributeError and
@@ -160,18 +220,49 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
     return results
 
 
+def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | None = None) -> list[dict]:
+    """Get quotes for multiple symbols using batch Kite quote API.
+
+    Kite's /quote endpoint caps each request at 500 instruments. Above that
+    we split into batches and pace them at QUOTE_BATCH_DELAY seconds to stay
+    inside Kite's 1 req/sec quote rate limit.
+    """
+    if not symbols_list:
+        return []
+
+    if len(symbols_list) <= QUOTE_BATCH_SIZE:
+        return _process_quote_batch(symbols_list, auth_token)
+
+    all_results: list[dict] = []
+    total = len(symbols_list)
+    for i in range(0, total, QUOTE_BATCH_SIZE):
+        batch = symbols_list[i : i + QUOTE_BATCH_SIZE]
+        all_results.extend(_process_quote_batch(batch, auth_token))
+        if i + QUOTE_BATCH_SIZE < total:
+            time.sleep(QUOTE_BATCH_DELAY)
+    logger.info(
+        "get_multi_quotes processed %d symbols across %d batches",
+        total, (total + QUOTE_BATCH_SIZE - 1) // QUOTE_BATCH_SIZE,
+    )
+    return all_results
+
+
 def get_market_depth(symbol: str, exchange: str, auth_token: str, config: dict | None = None) -> dict:
     """Get 5-level market depth for a symbol."""
     instrument_param = _get_instrument_param(symbol, exchange)
 
     client = get_httpx_client()
-    url = f"https://api.kite.trade/quote?i={instrument_param}"
-    response = client.get(url, headers=_headers(auth_token))
+    response = client.get(
+        "https://api.kite.trade/quote",
+        params=[("i", instrument_param)],
+        headers=_headers(auth_token),
+    )
     response.raise_for_status()
     data = response.json()
 
-    if data.get("status") != "success" or not data.get("data"):
-        raise ValueError(data.get("message", "Failed to fetch market depth"))
+    _raise_for_kite_error(data)
+    if not data.get("data"):
+        raise ZerodhaAPIError("Empty depth payload from Kite")
 
     quote_data = next(
         (val for val in data["data"].values() if val is not None),
@@ -179,7 +270,7 @@ def get_market_depth(symbol: str, exchange: str, auth_token: str, config: dict |
     )
 
     if not quote_data:
-        raise ValueError("No depth data in response")
+        raise ZerodhaAPIError("No depth data in response")
 
     depth = quote_data.get("depth") or {}
     ohlc = quote_data.get("ohlc") or {}
@@ -199,6 +290,7 @@ def get_market_depth(symbol: str, exchange: str, auth_token: str, config: dict |
         "bids": bids,
         "asks": asks,
         "ltp": quote_data.get("last_price", 0),
+        "ltq": quote_data.get("last_quantity", 0),
         "open": ohlc.get("open", 0),
         "high": ohlc.get("high", 0),
         "low": ohlc.get("low", 0),

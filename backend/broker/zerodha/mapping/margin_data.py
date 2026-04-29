@@ -78,7 +78,10 @@ def parse_margin_response(response_data: dict) -> dict:
             initial = data.get("initial", {})
             final = data.get("final", {})
 
-            total_margin_required = initial.get("total", 0)
+            # Use final.total — it nets out hedge benefits. initial.total
+            # over-states the margin for defined-risk strategies (e.g. iron
+            # condors) where Zerodha's hedge benefit applies.
+            total_margin_required = final.get("total", 0)
             span_margin = final.get("span", 0)
             exposure_margin = final.get("exposure", 0)
             margin_benefit = initial.get("total", 0) - final.get("total", 0)

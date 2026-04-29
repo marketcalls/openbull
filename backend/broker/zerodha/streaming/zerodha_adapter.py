@@ -1,14 +1,23 @@
 """
 Zerodha KiteTicker streaming adapter.
-Connects to Zerodha's binary WebSocket, parses tick packets, and publishes
+Connects to Zerodha's WebSocket, parses tick packets, and publishes
 normalized market data to a ZeroMQ PUB socket.
+
+Wire protocol: JSON text frames for control (subscribe/mode/unsubscribe);
+binary frames for ticks. Per Kite docs, the only accepted control frame
+shapes are:
+    {"a":"subscribe","v":[tokens]}
+    {"a":"unsubscribe","v":[tokens]}
+    {"a":"mode","v":[mode,[tokens]]}    # mode in {"ltp","quote","full"}
 """
 
+import json
 import logging
 import ssl
 import struct
 import threading
 import time
+from collections import deque
 
 import websocket
 
@@ -26,9 +35,20 @@ from backend.websocket_proxy.base_adapter import (
 
 logger = logging.getLogger("zerodha_stream")
 
-# Zerodha mode bytes for the set-mode binary message
-_KITE_MODE = {MODE_LTP: 1, MODE_QUOTE: 2, MODE_DEPTH: 3}
-_KITE_MODE_NAME = {1: "ltp", 2: "quote", 3: "full"}
+# Kite uses string mode names on the wire; we map our integer modes to those
+# strings. MODE_DEPTH on our side maps to "full" on Kite's side because Kite's
+# full-mode packet is what carries the depth ladder.
+_KITE_MODE_NAME = {MODE_LTP: "ltp", MODE_QUOTE: "quote", MODE_DEPTH: "full"}
+
+# Subscription batching — Kite supports up to 3000 instruments per connection,
+# but bulk subscribes must be chunked or the server can drop frames.
+MAX_TOKENS_PER_SUBSCRIBE = 200
+SUBSCRIPTION_DELAY = 2.0
+MAX_INSTRUMENTS_PER_CONNECTION = 3000
+
+# Reconnect config
+RECONNECT_MAX_TRIES = 50
+RECONNECT_MAX_DELAY = 60
 
 
 def _numeric_token(token_str: str) -> int | None:
@@ -45,21 +65,24 @@ def _numeric_token(token_str: str) -> int | None:
 
 
 class ZerodhaAdapter(BaseBrokerAdapter):
-    """Zerodha KiteTicker binary streaming adapter."""
+    """Zerodha KiteTicker streaming adapter."""
 
     def __init__(self, auth_token: str, broker_config: dict):
         super().__init__(auth_token, broker_config)
         self._ws: websocket.WebSocketApp | None = None
         self._ws_thread: threading.Thread | None = None
         self._health_thread: threading.Thread | None = None
+        self._sub_thread: threading.Thread | None = None
         self._connected = False
         self._last_msg_time: float | None = None
-        self._subscribed_tokens: dict[int, int] = {}  # numeric_token -> mode
-        # Reverse map: numeric_token -> token_str (for symbol lookup via cache)
-        self._ntoken_to_token: dict[int, str] = {}
-        # Per-token prev-close cache so LTP-only packets can still report
-        # change/change_percent after a QUOTE/DEPTH packet has been seen.
-        self._last_close: dict[int, float] = {}
+        self._subscribed_tokens: dict[int, int] = {}  # numeric_token -> our integer mode
+        self._ntoken_to_token: dict[int, str] = {}    # reverse map for symbol lookup
+        self._last_close: dict[int, float] = {}       # per-token prev close cache
+        # Pending subscribe queue: (token, our_mode_int). Drained in batches by
+        # _process_subscriptions on a worker thread so subscribe() returns fast.
+        self._pending: deque = deque()
+        self._pending_lock = threading.Lock()
+        self._sub_lock = threading.Lock()  # protects _subscribed_tokens / _ntoken_to_token
 
     # ---- BaseBrokerAdapter interface ----
 
@@ -90,9 +113,11 @@ class ZerodhaAdapter(BaseBrokerAdapter):
             raise ConnectionError("Zerodha KiteTicker connection timed out")
 
     def subscribe(self, symbols: list[dict], mode: int) -> None:
-        tokens_to_sub: list[int] = []
-        kite_mode = _KITE_MODE.get(mode, 2)
+        if mode not in _KITE_MODE_NAME:
+            logger.error("Invalid Zerodha mode %s; expected one of %s", mode, list(_KITE_MODE_NAME))
+            return
 
+        new_ntoks: list[int] = []
         for item in symbols:
             sym, exch = item.get("symbol"), item.get("exchange")
             token_str = get_token_from_cache(sym, exch) if (sym and exch) else None
@@ -101,19 +126,30 @@ class ZerodhaAdapter(BaseBrokerAdapter):
             ntok = _numeric_token(token_str)
             if ntok is None:
                 continue
-            self._ntoken_to_token[ntok] = token_str
-            current = self._subscribed_tokens.get(ntok, 0)
-            if mode > current:
-                self._subscribed_tokens[ntok] = mode
-            tokens_to_sub.append(ntok)
+            with self._sub_lock:
+                self._ntoken_to_token[ntok] = token_str
+                current = self._subscribed_tokens.get(ntok, 0)
+                if mode > current:
+                    self._subscribed_tokens[ntok] = mode
+                # Capacity guard — Kite docs cap at 3000 instruments per connection.
+                if len(self._subscribed_tokens) > MAX_INSTRUMENTS_PER_CONNECTION:
+                    logger.error(
+                        "Zerodha WS subscription cap reached (%d). Dropping %s/%s.",
+                        MAX_INSTRUMENTS_PER_CONNECTION, sym, exch,
+                    )
+                    self._subscribed_tokens.pop(ntok, None)
+                    self._ntoken_to_token.pop(ntok, None)
+                    continue
+            new_ntoks.append(ntok)
 
-        if not tokens_to_sub or not self._connected:
+        if not new_ntoks:
             return
 
-        # Subscribe binary message: type=1
-        self._send_subscribe(tokens_to_sub)
-        # Set mode binary message: type=2
-        self._send_set_mode(tokens_to_sub, kite_mode)
+        with self._pending_lock:
+            for ntok in new_ntoks:
+                self._pending.append((ntok, mode))
+
+        self._ensure_sub_worker()
 
     def unsubscribe(self, symbols: list[dict], mode: int) -> None:
         tokens: list[int] = []
@@ -123,10 +159,12 @@ class ZerodhaAdapter(BaseBrokerAdapter):
             if not token_str:
                 continue
             ntok = _numeric_token(token_str)
-            if ntok is not None:
-                tokens.append(ntok)
+            if ntok is None:
+                continue
+            with self._sub_lock:
                 self._subscribed_tokens.pop(ntok, None)
                 self._ntoken_to_token.pop(ntok, None)
+            tokens.append(ntok)
 
         if tokens and self._connected:
             self._send_unsubscribe(tokens)
@@ -139,8 +177,11 @@ class ZerodhaAdapter(BaseBrokerAdapter):
                 self._ws.close()
             except Exception:
                 pass
-        self._subscribed_tokens.clear()
-        self._ntoken_to_token.clear()
+        with self._sub_lock:
+            self._subscribed_tokens.clear()
+            self._ntoken_to_token.clear()
+        with self._pending_lock:
+            self._pending.clear()
         logger.info("Zerodha adapter disconnected")
 
     # ---- WS internals ----
@@ -148,6 +189,10 @@ class ZerodhaAdapter(BaseBrokerAdapter):
     def _run_ws(self) -> None:
         reconnect_attempts = 0
         while self._running:
+            # Arm the reset signal before each run; _on_open will set it true
+            # on a successful handshake. If run_forever returns without that,
+            # the attempt failed and we count it against the budget.
+            self._reconnect_reset_signal = False
             try:
                 self._ws.run_forever(
                     sslopt={"cert_reqs": ssl.CERT_REQUIRED},
@@ -161,12 +206,17 @@ class ZerodhaAdapter(BaseBrokerAdapter):
             if not self._running:
                 break
 
+            if self._reconnect_reset_signal:
+                # We connected at least once during this run — flaky session,
+                # not a dead one. Reset the counter so the budget isn't burned.
+                reconnect_attempts = 0
+
             reconnect_attempts += 1
-            if reconnect_attempts > 10:
-                logger.error("Zerodha max reconnect attempts reached")
+            if reconnect_attempts > RECONNECT_MAX_TRIES:
+                logger.error("Zerodha max reconnect attempts (%d) reached", RECONNECT_MAX_TRIES)
                 break
 
-            delay = min(2 * (1.5 ** reconnect_attempts), 60)
+            delay = min(2 * (1.5 ** reconnect_attempts), RECONNECT_MAX_DELAY)
             logger.info("Reconnecting in %.1fs (attempt %d)...", delay, reconnect_attempts)
             time.sleep(delay)
 
@@ -174,22 +224,51 @@ class ZerodhaAdapter(BaseBrokerAdapter):
         logger.info("Zerodha KiteTicker connected")
         self._connected = True
         self._last_msg_time = time.time()
+        # Reset the outer reconnect counter via a thread-local marker. We can't
+        # touch _run_ws's local reconnect_attempts directly, so we expose a
+        # per-instance counter and let _run_ws read it.
+        self._reconnect_reset_signal = True
         self._start_health_check()
 
-        # Re-subscribe on reconnect
-        if self._subscribed_tokens:
+        # Re-subscribe on reconnect, in batches.
+        with self._sub_lock:
             by_mode: dict[int, list[int]] = {}
             for ntok, mode in self._subscribed_tokens.items():
                 by_mode.setdefault(mode, []).append(ntok)
-            for mode, tokens in by_mode.items():
-                self._send_subscribe(tokens)
-                self._send_set_mode(tokens, _KITE_MODE.get(mode, 2))
-            logger.info("Re-subscribed %d tokens after reconnect", len(self._subscribed_tokens))
+
+        for mode, tokens in by_mode.items():
+            mode_name = _KITE_MODE_NAME.get(mode, "quote")
+            for i in range(0, len(tokens), MAX_TOKENS_PER_SUBSCRIBE):
+                batch = tokens[i:i + MAX_TOKENS_PER_SUBSCRIBE]
+                self._send_subscribe(batch)
+                time.sleep(0.5)
+                self._send_set_mode(batch, mode_name)
+                time.sleep(SUBSCRIPTION_DELAY)
+        if by_mode:
+            total = sum(len(t) for t in by_mode.values())
+            logger.info("Re-subscribed %d tokens after reconnect", total)
+
+        self._ensure_sub_worker()
 
     def _on_message(self, ws, message) -> None:
         self._last_msg_time = time.time()
-        if isinstance(message, bytes) and len(message) >= 4:
-            self._parse_and_publish(message)
+        # 1-byte binary frames are Kite's heartbeat; do not treat as data.
+        if isinstance(message, (bytes, bytearray)):
+            if len(message) == 1:
+                return
+            if len(message) >= 4:
+                self._parse_and_publish(bytes(message))
+            return
+        # Text frames are server-side control / errors. Surface them.
+        if isinstance(message, str):
+            try:
+                data = json.loads(message)
+                if data.get("type") == "error":
+                    logger.error("Zerodha WS server error: %s", data.get("data", ""))
+                else:
+                    logger.debug("Zerodha WS text frame: %s", str(data)[:200])
+            except json.JSONDecodeError:
+                logger.debug("Zerodha WS non-JSON text: %s", message[:120])
 
     def _on_error(self, ws, error) -> None:
         logger.error("Zerodha WS error: %s", error)
@@ -198,6 +277,64 @@ class ZerodhaAdapter(BaseBrokerAdapter):
     def _on_close(self, ws, code, msg) -> None:
         logger.info("Zerodha WS closed (code=%s, msg=%s)", code, msg)
         self._connected = False
+
+    # ---- Subscription worker ----
+
+    def _ensure_sub_worker(self) -> None:
+        if self._sub_thread and self._sub_thread.is_alive():
+            return
+        self._sub_thread = threading.Thread(
+            target=self._process_subscriptions, daemon=True, name="zerodha-sub-worker",
+        )
+        self._sub_thread.start()
+
+    def _process_subscriptions(self) -> None:
+        consecutive_failures = 0
+        while self._running:
+            with self._pending_lock:
+                pending_count = len(self._pending)
+            if not pending_count:
+                return  # caller will respawn us when more arrive
+
+            if not self._connected:
+                consecutive_failures += 1
+                if consecutive_failures > 3:
+                    logger.error("Subscription worker giving up after 3 disconnect cycles")
+                    return
+                time.sleep(min(2 * consecutive_failures, 10))
+                continue
+            consecutive_failures = 0
+
+            # Drain a batch of up to MAX_TOKENS_PER_SUBSCRIBE for a single mode.
+            batch: list[int] = []
+            batch_mode: int | None = None
+            with self._pending_lock:
+                while self._pending and len(batch) < MAX_TOKENS_PER_SUBSCRIBE:
+                    ntok, mode = self._pending[0]
+                    if batch_mode is None:
+                        batch_mode = mode
+                    elif mode != batch_mode:
+                        break
+                    self._pending.popleft()
+                    batch.append(ntok)
+
+            if not batch or batch_mode is None:
+                continue
+
+            mode_name = _KITE_MODE_NAME.get(batch_mode, "quote")
+            try:
+                self._send_subscribe(batch)
+                time.sleep(1.0)
+                self._send_set_mode(batch, mode_name)
+                logger.debug("Subscribed batch of %d tokens in mode '%s'", len(batch), mode_name)
+                time.sleep(SUBSCRIPTION_DELAY)
+            except Exception as e:
+                logger.error("Subscribe batch failed (%d tokens, mode '%s'): %s", len(batch), mode_name, e)
+                # requeue and back off
+                with self._pending_lock:
+                    for ntok in batch:
+                        self._pending.appendleft((ntok, batch_mode))
+                time.sleep(5)
 
     # ---- Binary parsing (KiteTicker protocol) ----
 
@@ -236,7 +373,6 @@ class ZerodhaAdapter(BaseBrokerAdapter):
             return
         info = get_symbol_exchange_from_token(token_str)
         if not info:
-            # Try numeric string
             info = get_symbol_exchange_from_token(str(ntok))
         if not info:
             return
@@ -253,20 +389,18 @@ class ZerodhaAdapter(BaseBrokerAdapter):
         else:
             pkt_mode = MODE_LTP
 
-        # For LTP-only (8-byte) packets Kite doesn't ship prev close, so
-        # change stays 0 until the first QUOTE/DEPTH packet populates the
-        # per-token close cache below.
         cp_cached = self._last_close.get(ntok, 0.0)
         change = round(ltp - cp_cached, 4) if (ltp and cp_cached) else 0.0
         change_percent = round((ltp - cp_cached) / cp_cached * 100, 4) if cp_cached else 0.0
 
-        # Always publish LTP
         ltp_data = {
             "symbol": symbol, "exchange": exchange, "mode": "ltp",
             "ltp": ltp, "ltt": int(time.time()),
             "cp": cp_cached, "change": change, "change_percent": change_percent,
         }
         self.publish(f"{exchange}_{symbol}_LTP", ltp_data)
+
+        quote_data: dict | None = None
 
         # QUOTE (44+ bytes)
         if pkt_mode >= MODE_QUOTE and len(pkt) >= 44:
@@ -280,6 +414,11 @@ class ZerodhaAdapter(BaseBrokerAdapter):
                 quote_data = {
                     "symbol": symbol, "exchange": exchange, "mode": "quote",
                     "ltp": fields[1] / 100.0,
+                    "ltq": fields[2],
+                    "average_price": fields[3] / 100.0,
+                    "volume": fields[4],
+                    "total_buy_quantity": fields[5],
+                    "total_sell_quantity": fields[6],
                     "open": fields[7] / 100.0,
                     "high": fields[8] / 100.0,
                     "low": fields[9] / 100.0,
@@ -287,17 +426,31 @@ class ZerodhaAdapter(BaseBrokerAdapter):
                     "cp": close,
                     "change": q_change,
                     "change_percent": q_change_pct,
-                    "volume": fields[4],
-                    "average_price": fields[3] / 100.0,
-                    "total_buy_quantity": fields[5],
-                    "total_sell_quantity": fields[6],
                     "oi": 0,
                     "ltt": int(time.time()),
                 }
-                # OI at offset 180 (if available)
-                if len(pkt) >= 184:
+
+                # Per Kite WS docs (full 184-byte packet layout):
+                #   offset 44-48  : last_traded_time   (epoch seconds)
+                #   offset 48-52  : oi
+                #   offset 52-56  : oi_day_high
+                #   offset 56-60  : oi_day_low
+                #   offset 60-64  : exchange_timestamp (epoch seconds)
+                #   offset 64-184 : market depth (5 buy + 5 sell, 12 B each)
+                if len(pkt) >= 64:
                     try:
-                        quote_data["oi"] = struct.unpack(">I", pkt[180:184])[0]
+                        ltt = struct.unpack(">I", pkt[44:48])[0]
+                        oi = struct.unpack(">I", pkt[48:52])[0]
+                        oi_day_high = struct.unpack(">I", pkt[52:56])[0]
+                        oi_day_low = struct.unpack(">I", pkt[56:60])[0]
+                        exch_ts = struct.unpack(">I", pkt[60:64])[0]
+                        quote_data["last_traded_time"] = ltt
+                        quote_data["oi"] = oi
+                        quote_data["oi_day_high"] = oi_day_high
+                        quote_data["oi_day_low"] = oi_day_low
+                        quote_data["exchange_timestamp"] = exch_ts
+                        if ltt:
+                            quote_data["ltt"] = ltt
                     except struct.error:
                         pass
 
@@ -305,8 +458,8 @@ class ZerodhaAdapter(BaseBrokerAdapter):
             except struct.error as e:
                 logger.debug("Quote parse error for %s: %s", symbol, e)
 
-        # DEPTH (184+ bytes) — requires quote_data from the block above
-        if pkt_mode >= MODE_DEPTH and len(pkt) >= 184 and pkt_mode >= MODE_QUOTE:
+        # DEPTH / FULL (184+ bytes)
+        if pkt_mode >= MODE_DEPTH and len(pkt) >= 184 and quote_data is not None:
             try:
                 bids, asks = [], []
                 depth_offset = 64
@@ -331,35 +484,31 @@ class ZerodhaAdapter(BaseBrokerAdapter):
                     "depth": {"buy": bids, "sell": asks},
                 }
                 self.publish(f"{exchange}_{symbol}_DEPTH", depth_data)
-            except (struct.error, NameError) as e:
+            except struct.error as e:
                 logger.debug("Depth parse error for %s: %s", symbol, e)
 
-    # ---- Binary message builders ----
+    # ---- Wire-format builders (JSON text frames per Kite docs) ----
 
     def _send_subscribe(self, tokens: list[int]) -> None:
-        """Subscribe message: type=1, count, tokens."""
-        n = len(tokens)
-        msg = struct.pack(f">bH{'I' * n}", 1, n, *tokens)
+        msg = json.dumps({"a": "subscribe", "v": tokens})
         try:
-            self._ws.send(msg, opcode=websocket.ABNF.OPCODE_BINARY)
+            self._ws.send(msg)
         except Exception as e:
             logger.error("Subscribe send error: %s", e)
 
     def _send_unsubscribe(self, tokens: list[int]) -> None:
-        """Unsubscribe message: type=1 with count=0 then tokens."""
-        n = len(tokens)
-        msg = struct.pack(f">bH{'I' * n}", 1, n, *tokens)
-        # KiteTicker unsubscribe: re-send subscribe then set mode=0 effectively.
-        # Actually KiteTicker uses a different approach: just stop mode for tokens.
-        # For simplicity, send nothing — the proxy will stop routing.
-        pass
-
-    def _send_set_mode(self, tokens: list[int], mode: int) -> None:
-        """Set mode message: type=2, count, mode_byte, tokens."""
-        n = len(tokens)
-        msg = struct.pack(f">bHb{'I' * n}", 2, n, mode, *tokens)
+        msg = json.dumps({"a": "unsubscribe", "v": tokens})
         try:
-            self._ws.send(msg, opcode=websocket.ABNF.OPCODE_BINARY)
+            self._ws.send(msg)
+        except Exception as e:
+            logger.error("Unsubscribe send error: %s", e)
+
+    def _send_set_mode(self, tokens: list[int], mode_name: str) -> None:
+        # Kite expects {"a":"mode","v":[mode_name,[tokens]]} — a 2-element
+        # array where the second element is itself the token list.
+        msg = json.dumps({"a": "mode", "v": [mode_name, tokens]})
+        try:
+            self._ws.send(msg)
         except Exception as e:
             logger.error("Set mode send error: %s", e)
 
