@@ -98,14 +98,50 @@ def _encode_key(instrument_key: str) -> str:
     return quote(instrument_key, safe="")
 
 
+def _fetch_v3_ohlc(encoded_keys: str, auth_token: str) -> dict:
+    # v2 /market-quote/quotes returns *previous* day's OHLC under the `ohlc`
+    # field, not today's — the field name is misleading. v3 OHLC supplies the
+    # current session under `live_ohlc` and yesterday under `prev_ohlc`. We
+    # call v3 alongside v2 to get correct today-OHLC values; v2 is still
+    # needed for depth/bid/ask/oi which v3 does not return.
+    client = get_httpx_client()
+    url = f"https://api.upstox.com/v3/market-quote/ohlc?instrument_key={encoded_keys}&interval=1d"
+    try:
+        resp = client.get(url, headers=_headers(auth_token))
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "success":
+            return {}
+        out: dict = {}
+        for value in (data.get("data") or {}).values():
+            if not value:
+                continue
+            inst_key = value.get("instrument_token")
+            if inst_key:
+                out[inst_key] = {
+                    "live_ohlc": value.get("live_ohlc") or {},
+                    "prev_ohlc": value.get("prev_ohlc") or {},
+                    "last_price": value.get("last_price"),
+                }
+        return out
+    except Exception as e:
+        logger.debug("v3 OHLC fetch failed: %s", e)
+        return {}
+
+
 def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None = None) -> dict:
-    """Get LTP/OHLC quotes for a single symbol using v2 full quote endpoint."""
+    """Get LTP/OHLC quotes for a single symbol (v3 OHLC + v2 depth)."""
     token = get_token_from_cache(symbol, exchange)
     if not token:
         raise ValueError(f"Instrument token not found for {symbol}/{exchange}")
 
     client = get_httpx_client()
     encoded = _encode_key(token)
+
+    v3_map = _fetch_v3_ohlc(encoded, auth_token)
+    v3_entry = v3_map.get(token, {})
+    live_ohlc = v3_entry.get("live_ohlc", {})
+    prev_ohlc = v3_entry.get("prev_ohlc", {})
 
     url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={encoded}"
     response = client.get(url, headers=_headers(auth_token))
@@ -128,13 +164,17 @@ def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None 
 
     ohlc = quote_data.get("ohlc") or {}
     return {
-        "ltp": quote_data.get("last_price", 0),
-        "open": ohlc.get("open", 0),
-        "high": ohlc.get("high", 0),
-        "low": ohlc.get("low", 0),
+        "ltp": v3_entry.get("last_price") or quote_data.get("last_price", 0),
+        "open": live_ohlc.get("open") or ohlc.get("open", 0),
+        "high": live_ohlc.get("high") or ohlc.get("high", 0),
+        "low": live_ohlc.get("low") or ohlc.get("low", 0),
         "close": ohlc.get("close", 0),
-        "prev_close": quote_data.get("prev_close", ohlc.get("close", 0)),
-        "volume": quote_data.get("volume", 0),
+        "prev_close": (
+            quote_data.get("prev_close")
+            or ohlc.get("close")
+            or prev_ohlc.get("close", 0)
+        ),
+        "volume": live_ohlc.get("volume") or quote_data.get("volume", 0),
         "oi": quote_data.get("oi", 0),
     }
 
@@ -156,8 +196,11 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
     if not encoded_keys:
         return []
 
+    joined_keys = ",".join(encoded_keys)
+    v3_map = _fetch_v3_ohlc(joined_keys, auth_token)
+
     client = get_httpx_client()
-    url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={','.join(encoded_keys)}"
+    url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={joined_keys}"
     response = client.get(url, headers=_headers(auth_token))
     response.raise_for_status()
     data = response.json()
@@ -200,16 +243,25 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
         asks = depth.get("sell") or []
         top_bid = bids[0] if bids else {}
         top_ask = asks[0] if asks else {}
+
+        v3_entry = v3_map.get(quote_data.get("instrument_token") or "", {})
+        live_ohlc = v3_entry.get("live_ohlc", {})
+        prev_ohlc = v3_entry.get("prev_ohlc", {})
+
         results.append({
             "symbol": info["symbol"],
             "exchange": info["exchange"],
-            "ltp": quote_data.get("last_price", 0),
-            "open": ohlc.get("open", 0),
-            "high": ohlc.get("high", 0),
-            "low": ohlc.get("low", 0),
+            "ltp": v3_entry.get("last_price") or quote_data.get("last_price", 0),
+            "open": live_ohlc.get("open") or ohlc.get("open", 0),
+            "high": live_ohlc.get("high") or ohlc.get("high", 0),
+            "low": live_ohlc.get("low") or ohlc.get("low", 0),
             "close": ohlc.get("close", 0),
-            "prev_close": quote_data.get("prev_close", ohlc.get("close", 0)),
-            "volume": quote_data.get("volume", 0),
+            "prev_close": (
+                quote_data.get("prev_close")
+                or ohlc.get("close")
+                or prev_ohlc.get("close", 0)
+            ),
+            "volume": live_ohlc.get("volume") or quote_data.get("volume", 0),
             "oi": quote_data.get("oi", 0),
             "bid": top_bid.get("price", 0),
             "ask": top_ask.get("price", 0),
@@ -221,13 +273,18 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
 
 
 def get_market_depth(symbol: str, exchange: str, auth_token: str, config: dict | None = None) -> dict:
-    """Get 5-level market depth for a symbol."""
+    """Get 5-level market depth for a symbol (v3 OHLC + v2 depth)."""
     token = get_token_from_cache(symbol, exchange)
     if not token:
         raise ValueError(f"Instrument token not found for {symbol}/{exchange}")
 
     client = get_httpx_client()
     encoded = _encode_key(token)
+
+    v3_map = _fetch_v3_ohlc(encoded, auth_token)
+    v3_entry = v3_map.get(token, {})
+    live_ohlc = v3_entry.get("live_ohlc", {})
+    prev_ohlc = v3_entry.get("prev_ohlc", {})
 
     url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={encoded}"
     response = client.get(url, headers=_headers(auth_token))
@@ -262,13 +319,17 @@ def get_market_depth(symbol: str, exchange: str, auth_token: str, config: dict |
     return {
         "bids": bids,
         "asks": asks,
-        "ltp": quote_data.get("last_price", 0),
-        "open": ohlc.get("open", 0),
-        "high": ohlc.get("high", 0),
-        "low": ohlc.get("low", 0),
+        "ltp": v3_entry.get("last_price") or quote_data.get("last_price", 0),
+        "open": live_ohlc.get("open") or ohlc.get("open", 0),
+        "high": live_ohlc.get("high") or ohlc.get("high", 0),
+        "low": live_ohlc.get("low") or ohlc.get("low", 0),
         "close": ohlc.get("close", 0),
-        "prev_close": quote_data.get("prev_close", ohlc.get("close", 0)),
-        "volume": quote_data.get("volume", 0),
+        "prev_close": (
+            quote_data.get("prev_close")
+            or ohlc.get("close")
+            or prev_ohlc.get("close", 0)
+        ),
+        "volume": live_ohlc.get("volume") or quote_data.get("volume", 0),
         "oi": quote_data.get("oi", 0),
         "totalbuyqty": quote_data.get("total_buy_quantity", 0),
         "totalsellqty": quote_data.get("total_sell_quantity", 0),
