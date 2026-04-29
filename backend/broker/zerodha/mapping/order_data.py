@@ -137,19 +137,33 @@ def map_position_data(position_data: dict) -> list[dict]:
 
 
 def transform_positions_data(positions_data: list[dict]) -> list[dict]:
-    """Transform positions data to OpenBull standard format."""
+    """Transform positions data to OpenBull standard format.
+
+    Numeric fields must be returned as numbers (not pre-formatted strings) —
+    the frontend calls .toFixed(2) on average_price / ltp / pnl, which fails
+    on strings.
+    """
     transformed_data = []
     for position in positions_data:
-        average_price_formatted = "{:.2f}".format(float(position.get("average_price", 0.0)))
+        avg_price_raw = position.get("average_price", 0.0)
+        try:
+            average_price = float(avg_price_raw) if avg_price_raw is not None else 0.0
+        except (TypeError, ValueError):
+            average_price = 0.0
+
+        try:
+            quantity = int(position.get("quantity", 0) or 0)
+        except (TypeError, ValueError):
+            quantity = 0
 
         transformed_data.append({
             "symbol": position.get("tradingsymbol", ""),
             "exchange": position.get("exchange", ""),
             "product": position.get("product", ""),
-            "quantity": position.get("quantity", "0"),
-            "pnl": round(position.get("pnl", 0.0), 2),
-            "average_price": average_price_formatted,
-            "ltp": round(position.get("last_price", 0.0), 2),
+            "quantity": quantity,
+            "pnl": round(float(position.get("pnl", 0.0) or 0.0), 2),
+            "average_price": average_price,
+            "ltp": round(float(position.get("last_price", 0.0) or 0.0), 2),
         })
     return transformed_data
 
