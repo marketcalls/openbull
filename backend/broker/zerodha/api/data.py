@@ -45,19 +45,27 @@ def _raise_for_kite_error(data: dict) -> None:
 
 TIMEFRAME_MAP = {
     "1m": "minute",
+    "3m": "3minute",
     "5m": "5minute",
+    "10m": "10minute",
     "15m": "15minute",
     "30m": "30minute",
+    "60m": "60minute",
     "1h": "60minute",
     "D": "day",
 }
 
 SUPPORTED_INTERVALS = {
     "seconds": [],
-    "minutes": ["1m", "5m", "15m", "30m"],
+    "minutes": ["1m", "3m", "5m", "10m", "15m", "30m", "60m"],
     "hours": ["1h"],
     "days": ["D"],
 }
+
+# Kite returns daily candles with timestamps representing IST midnight.
+# pd/datetime parses them to UTC epoch; openalgo's convention is to shift
+# the epoch forward by 5h30m so the integer matches the IST display time.
+_IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60
 
 # Kite's /quote endpoint accepts up to 500 instruments per request.
 QUOTE_BATCH_SIZE = 500
@@ -177,7 +185,16 @@ def _process_quote_batch(
     response.raise_for_status()
     data = response.json()
 
-    if data.get("status") != "success" or not data.get("data"):
+    if data.get("status") != "success":
+        # Don't fail the whole multi-quote on a single batch's permission /
+        # rate-limit error — log and return what we have. Single-quote callers
+        # still raise via _raise_for_kite_error.
+        logger.warning(
+            "Zerodha multi-quote batch failed (error_type=%s, message=%s)",
+            data.get("error_type"), data.get("message"),
+        )
+        return []
+    if not data.get("data"):
         return []
 
     results: list[dict] = []
@@ -319,18 +336,18 @@ def get_history(
     start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
     end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
 
-    # Zerodha limits: 60 days for intraday, 400 days for daily
-    if resolution == "day":
-        chunk_days = 400
-    else:
-        chunk_days = 60
+    # Kite per-request limits: 2000 days for `day`, 60 days for everything else.
+    chunk_days = 2000 if resolution == "day" else 60
+    is_daily = resolution == "day"
 
     client = get_httpx_client()
     all_candles = []
 
     current_start = start_dt
     while current_start <= end_dt:
-        current_end = min(current_start + timedelta(days=chunk_days), end_dt)
+        # Subtract 1 so chunk_days bounds the *inclusive* window. Without
+        # this, a 60-day chunk spans 61 calendar days and Kite returns 400.
+        current_end = min(current_start + timedelta(days=chunk_days - 1), end_dt)
 
         from_str = f"{current_start.isoformat()}+00:00:00"
         to_str = f"{current_end.isoformat()}+23:59:59"
@@ -353,6 +370,8 @@ def get_history(
                         if isinstance(ts, str):
                             try:
                                 ts = int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+                                if is_daily:
+                                    ts += _IST_OFFSET_SECONDS
                             except (ValueError, TypeError):
                                 ts = 0
 

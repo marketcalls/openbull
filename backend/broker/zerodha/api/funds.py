@@ -99,11 +99,11 @@ def get_margin_data(auth_token: str, config: dict | None = None) -> dict:
             logger.error("Error fetching positions for PnL: %s", e)
 
         return {
-            "availablecash": round(total_available_margin, 2),
-            "collateral": round(total_collateral, 2),
-            "m2munrealized": round(total_unrealised, 2),
-            "m2mrealized": round(total_realised, 2),
-            "utiliseddebits": round(total_used_margin, 2),
+            "availablecash": f"{total_available_margin:.2f}",
+            "collateral": f"{total_collateral:.2f}",
+            "m2munrealized": f"{total_unrealised:.2f}",
+            "m2mrealized": f"{total_realised:.2f}",
+            "utiliseddebits": f"{total_used_margin:.2f}",
         }
     except KeyError:
         return {}
