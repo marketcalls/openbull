@@ -32,6 +32,10 @@ import { GreeksPanel } from "@/components/strategy-builder/GreeksPanel";
 import { LegRow, type BuilderLeg } from "@/components/strategy-builder/LegRow";
 import { PayoffChart } from "@/components/strategy-builder/PayoffChart";
 import { PnLTab, type PnlLeg } from "@/components/strategy-builder/PnLTab";
+import {
+  StrategyChartTab,
+  type ChartLegInput,
+} from "@/components/strategy-builder/StrategyChartTab";
 import { SaveStrategyDialog } from "@/components/strategy-builder/SaveStrategyDialog";
 import { StrategyTemplatePicker } from "@/components/strategy-builder/StrategyTemplatePicker";
 import { UnderlyingPicker } from "@/components/strategy-builder/UnderlyingPicker";
@@ -205,6 +209,23 @@ export default function StrategyBuilder() {
     }
     return out;
   }, [legs]);
+
+  // Adapter for the historical chart endpoint. Same filtering as snapshotLegs
+  // but keeps `entry_price` always present so the backend stamps the PnL
+  // series whenever every leg has one.
+  const chartLegs = useMemo<ChartLegInput[]>(
+    () =>
+      legs
+        .filter((l) => l.symbol)
+        .map((l) => ({
+          symbol: l.symbol,
+          action: l.action,
+          lots: l.lots,
+          lot_size: l.lot_size,
+          entry_price: l.entry_price > 0 ? l.entry_price : undefined,
+        })),
+    [legs],
+  );
 
   // Adapter for the P&L tab — maps builder legs to the streaming-table shape.
   // Skips legs without a resolved symbol (the WS subscriber would reject them
@@ -673,13 +694,18 @@ export default function StrategyBuilder() {
           </Card>
         </TabsContent>
 
-        {/* Phase 8 — historical strategy chart */}
+        {/* Chart tab — historical combined-premium series */}
         <TabsContent value="chart">
-          <PlaceholderTab
-            title="Strategy chart"
-            phase="Phase 8"
-            note="Historical combined-premium time series with optional underlying overlay. Drives off /web/strategybuilder/chart with intersection-correct timestamps."
-          />
+          <Card>
+            <CardContent className="p-3 sm:p-4">
+              <StrategyChartTab
+                underlying={underlying}
+                optionsExchange={exchange}
+                legs={chartLegs}
+                enabled={activeTab === "chart"}
+              />
+            </CardContent>
+          </Card>
         </TabsContent>
 
         {/* P&L tab — WebSocket-streamed leg LTPs */}
@@ -742,22 +768,3 @@ function SummaryStat({
   );
 }
 
-function PlaceholderTab({
-  title,
-  phase,
-  note,
-}: {
-  title: string;
-  phase: string;
-  note: string;
-}) {
-  return (
-    <Card>
-      <CardContent className="flex flex-col items-center justify-center gap-2 py-12 text-center">
-        <p className="text-base font-medium">{title}</p>
-        <Badge variant="outline">{phase}</Badge>
-        <p className="max-w-md text-xs text-muted-foreground">{note}</p>
-      </CardContent>
-    </Card>
-  );
-}
