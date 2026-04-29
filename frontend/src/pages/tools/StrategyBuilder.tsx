@@ -1,10 +1,15 @@
 /**
  * Strategy Builder — page shell.
  *
- * Phase 5 ships the foundation: leg editing, template fill, save/load via
- * `/web/strategies/*`, live snapshot fetch via `/web/strategybuilder/snapshot`,
- * URL state for `?load=<id>`. Phase 6+ wire in PayoffChart, Greeks panel,
- * P&L tab, Strategy Chart tab, and BasketOrderDialog.
+ * Phase 5 shipped the foundation; Phase 6 wires in:
+ *   - useChainContext: pulls the strike grid + ATM + lot_size + per-strike
+ *     LTPs from /api/v1/optionchain so templates can resolve offsets to
+ *     real strikes and new legs prefill entry_price from the live LTP.
+ *   - useStrategySnapshot: debounced auto-fetch of the live snapshot on
+ *     every leg change (manual Refresh remains for explicit reload).
+ *   - GreeksPanel: per-leg + aggregate Greeks table (Greeks tab).
+ *   - PayoffChart: At-Expiry + T+0 curves with breakevens, ±σ bands,
+ *     spot vertical, and "Unlimited" annotations (Payoff tab).
  *
  * State ownership: this page owns the entire builder state (legs, picker
  * values, snapshot result). Components are presentation-only — they take
@@ -14,17 +19,18 @@
  * No WebSocket subscription on the underlying spot — the snapshot
  * endpoint delivers it on demand. Per-leg LTP streaming is wired
  * separately in the Phase 7 P&L tab so spot ticks don't cascade
- * re-renders into the (yet to be built) payoff chart.
+ * re-renders into the payoff chart.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { getStrategy } from "@/api/strategies";
-import { getStrategySnapshot } from "@/api/strategybuilder";
 import { ExpiryPicker, convertExpiryForApi } from "@/components/strategy-builder/ExpiryPicker";
+import { GreeksPanel } from "@/components/strategy-builder/GreeksPanel";
 import { LegRow, type BuilderLeg } from "@/components/strategy-builder/LegRow";
+import { PayoffChart } from "@/components/strategy-builder/PayoffChart";
 import { SaveStrategyDialog } from "@/components/strategy-builder/SaveStrategyDialog";
 import { StrategyTemplatePicker } from "@/components/strategy-builder/StrategyTemplatePicker";
 import { UnderlyingPicker } from "@/components/strategy-builder/UnderlyingPicker";
@@ -33,12 +39,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useTradingMode } from "@/contexts/TradingModeContext";
+import { useChainContext } from "@/hooks/useChainContext";
+import { useStrategySnapshot } from "@/hooks/useStrategySnapshot";
 import { resolveOffset, type StrategyTemplate } from "@/lib/strategyTemplates";
 import { cn } from "@/lib/utils";
 import type { FnoExchange } from "@/types/optionchain";
 import type {
   SnapshotLegInput,
-  SnapshotResponse,
   StrategyLeg,
 } from "@/types/strategy";
 
@@ -117,19 +124,6 @@ function resolveAllSymbols(
   }));
 }
 
-/** Convert builder legs to the snapshot endpoint's input shape. */
-function toSnapshotLegs(legs: BuilderLeg[]): SnapshotLegInput[] {
-  return legs
-    .filter((l) => l.symbol)
-    .map((l) => ({
-      symbol: l.symbol,
-      action: l.action,
-      lots: l.lots,
-      lot_size: l.lot_size,
-      entry_price: l.entry_price > 0 ? l.entry_price : undefined,
-    }));
-}
-
 /** Convert builder legs to the persistence schema's StrategyLeg[]. */
 function toPersistedLegs(legs: BuilderLeg[]): StrategyLeg[] {
   return legs.map((l) => ({
@@ -165,12 +159,51 @@ export default function StrategyBuilder() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [templateValue] = useState("");
 
-  // Snapshot
-  const [snapshot, setSnapshot] = useState<SnapshotResponse | null>(null);
-  const [snapshotLoading, setSnapshotLoading] = useState(false);
-  const requestIdRef = useRef(0);
-
   const expiryApi = useMemo(() => convertExpiryForApi(expiry), [expiry]);
+
+  // ── Chain context (ATM, strike grid, lot_size, per-strike LTPs) ──────
+  const chain = useChainContext({ underlying, exchange, expiryApi });
+
+  // ── Live snapshot (auto-debounced on leg changes) ────────────────────
+  const snapshotLegs = useMemo<SnapshotLegInput[]>(
+    () =>
+      legs
+        .filter((l) => l.symbol)
+        .map((l) => ({
+          symbol: l.symbol,
+          action: l.action,
+          lots: l.lots,
+          lot_size: l.lot_size,
+          entry_price: l.entry_price > 0 ? l.entry_price : undefined,
+        })),
+    [legs],
+  );
+
+  const {
+    snapshot,
+    loading: snapshotLoading,
+    error: snapshotError,
+    refetch: refetchSnapshot,
+  } = useStrategySnapshot({
+    underlying,
+    options_exchange: exchange,
+    legs: snapshotLegs,
+  });
+
+  // Surface snapshot errors as toasts when they're new — keeps the user
+  // informed without duplicating the error text in two places.
+  useEffect(() => {
+    if (snapshotError) toast.error(snapshotError);
+  }, [snapshotError]);
+
+  // Map of symbol → user-entered entry price (for PayoffChart fallback).
+  const entryPriceBySymbol = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const l of legs) {
+      if (l.symbol) out[l.symbol] = l.entry_price;
+    }
+    return out;
+  }, [legs]);
 
   // ── Load saved strategy from `?load=<id>` ────────────────────────────
   useEffect(() => {
@@ -267,9 +300,12 @@ export default function StrategyBuilder() {
   }, [underlying, expiryApi]);
 
   // ── Leg manipulation ────────────────────────────────────────────────
+  // Prefer the chain-derived lot size when we have it; fall back to the
+  // built-in defaults so the row label shows "Lots × N" before the chain
+  // fetch settles.
   const lotSizeForUnderlying = useMemo(
-    () => defaultLotSize(underlying),
-    [underlying],
+    () => chain.context?.lotSize ?? defaultLotSize(underlying),
+    [chain.context, underlying],
   );
 
   const handleAddLeg = useCallback(() => {
@@ -311,74 +347,85 @@ export default function StrategyBuilder() {
     setStrategyId(null);
     setStrategyName("");
     setStrategyNotes(null);
-    setSnapshot(null);
+    // Snapshot is owned by useStrategySnapshot — emptying `legs` makes the
+    // hook clear it on the next tick. No direct setter call needed.
   }, []);
 
   // ── Apply template ──────────────────────────────────────────────────
+  // Resolves each template leg's relative offset (ATM / OTMn / ITMn) to
+  // an absolute strike via the chain, picks the live LTP at that strike
+  // as the default entry price, and stamps the resolved option symbol.
+  // Falls back to NaN strike + empty symbol when the chain isn't ready
+  // yet — the user can refresh once it loads, or set strikes manually.
   const handleApplyTemplate = useCallback(
     (template: StrategyTemplate) => {
       if (!expiryApi) {
         toast.error("Pick an expiry first");
         return;
       }
-      // Skeleton resolution: for "ATM" we don't know the actual ATM yet,
-      // so we leave strike = NaN for the user to fill in. Phase 6 will
-      // resolve via the option chain's ATM strike. For non-ATM offsets
-      // we also leave strike unset until the chain provides the grid.
       const lotSize = lotSizeForUnderlying;
-      const newLegs: BuilderLeg[] = template.legs.map((tl) => ({
-        id: crypto.randomUUID(),
-        action: tl.action,
-        option_type: tl.option_type,
-        strike: Number.NaN,
-        lots: tl.lots,
-        lot_size: lotSize,
-        expiry_date: expiryApi,
-        entry_price: 0,
-        symbol: "",
-      }));
+      const ctx = chain.context;
+      const newLegs: BuilderLeg[] = template.legs.map((tl) => {
+        let strike = Number.NaN;
+        let entryPrice = 0;
+        let symbol = "";
+        if (ctx) {
+          const resolved = resolveOffset(
+            tl.offset,
+            ctx.atm,
+            ctx.strikes,
+            tl.option_type,
+          );
+          if (resolved !== null) {
+            strike = resolved;
+            const ltp =
+              tl.option_type === "CE"
+                ? ctx.ceLtpByStrike.get(resolved)
+                : ctx.peLtpByStrike.get(resolved);
+            if (ltp && ltp > 0) entryPrice = Number(ltp.toFixed(2));
+            symbol = buildOptionSymbol(
+              underlying,
+              expiryApi,
+              resolved,
+              tl.option_type,
+            );
+          }
+        }
+        return {
+          id: crypto.randomUUID(),
+          action: tl.action,
+          option_type: tl.option_type,
+          strike,
+          lots: tl.lots,
+          lot_size: lotSize,
+          expiry_date: expiryApi,
+          entry_price: entryPrice,
+          symbol,
+        };
+      });
       setLegs(newLegs);
       setStrategyName((prev) => prev || template.name);
-      toast.message(
-        `Applied '${template.name}'. Set strike on each leg to resolve symbols.`,
-      );
-      // resolveOffset is unused in the skeleton; Phase 6 wires it in once
-      // the option-chain query provides the strike grid + ATM. Reference
-      // it here so `noUnusedLocals` stays happy and the symbol survives.
-      void resolveOffset;
+
+      const unresolved = newLegs.filter((l) => !l.symbol).length;
+      if (unresolved > 0) {
+        toast.message(
+          `Applied '${template.name}'. ${unresolved} leg${unresolved === 1 ? "" : "s"} need a strike — chain not ready yet.`,
+        );
+      } else {
+        toast.success(`Applied '${template.name}' (${newLegs.length} legs).`);
+      }
     },
-    [expiryApi, lotSizeForUnderlying],
+    [expiryApi, lotSizeForUnderlying, chain.context, underlying],
   );
 
-  // ── Snapshot fetch ──────────────────────────────────────────────────
+  // ── Refresh button — manual refetch on top of the auto-debounce ─────
   const handleRefreshSnapshot = useCallback(async () => {
-    const validLegs = toSnapshotLegs(legs);
-    if (validLegs.length === 0) {
+    if (snapshotLegs.length === 0) {
       toast.error("Add at least one leg with a strike before refreshing");
       return;
     }
-    const reqId = ++requestIdRef.current;
-    setSnapshotLoading(true);
-    try {
-      const resp = await getStrategySnapshot({
-        underlying,
-        options_exchange: exchange,
-        legs: validLegs,
-      });
-      if (requestIdRef.current !== reqId) return;
-      setSnapshot(resp);
-    } catch (e) {
-      if (requestIdRef.current !== reqId) return;
-      const msg =
-        (e as { response?: { data?: { detail?: string } }; message?: string })
-          ?.response?.data?.detail ??
-        (e as { message?: string })?.message ??
-        "Snapshot failed";
-      toast.error(msg);
-    } finally {
-      if (requestIdRef.current === reqId) setSnapshotLoading(false);
-    }
-  }, [legs, underlying, exchange]);
+    await refetchSnapshot();
+  }, [snapshotLegs.length, refetchSnapshot]);
 
   const handleSaved = useCallback((saved: { id: number; name: string; notes: string | null }) => {
     setStrategyId(saved.id);
@@ -455,6 +502,16 @@ export default function StrategyBuilder() {
         <Badge variant="outline" className="capitalize">
           Mode: {tradingMode}
         </Badge>
+        {chain.context && (
+          <Badge variant="secondary">
+            ATM: {chain.context.atm} · {chain.context.strikes.length} strikes
+          </Badge>
+        )}
+        {chain.loading && !chain.context && (
+          <Badge variant="outline" className="animate-pulse">
+            Loading chain…
+          </Badge>
+        )}
         {snapshot && (
           <>
             <Badge variant="secondary">Spot: {snapshot.spot_price.toFixed(2)}</Badge>
@@ -552,21 +609,48 @@ export default function StrategyBuilder() {
           </Card>
         </TabsContent>
 
-        {/* Phase 6+ placeholder tabs */}
+        {/* Greeks tab — per-leg + aggregate */}
         <TabsContent value="greeks">
-          <PlaceholderTab
-            title="Greeks panel"
-            phase="Phase 6"
-            note="Per-leg IV / Δ / Γ / Θ / V plus a sticky aggregate row. Wired off the same /web/strategybuilder/snapshot the Refresh button already uses."
-          />
+          <Card>
+            <CardContent className="p-3 sm:p-4">
+              <GreeksPanel
+                snapshot={snapshot}
+                loading={snapshotLoading}
+                error={snapshotError}
+              />
+            </CardContent>
+          </Card>
         </TabsContent>
+
+        {/* Payoff tab — At-Expiry + T+0 curves */}
         <TabsContent value="payoff">
-          <PlaceholderTab
-            title="Payoff chart"
-            phase="Phase 6"
-            note="Plotly Scattergl with At-Expiry + T+0 curves, breakeven markers, sigma bands, and asymptotic-slope detection so unlimited-loss strategies render 'Unlimited' instead of clipping."
-          />
+          <Card>
+            <CardContent className="p-2 sm:p-4">
+              {snapshot ? (
+                <PayoffChart
+                  snapshotLegs={snapshot.legs}
+                  entryPriceBySymbol={entryPriceBySymbol}
+                  spot={snapshot.spot_price}
+                />
+              ) : (
+                <div className="flex h-[420px] flex-col items-center justify-center gap-1 text-center text-muted-foreground">
+                  <p className="text-sm">
+                    {snapshotLoading
+                      ? "Pricing legs…"
+                      : "No snapshot yet."}
+                  </p>
+                  <p className="text-xs">
+                    {snapshotLoading
+                      ? "First snapshot is fetching."
+                      : "Add legs and pick strikes to draw the payoff."}
+                  </p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
+
+        {/* Phase 8 — historical strategy chart */}
         <TabsContent value="chart">
           <PlaceholderTab
             title="Strategy chart"
@@ -574,6 +658,8 @@ export default function StrategyBuilder() {
             note="Historical combined-premium time series with optional underlying overlay. Drives off /web/strategybuilder/chart with intersection-correct timestamps."
           />
         </TabsContent>
+
+        {/* Phase 7 — WebSocket-streamed P&L */}
         <TabsContent value="pnl">
           <PlaceholderTab
             title="Live P&L"
