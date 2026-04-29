@@ -37,6 +37,7 @@ const VolSurface = lazy(() => import("@/pages/tools/VolSurface"));
 const StraddleChart = lazy(() => import("@/pages/tools/StraddleChart"));
 const GEXDashboard = lazy(() => import("@/pages/tools/GEXDashboard"));
 const StrategyBuilder = lazy(() => import("@/pages/tools/StrategyBuilder"));
+const StrategyPortfolio = lazy(() => import("@/pages/tools/StrategyPortfolio"));
 
 function ToolFallback() {
   return (
@@ -262,6 +263,16 @@ function App() {
                     <ProtectedRoute requiresBroker>
                       <Suspense fallback={<ToolFallback />}>
                         <StrategyBuilder />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/strategyportfolio"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <StrategyPortfolio />
                       </Suspense>
                     </ProtectedRoute>
                   }

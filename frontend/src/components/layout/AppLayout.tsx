@@ -56,6 +56,7 @@ const navItems: NavItem[] = [
       { label: "Straddle Chart", to: "/tools/straddle" },
       { label: "GEX Dashboard", to: "/tools/gex" },
       { label: "Strategy Builder", to: "/tools/strategybuilder" },
+      { label: "Strategy Portfolio", to: "/tools/strategyportfolio" },
     ],
   },
   {

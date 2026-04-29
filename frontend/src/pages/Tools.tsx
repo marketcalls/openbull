@@ -74,6 +74,13 @@ const TOOLS: ToolDef[] = [
       "Multi-leg option strategy designer with live Greeks, payoff chart, and one-click basket execute. Save strategies and reload them from your portfolio.",
     status: "available",
   },
+  {
+    to: "/tools/strategyportfolio",
+    title: "Strategy Portfolio",
+    description:
+      "Live aggregated P&L for every saved strategy. Filter by mode/status, expand for per-leg detail, reload into the builder, or close at exit prices.",
+    status: "available",
+  },
 ];
 
 export default function Tools() {
