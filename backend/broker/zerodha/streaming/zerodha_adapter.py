@@ -87,9 +87,16 @@ class ZerodhaAdapter(BaseBrokerAdapter):
     # ---- BaseBrokerAdapter interface ----
 
     def connect(self) -> None:
-        # Auth token format: "api_key:access_token"
-        api_key = self.broker_config.get("api_key", "")
-        access_token = self.auth_token
+        # auth_api stores the token as "api_key:access_token" because that's
+        # what Kite REST expects in the Authorization header. The WS URL
+        # however needs the BARE access_token — sending the combined form
+        # makes Kite reject the handshake. Split it here.
+        if ":" in self.auth_token:
+            api_key_from_token, _, access_token = self.auth_token.partition(":")
+            api_key = self.broker_config.get("api_key") or api_key_from_token
+        else:
+            api_key = self.broker_config.get("api_key", "")
+            access_token = self.auth_token
 
         ws_url = f"wss://ws.kite.trade?api_key={api_key}&access_token={access_token}"
 
@@ -379,7 +386,13 @@ class ZerodhaAdapter(BaseBrokerAdapter):
 
         symbol, exchange = info
 
-        # Determine packet mode by length
+        # Index packets use a compact layout (28 / 32 bytes) — different
+        # field order from equity quote / full. Handle them separately.
+        if len(pkt) in (28, 32):
+            self._parse_index_packet(pkt, ntok, ltp, symbol, exchange)
+            return
+
+        # Determine packet mode by length (equity layout)
         if len(pkt) == 8:
             pkt_mode = MODE_LTP
         elif len(pkt) >= 184:
@@ -486,6 +499,80 @@ class ZerodhaAdapter(BaseBrokerAdapter):
                 self.publish(f"{exchange}_{symbol}_DEPTH", depth_data)
             except struct.error as e:
                 logger.debug("Depth parse error for %s: %s", symbol, e)
+
+    def _parse_index_packet(
+        self, pkt: bytes, ntok: int, ltp: float, symbol: str, exchange: str,
+    ) -> None:
+        """Parse Kite's compact index packet (28 = quote, 32 = full).
+
+        Layout (per Kite WS docs):
+            0-4   token
+            4-8   ltp
+            8-12  high
+            12-16 low
+            16-20 open
+            20-24 close
+            24-28 price_change
+            28-32 exchange_timestamp (full only)
+        """
+        try:
+            # 28 bytes contains 7 int32 values; 32 bytes adds exchange_timestamp.
+            if len(pkt) == 28:
+                _, _, high_p, low_p, open_p, close_p, _change_p = struct.unpack(">7i", pkt[0:28])
+                exch_ts = 0
+            else:
+                fields = struct.unpack(">8i", pkt[0:32])
+                _, _, high_p, low_p, open_p, close_p, _change_p, exch_ts = fields
+
+            high = high_p / 100.0
+            low = low_p / 100.0
+            open_ = open_p / 100.0
+            close = close_p / 100.0
+            if close:
+                self._last_close[ntok] = close
+            change = round(ltp - close, 4) if (ltp and close) else 0.0
+            change_pct = round((ltp - close) / close * 100, 4) if close else 0.0
+            ts_now = int(time.time())
+
+            ltp_data = {
+                "symbol": symbol, "exchange": exchange, "mode": "ltp",
+                "ltp": ltp, "ltt": exch_ts or ts_now,
+                "cp": close, "change": change, "change_percent": change_pct,
+            }
+            self.publish(f"{exchange}_{symbol}_LTP", ltp_data)
+
+            quote_data = {
+                **ltp_data,
+                "mode": "quote",
+                "open": open_,
+                "high": high,
+                "low": low,
+                "close": close,
+                # Indices have no LTQ / volume / depth / OI — keep keys present
+                # so downstream consumers don't KeyError.
+                "ltq": 0,
+                "average_price": 0.0,
+                "volume": 0,
+                "total_buy_quantity": 0,
+                "total_sell_quantity": 0,
+                "oi": 0,
+            }
+            if exch_ts:
+                quote_data["exchange_timestamp"] = exch_ts
+            self.publish(f"{exchange}_{symbol}_QUOTE", quote_data)
+
+            # 32-byte packets are sent when the user subscribed in `full` mode
+            # for an index — emit a depth topic too, with empty ladder so the
+            # subscriber's expected schema is preserved.
+            if len(pkt) == 32:
+                depth_data = {
+                    **quote_data,
+                    "mode": "full",
+                    "depth": {"buy": [], "sell": []},
+                }
+                self.publish(f"{exchange}_{symbol}_DEPTH", depth_data)
+        except struct.error as e:
+            logger.debug("Index packet parse error for %s: %s", symbol, e)
 
     # ---- Wire-format builders (JSON text frames per Kite docs) ----
 
