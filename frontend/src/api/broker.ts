@@ -1,5 +1,11 @@
 import api from "@/config/api";
-import type { BrokerListItem, BrokerConfigData, BrokerConfigResponse, BrokerRedirectResponse } from "@/types/broker";
+import type {
+  AngelLoginPayload,
+  BrokerListItem,
+  BrokerConfigData,
+  BrokerConfigResponse,
+  BrokerRedirectResponse,
+} from "@/types/broker";
 
 export async function listBrokers(): Promise<BrokerListItem[]> {
   const response = await api.get<BrokerListItem[]>("/web/broker/list");
@@ -17,6 +23,7 @@ export async function saveBrokerCredentials(data: BrokerConfigData): Promise<Bro
     api_key: data.api_key,
     api_secret: data.api_secret,
     redirect_url: data.redirect_url,
+    client_id: data.client_id ?? null,
   });
   return response.data;
 }
@@ -25,5 +32,10 @@ export async function getBrokerRedirectUrl(broker: string): Promise<BrokerRedire
   const response = await api.get<BrokerRedirectResponse>("/auth/broker-redirect", {
     params: { broker },
   });
+  return response.data;
+}
+
+export async function angelLogin(payload: AngelLoginPayload): Promise<{ status: string; broker: string }> {
+  const response = await api.post<{ status: string; broker: string }>("/angel/login", payload);
   return response.data;
 }

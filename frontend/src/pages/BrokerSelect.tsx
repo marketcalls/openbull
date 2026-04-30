@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -8,6 +8,7 @@ import { listBrokers, getBrokerRedirectUrl } from "@/api/broker";
 
 export default function BrokerSelect() {
   const [redirecting, setRedirecting] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   const { data: brokers, isLoading, error } = useQuery({
     queryKey: ["brokers"],
@@ -18,7 +19,11 @@ export default function BrokerSelect() {
     setRedirecting(brokerName);
     try {
       const response = await getBrokerRedirectUrl(brokerName);
-      window.location.href = response.url;
+      if (response.kind === "internal") {
+        navigate(response.url);
+      } else {
+        window.location.href = response.url;
+      }
     } catch {
       setRedirecting(null);
     }

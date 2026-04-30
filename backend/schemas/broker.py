@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import BaseModel
 
 
@@ -6,6 +8,7 @@ class BrokerConfigCreate(BaseModel):
     api_key: str
     api_secret: str
     redirect_url: str
+    client_id: Optional[str] = None
 
 
 class BrokerConfigResponse(BaseModel):
@@ -14,6 +17,7 @@ class BrokerConfigResponse(BaseModel):
     api_secret_masked: str
     redirect_url: str
     is_active: bool
+    client_id: Optional[str] = None
 
 
 class BrokerListItem(BaseModel):
@@ -22,3 +26,10 @@ class BrokerListItem(BaseModel):
     supported_exchanges: list[str]
     is_configured: bool = False
     is_active: bool = False
+    oauth_type: str = ""
+
+
+class AngelLoginPayload(BaseModel):
+    clientcode: str
+    broker_pin: str
+    totp_code: str

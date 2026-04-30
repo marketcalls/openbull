@@ -13,6 +13,7 @@ from backend.models.user import User
 from backend.models.auth import BrokerAuth
 from backend.models.broker_config import BrokerConfig
 from backend.models.audit import LoginAttempt, ActiveSession
+from backend.schemas.broker import AngelLoginPayload
 from backend.security import encrypt_value, decrypt_value, create_access_token
 from backend.utils.plugin_loader import get_plugin_info, get_broker_module
 
@@ -22,7 +23,7 @@ settings = get_settings()
 router = APIRouter(tags=["broker-oauth"])
 
 # In-memory store for pending OAuth flows (broker -> {user_id, username})
-# Used when broker doesn't echo back state param (e.g. Zerodha)
+# Used when broker doesn't echo back state param (e.g. Zerodha, Dhan).
 _pending_oauth: dict[str, dict] = {}
 
 
@@ -57,7 +58,12 @@ async def broker_redirect(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Construct broker OAuth URL and return it for frontend redirect."""
+    """Construct broker login URL and return it for frontend redirect.
+
+    For brokers that don't OAuth (Angel), the response carries
+    ``kind: "internal"`` and a path the frontend should navigate to with
+    react-router instead of a full page redirect.
+    """
     plugin = get_plugin_info(broker)
     if not plugin:
         raise HTTPException(status_code=400, detail=f"Unknown broker: {broker}")
@@ -72,6 +78,38 @@ async def broker_redirect(
     if not config:
         raise HTTPException(status_code=400, detail="Broker not configured. Please add credentials first.")
 
+    # Angel: no OAuth. Frontend renders a credentials/TOTP form and POSTs
+    # to /angel/login.
+    if broker == "angel":
+        return {"url": "/broker/angel/totp", "kind": "internal"}
+
+    # Dhan: 2-step. Generate consent server-side, then redirect the browser
+    # to consentApp-login. The plugin's auth_url_template is informational
+    # only; we build the URL here from the live consent_app_id.
+    if broker == "dhan":
+        extra = config.extra_config or {}
+        client_id = extra.get("client_id")
+        if not client_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Dhan Client ID is missing. Please configure it on the Broker Configuration page.",
+            )
+        api_key = decrypt_value(config.api_key)
+        api_secret = decrypt_value(config.api_secret) if config.api_secret else ""
+
+        from backend.broker.dhan.api.auth_api import generate_consent
+        consent_app_id, error = generate_consent(client_id, api_key, api_secret)
+        if not consent_app_id:
+            raise HTTPException(status_code=502, detail=f"Dhan consent generation failed: {error}")
+
+        login_url = f"https://auth.dhan.co/login/consentApp-login?consentAppId={quote(consent_app_id, safe='')}"
+        # Dhan's callback receives tokenId without state. Stash user identity
+        # so the callback can find them when no state echo arrives.
+        _pending_oauth["dhan"] = {"user_id": user.id, "username": user.username}
+        return {"url": login_url, "kind": "external"}
+
+    # Default OAuth flow (upstox, zerodha, fyers): substitute api_key + redirect_url
+    # into the plugin's auth_url_template and add JWT state for the callback.
     api_key = decrypt_value(config.api_key)
     redirect_url = config.redirect_url
 
@@ -79,9 +117,6 @@ async def broker_redirect(
     if not auth_url_template:
         raise HTTPException(status_code=500, detail="Broker plugin missing auth_url_template")
 
-    # Pass JWT as OAuth state so callback can identify user
-    # even when cookie is on a different domain (e.g. Vite proxy)
-    from backend.security import create_access_token
     state_token = create_access_token(data={
         "sub": str(user.id),
         "username": user.username,
@@ -96,7 +131,7 @@ async def broker_redirect(
     # Store pending OAuth for brokers that don't echo state (e.g. Zerodha)
     _pending_oauth[broker] = {"user_id": user.id, "username": user.username}
 
-    return {"url": auth_url}
+    return {"url": auth_url, "kind": "external"}
 
 
 @router.get("/upstox/callback")
@@ -129,6 +164,71 @@ async def zerodha_callback(
     return await _handle_oauth_callback("zerodha", request_token, request, response, db, state=state)
 
 
+@router.get("/fyers/callback")
+async def fyers_callback(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Handle Fyers OAuth callback. Fyers v3 returns auth_code, not code."""
+    auth_code = request.query_params.get("auth_code") or request.query_params.get("code")
+    if not auth_code:
+        raise HTTPException(status_code=400, detail="Missing auth_code")
+
+    state = request.query_params.get("state")
+    return await _handle_oauth_callback("fyers", auth_code, request, response, db, state=state)
+
+
+@router.get("/dhan/callback")
+async def dhan_callback(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Handle Dhan OAuth callback. Dhan returns tokenId."""
+    token_id = (
+        request.query_params.get("tokenId")
+        or request.query_params.get("token_id")
+        or request.query_params.get("token")
+    )
+    if not token_id:
+        raise HTTPException(status_code=400, detail="Missing tokenId")
+
+    state = request.query_params.get("state")
+    return await _handle_oauth_callback("dhan", token_id, request, response, db, state=state)
+
+
+@router.post("/angel/login")
+async def angel_login(
+    payload: AngelLoginPayload,
+    request: Request,
+    response: Response,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Authenticate with Angel One using clientcode + MPIN + TOTP.
+
+    Angel doesn't OAuth; this endpoint is the credentials-form equivalent
+    of an OAuth callback.
+    """
+    creds = f"{payload.clientcode.strip()}:{payload.broker_pin.strip()}:{payload.totp_code.strip()}"
+    new_token, error = await _finalize_broker_auth(
+        "angel", creds, user.id, user.username, request, db
+    )
+    if not new_token:
+        raise HTTPException(status_code=401, detail=error or "Angel authentication failed")
+
+    response.set_cookie(
+        key="access_token",
+        value=new_token,
+        httponly=True,
+        samesite="lax",
+        secure=settings.cookie_secure,
+        path="/",
+    )
+    return {"status": "success", "broker": "angel"}
+
+
 def _start_master_contract_download(broker_name: str, auth_token: str):
     """Start master contract download in a background thread after broker login."""
     from backend.services.symbol_service import download_master_contracts
@@ -155,50 +255,20 @@ def _start_master_contract_download(broker_name: str, auth_token: str):
     thread.start()
 
 
-async def _handle_oauth_callback(
+async def _finalize_broker_auth(
     broker_name: str,
     code_or_token: str,
+    user_id: int,
+    username: str,
     request: Request,
-    response: Response,
     db: AsyncSession,
-    state: str | None = None,
-) -> RedirectResponse:
-    """Common OAuth callback handler for all brokers."""
-    from backend.security import decode_access_token
+) -> tuple[str | None, str | None]:
+    """Run broker authenticate, persist token, mark active, kick off master
+    contract download, and mint a new JWT carrying the broker claim.
 
-    frontend_base = _frontend_url_for_request(request)
-
-    logger.info("=== OAuth callback START for %s ===", broker_name)
-    logger.info("code_or_token present: %s", bool(code_or_token))
-    logger.info("state present: %s", bool(state))
-    logger.info("all query params: %s", dict(request.query_params))
-    logger.info("cookies: %s", list(request.cookies.keys()))
-    logger.info("redirect base resolved to %s (request host=%s)", frontend_base, request.url.hostname)
-
-    # Identify user from JWT cookie, or from OAuth state parameter as fallback
-    token_cookie = request.cookies.get("access_token")
-    payload = decode_access_token(token_cookie) if token_cookie else None
-    logger.info("cookie payload: %s", "found" if payload else "none")
-
-    if not payload and state:
-        payload = decode_access_token(state)
-        logger.info("state payload: %s", "found" if payload else "none")
-
-    # Fallback: use pending OAuth store (for brokers like Zerodha that don't echo state)
-    if not payload and broker_name in _pending_oauth:
-        pending = _pending_oauth.pop(broker_name)
-        payload = {"sub": str(pending["user_id"]), "username": pending["username"]}
-        logger.info("pending oauth payload: found for user %s", pending["username"])
-
-    if not payload:
-        logger.error("NO user identity found - redirecting to login")
-        return RedirectResponse(url=f"{frontend_base}/login", status_code=302)
-
-    user_id = int(payload["sub"])
-    username = payload.get("username", "unknown")
-    logger.info("identified user: id=%s username=%s", user_id, username)
-
-    # Get broker config from DB
+    Returns ``(new_jwt, error)``. Caller is responsible for setting the
+    cookie / building the redirect or JSON response.
+    """
     result = await db.execute(
         select(BrokerConfig).where(
             BrokerConfig.user_id == user_id,
@@ -207,29 +277,29 @@ async def _handle_oauth_callback(
     )
     broker_cfg = result.scalar_one_or_none()
     if not broker_cfg:
-        logger.error("No broker config found for user %s, broker %s", user_id, broker_name)
-        return RedirectResponse(url=f"{frontend_base}/broker/config?error=not_configured", status_code=302)
+        return None, "broker_not_configured"
 
-    logger.info("broker config found, redirect_url=%s", broker_cfg.redirect_url)
-
+    extra = broker_cfg.extra_config or {}
     config = {
         "api_key": decrypt_value(broker_cfg.api_key),
-        "api_secret": decrypt_value(broker_cfg.api_secret),
+        "api_secret": decrypt_value(broker_cfg.api_secret) if broker_cfg.api_secret else "",
         "redirect_url": broker_cfg.redirect_url,
+        "client_id": extra.get("client_id", ""),
     }
 
-    # Authenticate with broker
     try:
         broker_module = get_broker_module(broker_name, "auth_api")
         logger.info("calling authenticate_broker for %s", broker_name)
         access_token, error = broker_module.authenticate_broker(code_or_token, config)
-        logger.info("authenticate_broker result: token=%s, error=%s", bool(access_token), error)
+        logger.info(
+            "authenticate_broker result for %s: token=%s, error=%s",
+            broker_name, bool(access_token), error,
+        )
     except Exception as e:
         logger.exception("Failed to import/run broker module for %s: %s", broker_name, e)
-        return RedirectResponse(url=f"{frontend_base}/broker/select?error=module_error", status_code=302)
+        return None, f"module_error: {e}"
 
     if not access_token:
-        logger.error("Broker auth failed for %s: %s", broker_name, error)
         db.add(LoginAttempt(
             username=username,
             ip_address=request.client.host if request.client else "unknown",
@@ -239,9 +309,9 @@ async def _handle_oauth_callback(
             failure_reason=error,
         ))
         await db.commit()
-        return RedirectResponse(url=f"{frontend_base}/broker/select?error=auth_failed", status_code=302)
+        return None, error or "auth_failed"
 
-    # Store encrypted token - upsert
+    # Upsert BrokerAuth
     result = await db.execute(
         select(BrokerAuth).where(
             BrokerAuth.user_id == user_id,
@@ -249,7 +319,6 @@ async def _handle_oauth_callback(
         )
     )
     existing_auth = result.scalar_one_or_none()
-
     encrypted_token = encrypt_value(access_token)
 
     if existing_auth:
@@ -262,14 +331,13 @@ async def _handle_oauth_callback(
             access_token=encrypted_token,
         ))
 
-    # Mark this broker as active, deactivate others
+    # Mark this broker active, deactivate others
     result = await db.execute(
         select(BrokerConfig).where(BrokerConfig.user_id == user_id)
     )
     for cfg in result.scalars().all():
         cfg.is_active = (cfg.broker_name == broker_name)
 
-    # Log success
     db.add(LoginAttempt(
         username=username,
         ip_address=request.client.host if request.client else "unknown",
@@ -279,14 +347,11 @@ async def _handle_oauth_callback(
     ))
     await db.commit()
 
-    # Trigger master contract download in background
     _start_master_contract_download(broker_name, access_token)
 
-    # Re-issue the JWT with the broker claim, preserving the existing
+    # Re-issue the JWT with the broker claim, preserving existing
     # ActiveSession.session_token as `jti` so the user's server-side
-    # session stays valid. If no ActiveSession exists (shouldn't happen
-    # since OAuth is only reachable post-login, but be defensive), create
-    # one and keep the broker column in sync.
+    # session stays valid.
     session_result = await db.execute(
         select(ActiveSession)
         .where(ActiveSession.user_id == user_id)
@@ -315,6 +380,68 @@ async def _handle_oauth_callback(
         "broker": broker_name,
         "jti": session_token,
     })
+    return new_token, None
+
+
+async def _handle_oauth_callback(
+    broker_name: str,
+    code_or_token: str,
+    request: Request,
+    response: Response,
+    db: AsyncSession,
+    state: str | None = None,
+) -> RedirectResponse:
+    """Common OAuth callback handler for redirect-style brokers."""
+    from backend.security import decode_access_token
+
+    frontend_base = _frontend_url_for_request(request)
+
+    logger.info("=== OAuth callback START for %s ===", broker_name)
+    logger.info("code_or_token present: %s", bool(code_or_token))
+    logger.info("state present: %s", bool(state))
+    logger.info("all query params: %s", dict(request.query_params))
+    logger.info("cookies: %s", list(request.cookies.keys()))
+    logger.info("redirect base resolved to %s (request host=%s)", frontend_base, request.url.hostname)
+
+    # Identify user from JWT cookie, OAuth state, or pending-oauth fallback
+    token_cookie = request.cookies.get("access_token")
+    payload = decode_access_token(token_cookie) if token_cookie else None
+    logger.info("cookie payload: %s", "found" if payload else "none")
+
+    if not payload and state:
+        payload = decode_access_token(state)
+        logger.info("state payload: %s", "found" if payload else "none")
+
+    if not payload and broker_name in _pending_oauth:
+        pending = _pending_oauth.pop(broker_name)
+        payload = {"sub": str(pending["user_id"]), "username": pending["username"]}
+        logger.info("pending oauth payload: found for user %s", pending["username"])
+
+    if not payload:
+        logger.error("NO user identity found - redirecting to login")
+        return RedirectResponse(url=f"{frontend_base}/login", status_code=302)
+
+    user_id = int(payload["sub"])
+    username = payload.get("username", "unknown")
+    logger.info("identified user: id=%s username=%s", user_id, username)
+
+    new_token, error = await _finalize_broker_auth(
+        broker_name, code_or_token, user_id, username, request, db
+    )
+
+    if not new_token:
+        if error == "broker_not_configured":
+            return RedirectResponse(
+                url=f"{frontend_base}/broker/config?error=not_configured", status_code=302
+            )
+        if error and error.startswith("module_error"):
+            return RedirectResponse(
+                url=f"{frontend_base}/broker/select?error=module_error", status_code=302
+            )
+        logger.error("Broker auth failed for %s: %s", broker_name, error)
+        return RedirectResponse(
+            url=f"{frontend_base}/broker/select?error=auth_failed", status_code=302
+        )
 
     redirect = RedirectResponse(url=f"{frontend_base}/dashboard", status_code=302)
     redirect.set_cookie(

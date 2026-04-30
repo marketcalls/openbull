@@ -12,6 +12,7 @@ import Setup from "@/pages/Setup";
 import Dashboard from "@/pages/Dashboard";
 import BrokerConfig from "@/pages/BrokerConfig";
 import BrokerSelect from "@/pages/BrokerSelect";
+import BrokerAngelLogin from "@/pages/BrokerAngelLogin";
 import ApiKey from "@/pages/ApiKey";
 import OrderBook from "@/pages/OrderBook";
 import TradeBook from "@/pages/TradeBook";
@@ -75,6 +76,16 @@ function App() {
                 element={
                   <ProtectedRoute>
                     <BrokerSelect />
+                  </ProtectedRoute>
+                }
+              />
+
+              {/* Angel One credentials/TOTP login (no OAuth) */}
+              <Route
+                path="/broker/angel/totp"
+                element={
+                  <ProtectedRoute>
+                    <BrokerAngelLogin />
                   </ProtectedRoute>
                 }
               />
