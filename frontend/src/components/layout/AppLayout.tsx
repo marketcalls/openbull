@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
+import { useTradingMode } from "@/contexts/TradingModeContext";
 import { cn } from "@/lib/utils";
 import { MasterContractStatus } from "@/components/layout/MasterContractStatus";
 import { TradingModeSwitch } from "@/components/layout/TradingModeSwitch";
@@ -90,6 +91,7 @@ function SidebarLink({ to, label }: { to: string; label: string }) {
 export function AppLayout() {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const { isSandbox } = useTradingMode();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -174,7 +176,19 @@ export function AppLayout() {
             <Separator orientation="vertical" className="mx-1 h-6" />
             <MasterContractStatus />
             <Separator orientation="vertical" className="mx-1 h-6" />
-            <Button variant="outline" size="sm" onClick={toggleTheme}>
+            {/* Theme toggle is live-only — sandbox uses a fixed amber palette
+                so light/dark would have nothing to flip. */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={toggleTheme}
+              disabled={isSandbox}
+              title={
+                isSandbox
+                  ? "Sandbox mode uses a fixed theme"
+                  : `Switch to ${theme === "dark" ? "light" : "dark"} theme`
+              }
+            >
               {theme === "dark" ? "Light" : "Dark"}
             </Button>
             <Separator orientation="vertical" className="mx-1 h-6" />

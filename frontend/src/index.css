@@ -5,146 +5,63 @@
 
 @custom-variant dark (&:is(.dark *));
 
-@theme {
-  --color-background: #ffffff;
-  --color-foreground: #0a0a0a;
-  --color-card: #ffffff;
-  --color-card-foreground: #0a0a0a;
-  --color-popover: #ffffff;
-  --color-popover-foreground: #0a0a0a;
-  --color-primary: #171717;
-  --color-primary-foreground: #fafafa;
-  --color-secondary: #f5f5f5;
-  --color-secondary-foreground: #171717;
-  --color-muted: #f5f5f5;
-  --color-muted-foreground: #737373;
-  --color-accent: #f5f5f5;
-  --color-accent-foreground: #171717;
-  --color-destructive: #ef4444;
-  --color-destructive-foreground: #fafafa;
-  --color-border: #e5e5e5;
-  --color-input: #e5e5e5;
-  --color-ring: #0a0a0a;
-  --color-sidebar-background: #fafafa;
-  --color-sidebar-foreground: #737373;
-  --color-sidebar-primary: #171717;
-  --color-sidebar-primary-foreground: #fafafa;
-  --color-sidebar-accent: #f5f5f5;
-  --color-sidebar-accent-foreground: #171717;
-  --color-sidebar-border: #e5e5e5;
-  --color-sidebar-ring: #0a0a0a;
-  --radius: 0.625rem;
-}
-
-.dark {
-  --color-background: #0a0a0a;
-  --color-foreground: #fafafa;
-  --color-card: #0a0a0a;
-  --color-card-foreground: #fafafa;
-  --color-popover: #0a0a0a;
-  --color-popover-foreground: #fafafa;
-  --color-primary: #fafafa;
-  --color-primary-foreground: #171717;
-  --color-secondary: #262626;
-  --color-secondary-foreground: #fafafa;
-  --color-muted: #262626;
-  --color-muted-foreground: #a3a3a3;
-  --color-accent: #262626;
-  --color-accent-foreground: #fafafa;
-  --color-destructive: #7f1d1d;
-  --color-destructive-foreground: #fafafa;
-  --color-border: #262626;
-  --color-input: #262626;
-  --color-ring: #d4d4d4;
-  --color-sidebar-background: #0a0a0a;
-  --color-sidebar-foreground: #a3a3a3;
-  --color-sidebar-primary: #fafafa;
-  --color-sidebar-primary-foreground: #171717;
-  --color-sidebar-accent: #262626;
-  --color-sidebar-accent-foreground: #fafafa;
-  --color-sidebar-border: #262626;
-  --color-sidebar-ring: #d4d4d4;
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
-}
-
-@layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground;
-    font-family: system-ui, -apple-system, sans-serif;
-    margin: 0;
-  }
-  html {
-    @apply font-sans;
-  }
-}
+/* ---------------------------------------------------------------------------
+ * Theming model
+ *
+ * Live mode supports light + dark. Sandbox mode is a single fixed amber
+ * palette regardless of the user's light/dark choice (it has to be visually
+ * unmistakable that orders are simulated).
+ *
+ *   :root                                   → live light palette
+ *   .dark                                   → live dark palette (added by
+ *                                             ThemeContext to <html>)
+ *   html[data-trading-mode="sandbox"]       → sandbox palette (set by
+ *                                             TradingModeContext on <html>);
+ *                                             specificity 0,1,1 beats both
+ *                                             :root and .dark, so neither the
+ *                                             light nor dark live palette
+ *                                             leaks through.
+ *
+ * The single @theme inline block below maps Tailwind's design tokens onto
+ * the bare CSS variables, so every utility (bg-background, text-foreground,
+ * border-border, …) re-resolves automatically when any of those vars flip.
+ * --------------------------------------------------------------------------- */
 
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: 'Geist Variable', sans-serif;
-  --color-sidebar-ring: var(--sidebar-ring);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar: var(--sidebar);
-  --color-chart-5: var(--chart-5);
-  --color-chart-4: var(--chart-4);
-  --color-chart-3: var(--chart-3);
-  --color-chart-2: var(--chart-2);
-  --color-chart-1: var(--chart-1);
-  --color-ring: var(--ring);
-  --color-input: var(--input);
-  --color-border: var(--border);
-  --color-destructive: var(--destructive);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-accent: var(--accent);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-muted: var(--muted);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-secondary: var(--secondary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-primary: var(--primary);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-popover: var(--popover);
-  --color-card-foreground: var(--card-foreground);
-  --color-card: var(--card);
-  --color-foreground: var(--foreground);
   --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -154,6 +71,7 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* Live — light palette */
 :root {
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -170,6 +88,7 @@
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -189,33 +108,96 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* Live — dark palette. Added by ThemeContext as <html class="dark">. */
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
 /* ---------------------------------------------------------------------------
- * Sandbox mode theme tint
+ * Sandbox — fixed amber palette, ignores light/dark.
  *
- * The TradingModeContext sets ``html[data-trading-mode="sandbox"]`` whenever
- * the global mode is sandbox. We nudge the chrome colours amber-ward so the
- * whole UI reads "not live" at a glance — without hiding information behind
- * reduced contrast. Destructive (order-cancel etc.) stays red on purpose.
+ * Selector specificity 0,1,1 beats both :root (0,0,1) and .dark (0,1,0), so
+ * every bare var is forced to the sandbox value regardless of the user's
+ * theme toggle. Destructive stays red (cancel/exit affordance must read
+ * "danger" even on an amber surface).
  * --------------------------------------------------------------------------- */
 
 html[data-trading-mode="sandbox"] {
-  --border: oklch(0.86 0.12 85);
-  --input: oklch(0.86 0.12 85);
-  --ring: oklch(0.78 0.18 85);
-  --sidebar-border: oklch(0.86 0.12 85);
-  --sidebar-ring: oklch(0.78 0.18 85);
+  --background: oklch(0.985 0.025 90);
+  --foreground: oklch(0.22 0.06 60);
+  --card: oklch(0.995 0.018 90);
+  --card-foreground: oklch(0.22 0.06 60);
+  --popover: oklch(0.995 0.018 90);
+  --popover-foreground: oklch(0.22 0.06 60);
+  --primary: oklch(0.72 0.20 75);
+  --primary-foreground: oklch(0.18 0.04 60);
+  --secondary: oklch(0.95 0.05 85);
+  --secondary-foreground: oklch(0.30 0.08 60);
+  --muted: oklch(0.94 0.04 85);
+  --muted-foreground: oklch(0.45 0.07 60);
+  --accent: oklch(0.92 0.08 80);
+  --accent-foreground: oklch(0.25 0.07 60);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.84 0.13 85);
+  --input: oklch(0.88 0.10 85);
+  --ring: oklch(0.78 0.18 80);
+  --chart-1: oklch(0.72 0.20 75);
+  --chart-2: oklch(0.62 0.18 60);
+  --chart-3: oklch(0.55 0.15 45);
+  --chart-4: oklch(0.50 0.13 30);
+  --chart-5: oklch(0.45 0.10 90);
+  --sidebar: oklch(0.97 0.04 88);
+  --sidebar-foreground: oklch(0.30 0.07 60);
   --sidebar-primary: oklch(0.72 0.20 75);
-  --sidebar-accent: oklch(0.97 0.05 85);
-  --accent: oklch(0.97 0.05 85);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.92 0.08 80);
+  --sidebar-accent-foreground: oklch(0.25 0.07 60);
+  --sidebar-border: oklch(0.84 0.13 85);
+  --sidebar-ring: oklch(0.78 0.18 80);
 }
 
-html[data-trading-mode="sandbox"].dark {
-  --border: oklch(0.45 0.12 75);
-  --input: oklch(0.45 0.12 75);
-  --ring: oklch(0.70 0.18 75);
-  --sidebar-border: oklch(0.45 0.12 75);
-  --sidebar-ring: oklch(0.70 0.18 75);
-  --sidebar-primary: oklch(0.75 0.20 75);
-  --sidebar-accent: oklch(0.30 0.10 75);
-  --accent: oklch(0.30 0.10 75);
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0;
+  }
+  html {
+    @apply font-sans;
+  }
 }
