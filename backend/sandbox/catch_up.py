@@ -28,6 +28,7 @@ Idempotent. Safe to run on every startup.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select, update
@@ -151,9 +152,14 @@ def _close_expired_fno_positions() -> int:
     into cumulative ``realized_pnl`` only — same session-isolation rule as
     stale MIS closes.
 
-    Expiry detection uses the symbol-master ``expiry`` field; if the row
-    has no expiry recorded the position is left alone (not all symbols are
-    derivatives).
+    Expiry detection prefers the symbol-name encoding (``NIFTY28APR26...``
+    -> 28-Apr-2026) and falls back to the symbol-master ``expiry`` field
+    when the symbol doesn't carry a ``DDMMMYY``. This matters because the
+    master-contract download wipes and re-inserts the symtoken table on
+    every refresh, dropping expired symbols — so by the time we look the
+    contract up, ``SymToken`` is likely already gone. Without the
+    name-based parser the expired position would be silently skipped and
+    the MTM updater would keep polling its dead symbol.
     """
     today = datetime.now(tz=IST).date()
     closed = 0
@@ -180,16 +186,20 @@ def _close_expired_fno_positions() -> int:
                     SymToken.exchange == pos.exchange,
                 )
             ).scalar_one_or_none()
-            if sym is None or not sym.expiry:
-                continue
-            try:
-                expiry_date = _parse_expiry(sym.expiry)
-            except ValueError:
-                continue
+
+            sym_expiry_field = sym.expiry if sym is not None else None
+            expiry_date = get_contract_expiry(pos.symbol, pos.exchange, sym_expiry_field)
             if expiry_date is None or expiry_date >= today:
                 continue
 
-            instrument_type = (sym.instrumenttype or classify_from_symbol(pos.symbol, pos.exchange)).upper()
+            # Instrument type — prefer the master-contract row, but fall back
+            # to symbol-name classification when the row is gone (the common
+            # case for expired contracts).
+            if sym is not None and sym.instrumenttype:
+                instrument_type = sym.instrumenttype.upper()
+            else:
+                instrument_type = classify_from_symbol(pos.symbol, pos.exchange).upper()
+
             if instrument_type in ("CE", "PE"):
                 close_price = 0.0  # options expire worthless
             else:
@@ -253,6 +263,60 @@ def _parse_expiry(s: str) -> date | None:
             return datetime.strptime(s, fmt).date()
         except ValueError:
             continue
+    return None
+
+
+_FNO_EXCHANGES_FOR_EXPIRY = ("NFO", "BFO", "MCX", "CDS", "BCD", "NCDEX")
+_SYMBOL_EXPIRY_RE = re.compile(r"(\d{2})([A-Z]{3})(\d{2})")
+_MONTH_MAP = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def parse_expiry_from_symbol(symbol: str, exchange: str) -> date | None:
+    """Parse expiry date from F&O symbol name.
+
+    Mirrors openalgo's ``parse_expiry_from_symbol``. Looks for a
+    ``DDMMMYY`` substring (e.g. ``28APR26``) which is the openalgo
+    canonical expiry encoding used by NIFTY28APR2624100PE,
+    BANKNIFTY30APR26FUT, etc. Returns ``None`` for non-F&O exchanges
+    or when the pattern isn't present.
+
+    This is the *primary* expiry source: master-contract refreshes drop
+    expired symbols from SymToken, so falling back to the DB alone misses
+    the very positions we need to settle.
+    """
+    if exchange not in _FNO_EXCHANGES_FOR_EXPIRY:
+        return None
+    m = _SYMBOL_EXPIRY_RE.search(symbol or "")
+    if not m:
+        return None
+    try:
+        day = int(m.group(1))
+        month = _MONTH_MAP.get(m.group(2))
+        if not month:
+            return None
+        year = 2000 + int(m.group(3))
+        return date(year, month, day)
+    except (ValueError, KeyError):
+        return None
+
+
+def get_contract_expiry(
+    symbol: str, exchange: str, sym_expiry_field: str | None = None
+) -> date | None:
+    """Resolve a contract's expiry, preferring the symbol-name encoding.
+
+    ``sym_expiry_field`` is the optional ``SymToken.expiry`` value, used
+    only as a fallback when the symbol name doesn't carry an embedded
+    DDMMMYY (e.g. instrument types we don't know about).
+    """
+    parsed = parse_expiry_from_symbol(symbol, exchange)
+    if parsed is not None:
+        return parsed
+    if sym_expiry_field:
+        return _parse_expiry(sym_expiry_field)
     return None
 
 

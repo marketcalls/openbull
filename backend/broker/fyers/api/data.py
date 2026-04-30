@@ -54,8 +54,11 @@ SUPPORTED_INTERVALS = {
 # Exchanges where Fyers exposes Open Interest in /data/depth.
 _FNO_EXCHANGES = {"NFO", "BFO", "MCX", "CDS"}
 
-# /data/depth pacing — Fyers caps depth at 10 req/sec.
-_DEPTH_MIN_GAP_SECONDS = 0.1
+# /data/depth pacing — Fyers documents 10 req/sec, but per-account rolling
+# windows trip 429 well below that under load. 0.15s (≈6.7/sec) keeps OI
+# tracker (47 strikes = 94 calls) and option-chain refreshes inside Fyers'
+# real ceiling without measurably hurting end-to-end latency.
+_DEPTH_MIN_GAP_SECONDS = 0.15
 
 # /data/quotes batching — bulk endpoint accepts up to 50 symbols per call.
 _QUOTE_BATCH_SIZE = 50
@@ -69,9 +72,16 @@ def _headers(auth_token: str) -> dict:
     }
 
 
-def _br_symbol(symbol: str, exchange: str) -> str:
-    """Resolve OpenBull symbol -> Fyers broker symbol; fall back to raw."""
-    return get_brsymbol_from_cache(symbol, exchange) or symbol
+def _br_symbol(symbol: str, exchange: str) -> str | None:
+    """Resolve OpenBull symbol -> Fyers broker symbol.
+
+    Returns ``None`` if the symbol isn't in the master-contract cache —
+    common for expired options the user still has positions on. Callers
+    should treat ``None`` as "skip", NOT fall back to the raw symbol:
+    Fyers requires an ``EXCH:SYMBOL`` form and rejects bare symbols with
+    ``-300 Please provide a valid symbol``.
+    """
+    return get_brsymbol_from_cache(symbol, exchange)
 
 
 def _api_get(endpoint: str, auth_token: str) -> dict:
@@ -83,7 +93,11 @@ def _api_get(endpoint: str, auth_token: str) -> dict:
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as e:
-        logger.error("Fyers HTTP error on %s: %s", endpoint, e.response.text)
+        # 429 is the rate-limiter saying "back off" — expected when the OI
+        # tracker bursts depth calls faster than Fyers' rolling window. Log
+        # at WARNING so it doesn't dominate the error feed.
+        log_fn = logger.warning if e.response.status_code == 429 else logger.error
+        log_fn("Fyers HTTP %s on %s: %s", e.response.status_code, endpoint, e.response.text)
         try:
             return e.response.json()
         except Exception:
@@ -99,7 +113,9 @@ def get_quotes(
     """Get LTP/OHLC quotes (with OI for derivatives) for a single symbol via /data/depth."""
     br_symbol = _br_symbol(symbol, exchange)
     if not br_symbol:
-        raise ValueError(f"Symbol not found for {symbol}/{exchange}")
+        raise ValueError(
+            f"Symbol {exchange}:{symbol} not in master contracts — likely expired or unlisted"
+        )
 
     encoded = urllib.parse.quote(br_symbol)
     response = _api_get(f"/data/depth?symbol={encoded}&ohlcv_flag=1", auth_token)
@@ -247,7 +263,9 @@ def get_market_depth(
     """Get 5-level market depth for a symbol via /data/depth."""
     br_symbol = _br_symbol(symbol, exchange)
     if not br_symbol:
-        raise ValueError(f"Symbol not found for {symbol}/{exchange}")
+        raise ValueError(
+            f"Symbol {exchange}:{symbol} not in master contracts — likely expired or unlisted"
+        )
 
     encoded = urllib.parse.quote(br_symbol)
     response = _api_get(f"/data/depth?symbol={encoded}&ohlcv_flag=1", auth_token)

@@ -221,7 +221,22 @@ def mark_to_market(
 
 
 def get_positions(user_id: int) -> list[dict]:
-    """Broker-compatible position payload — shape matches the transform layer."""
+    """Broker-compatible position payload — shape matches the transform layer.
+
+    Auto-settles expired F&O contracts before returning. This mirrors
+    openalgo's ``get_open_positions`` behavior — it's the safety net that
+    fires whenever the user opens the positions page, in addition to the
+    startup catch-up and the 00:00 IST scheduler hook. Without it, an app
+    that stays up across an expiry boundary would keep the position open
+    until midnight (and the MTM updater would noisily poll the dead
+    symbol every cycle).
+    """
+    try:
+        from backend.sandbox.catch_up import _close_expired_fno_positions
+        _close_expired_fno_positions()
+    except Exception:
+        logger.exception("get_positions: expired-FnO sweep raised; continuing")
+
     with session_scope() as db:
         rows = db.execute(
             select(SandboxPosition).where(SandboxPosition.user_id == user_id)

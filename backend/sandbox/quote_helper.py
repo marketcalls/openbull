@@ -45,17 +45,35 @@ logger = logging.getLogger(__name__)
 # How long a broker-fetched LTP stays usable before we fetch again.
 BROKER_QUOTE_TTL = 5.0  # seconds
 
-# Per-symbol broker-quote cache: (symbol, exchange) -> (ts, ltp).
-_broker_quote_cache: dict[tuple[str, str], tuple[float, float]] = {}
+# How long to remember that a symbol has no broker quote (expired option,
+# unlisted contract, etc.) before retrying. Without negative caching the
+# MTM updater would call the broker for the same dead symbol every cycle.
+BROKER_QUOTE_FAIL_TTL = 300.0  # seconds
+
+# Per-symbol broker-quote cache: (symbol, exchange) -> (ts, ltp). A stored
+# ``ltp`` of ``None`` means "broker has no quote for this symbol" — treat
+# as a soft skip until the entry expires.
+_broker_quote_cache: dict[tuple[str, str], tuple[float, Optional[float]]] = {}
 _broker_quote_lock = threading.Lock()
 
+# Sentinel returned by ``_cache_get`` to distinguish "negative-cached
+# miss" (skip the broker call) from "no entry / expired" (try the broker).
+_NEG_CACHE_SENTINEL = object()
 
-def _cache_get(symbol: str, exchange: str) -> Optional[float]:
+
+def _cache_get(symbol: str, exchange: str):
+    """Return the cached LTP, ``_NEG_CACHE_SENTINEL`` for a known-bad symbol,
+    or ``None`` if there is no fresh entry.
+    """
     with _broker_quote_lock:
         entry = _broker_quote_cache.get((symbol, exchange))
         if entry is None:
             return None
         ts, ltp = entry
+        if ltp is None:
+            if (time.monotonic() - ts) > BROKER_QUOTE_FAIL_TTL:
+                return None
+            return _NEG_CACHE_SENTINEL
         if (time.monotonic() - ts) > BROKER_QUOTE_TTL:
             return None
         return ltp
@@ -64,6 +82,13 @@ def _cache_get(symbol: str, exchange: str) -> Optional[float]:
 def _cache_put(symbol: str, exchange: str, ltp: float) -> None:
     with _broker_quote_lock:
         _broker_quote_cache[(symbol, exchange)] = (time.monotonic(), float(ltp))
+
+
+def _cache_put_miss(symbol: str, exchange: str) -> None:
+    """Remember that the broker has no quote for this symbol so we don't
+    keep retrying every MTM tick."""
+    with _broker_quote_lock:
+        _broker_quote_cache[(symbol, exchange)] = (time.monotonic(), None)
 
 
 def _resolve_broker_for_user(user_id: int) -> tuple[str, str, dict] | None:
@@ -142,7 +167,11 @@ def _broker_quote_ltp(user_id: int, symbol: str, exchange: str) -> Optional[floa
     this path is unavailable.
     """
     cached = _cache_get(symbol, exchange)
-    if cached is not None and cached > 0:
+    if cached is _NEG_CACHE_SENTINEL:
+        # Symbol is known-bad (e.g. expired option) — skip without hitting
+        # the broker. Re-checked after BROKER_QUOTE_FAIL_TTL.
+        return None
+    if isinstance(cached, (int, float)) and cached > 0:
         return cached
 
     resolved = _resolve_broker_for_user(user_id)
@@ -159,8 +188,11 @@ def _broker_quote_ltp(user_id: int, symbol: str, exchange: str) -> Optional[floa
     try:
         result = data_module.get_quotes(symbol, exchange, auth_token, config)
     except Exception as e:
+        # Don't keep retrying — most likely an expired/delisted contract that
+        # will never come back. Negative-cache and move on.
         logger.debug("quote_helper: get_quotes failed for %s/%s via %s: %s",
                      symbol, exchange, broker_name, e)
+        _cache_put_miss(symbol, exchange)
         return None
 
     ltp_val: Optional[float] = None
@@ -180,6 +212,7 @@ def _broker_quote_ltp(user_id: int, symbol: str, exchange: str) -> Optional[floa
                     continue
 
     if ltp_val is None or ltp_val <= 0:
+        _cache_put_miss(symbol, exchange)
         return None
 
     _cache_put(symbol, exchange, ltp_val)
