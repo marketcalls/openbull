@@ -13,6 +13,7 @@
  */
 
 import { useMemo } from "react";
+import { Pencil, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -34,6 +35,14 @@ interface Props {
   onToggleSymbol: (symbol: string) => void;
   onToggleAll: (enable: boolean) => void;
   onReset: () => void;
+  /** Click the pencil — opens / focuses the leg for editing. The page
+   *  switches to the Legs tab on this so the user can fully edit. */
+  onEditLeg?: (symbol: string) => void;
+  /** Click the trash — removes the leg entirely. */
+  onDeleteLeg?: (symbol: string) => void;
+  /** Stats inputs that need a server round-trip — passed in from the page so
+   *  the panel renders synchronously off whatever's available. */
+  marginRequired?: number | null;
   /** Optional action footer — rendered below the stats. Used by the Strategy
    *  Builder page to put Save + Execute Basket buttons right below the
    *  positions, matching openalgo's layout. */
@@ -114,6 +123,9 @@ export function PositionsPanel({
   onToggleSymbol,
   onToggleAll,
   onReset,
+  onEditLeg,
+  onDeleteLeg,
+  marginRequired,
   footerActions,
 }: Props) {
   const allEnriched = useMemo(
@@ -316,43 +328,72 @@ export function PositionsPanel({
                   P&L {fmtIN(leg.unrealizedPnl, { sign: true })}
                 </div>
               </div>
+
+              {/* Per-row actions — pencil opens the Legs tab focused on this
+                  leg, trash deletes the leg outright. Stop the click from
+                  flowing up to the <label>'s checkbox toggle. */}
+              <div className="flex shrink-0 items-start gap-0.5">
+                {onEditLeg && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onEditLeg(leg.symbol);
+                    }}
+                    className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    title="Edit this leg"
+                    aria-label={`Edit ${leg.symbol}`}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                {onDeleteLeg && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onDeleteLeg(leg.symbol);
+                    }}
+                    className="rounded p-1 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-600 dark:hover:text-rose-400"
+                    title="Delete this leg"
+                    aria-label={`Delete ${leg.symbol}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             </label>
           );
         })}
       </div>
 
-      {/* Stats */}
+      {/* Stats — 2-column grid (matches openalgo). Each cell has the label
+          on top, value below. Breakevens get a wide row at the bottom with
+          a chip-style badge per crossing point. */}
       {stats && (
-        <div className="space-y-1.5 rounded-md border border-border bg-muted/20 p-3 text-[11px]">
-          <Stat
-            label="Prob. of Profit"
+        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-border bg-border text-[11px]">
+          <BoxStat
+            label="MAX PROFIT"
+            value={fmtInfinity(stats.maxProfit, "+")}
+            tone={stats.maxProfit > 0 ? "profit" : "muted"}
+          />
+          <BoxStat
+            label="MAX LOSS"
+            value={fmtInfinity(stats.maxLoss, "-")}
+            tone={stats.maxLoss < 0 ? "loss" : "muted"}
+          />
+          <BoxStat
+            label="PROB. OF PROFIT"
             value={
               stats.pop !== null ? `${(stats.pop * 100).toFixed(2)}%` : "—"
             }
             tone="muted"
           />
-          <Stat
-            label="Max. Profit"
-            value={fmtInfinity(stats.maxProfit, "+")}
-            tone={stats.maxProfit > 0 ? "profit" : "muted"}
-          />
-          <Stat
-            label="Max. Loss"
-            value={fmtInfinity(stats.maxLoss, "-")}
-            tone={stats.maxLoss < 0 ? "loss" : "muted"}
-          />
-          <Stat label="Max. RR Ratio" value={stats.rrLabel} tone="muted" />
-          <Stat
-            label="Breakevens"
-            value={
-              stats.breakevens.length > 0
-                ? stats.breakevens.map((b) => b.toFixed(0)).join(" · ")
-                : "—"
-            }
-            tone="muted"
-          />
-          <Stat
-            label="Total P&L"
+          <BoxStat label="RISK : REWARD" value={stats.rrLabel} tone="muted" />
+          <BoxStat
+            label="TOTAL P&L"
             value={fmtIN(stats.totalUpnl, { sign: true })}
             tone={
               stats.totalUpnl > 0
@@ -362,11 +403,43 @@ export function PositionsPanel({
                 : "muted"
             }
           />
-          <Stat
-            label={stats.netCreditValue > 0 ? "Net Credit" : "Net Debit"}
+          <BoxStat
+            label={stats.netCreditValue > 0 ? "NET CREDIT" : "NET DEBIT"}
             value={fmtIN(Math.abs(stats.netCreditValue))}
             tone={stats.netCreditValue > 0 ? "profit" : "muted"}
           />
+          <BoxStat
+            label="EST. PREMIUM"
+            value={fmtIN(Math.abs(stats.netDebit))}
+            tone="muted"
+          />
+          <BoxStat
+            label="MARGIN REQ."
+            value={
+              typeof marginRequired === "number" && marginRequired > 0
+                ? fmtIN(marginRequired)
+                : "—"
+            }
+            tone="muted"
+          />
+          {/* Breakevens — full-width row across both columns */}
+          <div className="col-span-2 flex flex-wrap items-center gap-2 bg-card px-3 py-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              BREAKEVENS
+            </span>
+            {stats.breakevens.length > 0 ? (
+              stats.breakevens.map((b) => (
+                <span
+                  key={b}
+                  className="inline-flex items-center rounded-md border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums"
+                >
+                  {b.toFixed(0)}
+                </span>
+              ))
+            ) : (
+              <span className="text-muted-foreground">—</span>
+            )}
+          </div>
         </div>
       )}
 
@@ -382,7 +455,9 @@ export function PositionsPanel({
   );
 }
 
-function Stat({
+/** 2-column grid cell — uppercase label on top, value below. Used by the
+ *  stats panel for the openalgo-style cell layout. */
+function BoxStat({
   label,
   value,
   tone = "muted",
@@ -392,9 +467,11 @@ function Stat({
   tone?: "profit" | "loss" | "muted";
 }) {
   return (
-    <div className="flex items-center justify-between gap-2">
-      <span className="font-medium text-muted-foreground">{label}</span>
-      <span
+    <div className="space-y-0.5 bg-card px-3 py-2">
+      <div className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <div
         className={cn(
           "font-semibold tabular-nums",
           tone === "profit" && "text-emerald-600 dark:text-emerald-400",
@@ -402,7 +479,8 @@ function Stat({
         )}
       >
         {value}
-      </span>
+      </div>
     </div>
   );
 }
+

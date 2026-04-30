@@ -43,14 +43,23 @@ interface EnrichedLeg extends PayoffLeg {
   greeks: Greeks;
 }
 
-/** Marker the WhatIfPanel asks the chart to draw — a single dot at
- *  (simulatedSpot, simulatedPnl) showing where the strategy lands under
- *  the user's slider settings. */
+/** Marker the WhatIfPanel asks the chart to draw + simulation parameters
+ *  the T+0 curve uses to re-price the legs.
+ *
+ *  - `spot` / `pnl` drive the magenta dot on the chart.
+ *  - `ivShiftPct` / `daysForward` shift the IV and days-to-expiry the T+0
+ *    curve uses for every sample point, so the dashed T+0 line responds
+ *    to the IV / Days sliders (not just the Spot slider). When all three
+ *    are zero the T+0 curve renders at "now". */
 export interface SimulationMarker {
   spot: number;
   pnl: number | null;
   /** Mostly-cosmetic label so the user knows which sliders are non-zero. */
   label?: string;
+  /** Vol shift in percentage points to add to every leg's IV. 0 = no shift. */
+  ivShiftPct?: number;
+  /** Calendar days to advance time. 0 = right now. */
+  daysForward?: number;
 }
 
 interface Props {
@@ -102,19 +111,30 @@ function buildEnrichedLegs(
   return out;
 }
 
-/** P&L if the user closed RIGHT NOW at hypothetical spot, given each leg's
- *  current solved IV (held constant) and remaining time. */
-function tPlusZeroPnl(legs: EnrichedLeg[], spot: number): number {
+/** P&L if the user closed at the given spot, with optional IV shift (in
+ *  percentage points) and time forward (days). Both default to 0 → priced
+ *  with the leg's currently-solved IV at "now". The shifts let the T+0
+ *  curve respond to the What-If panel's IV and Days Forward sliders. */
+function tPlusZeroPnl(
+  legs: EnrichedLeg[],
+  spot: number,
+  ivShiftPct = 0,
+  daysForward = 0,
+): number {
   let total = 0;
   for (const leg of legs) {
     const sign = leg.action === "BUY" ? 1 : -1;
     const flag = leg.optionType === "CE" ? "c" : "p";
-    const sigma = leg.ivDecimal > 0 ? leg.ivDecimal : 0.001;
-    // r = 0 — matches the backend's INR-options default. If the page
-    // gains an interest-rate input later, plumb it through props.
+    // Shift IV by the slider's percentage points (e.g. ivShiftPct=+5 on a
+    // leg with iv=18% gives 23%). Floor at 0.001 to keep Black-76 stable.
+    const sigma = Math.max(leg.ivDecimal + ivShiftPct / 100, 0.001);
+    // Advance time by daysForward; floor remaining time at the math lib's
+    // tiny epsilon so legs at expiry still price (intrinsic only).
+    const tYears = Math.max(leg.dteYears - daysForward / 365, 0.0001);
+    // r = 0 — matches the backend's INR-options default.
     const theoretical =
-      leg.ivDecimal > 0
-        ? black76Price(spot, leg.strike, leg.dteYears, 0, sigma, flag)
+      sigma > 0
+        ? black76Price(spot, leg.strike, tYears, 0, sigma, flag)
         : Math.max(
             flag === "c" ? spot - leg.strike : leg.strike - spot,
             0,
@@ -185,6 +205,12 @@ export function PayoffChart({
     });
   }, [legs, spot]);
 
+  // Pull simulation shifts off the marker so the T+0 curve responds to the
+  // IV / Days sliders, not just the spot slider. Defaults to 0 when no
+  // simulation is active so the curve renders "at now" as before.
+  const simIvShiftPct = simulationMarker?.ivShiftPct ?? 0;
+  const simDaysForward = simulationMarker?.daysForward ?? 0;
+
   const { xs, expiryY, t0Y, breakevens, bounds, sigmaXs } = useMemo(() => {
     const [lo, hi] = range;
     const xsLocal: number[] = new Array(steps);
@@ -203,7 +229,10 @@ export function PayoffChart({
       const x = lo + i * dx;
       xsLocal[i] = x;
       expiryLocal[i] = payoffAtExpiry(payoffLegs, x);
-      t0Local[i] = legs.length > 0 ? tPlusZeroPnl(legs, x) : 0;
+      t0Local[i] =
+        legs.length > 0
+          ? tPlusZeroPnl(legs, x, simIvShiftPct, simDaysForward)
+          : 0;
     }
     const beCurve = xsLocal.map((x, i) => ({ spot: x, pnl: expiryLocal[i] }));
     const breakevensLocal = findBreakevens(beCurve);
@@ -237,7 +266,7 @@ export function PayoffChart({
       bounds: boundsLocal,
       sigmaXs: sigmaLocal,
     };
-  }, [range, steps, legs, spot]);
+  }, [range, steps, legs, spot, simIvShiftPct, simDaysForward]);
 
   const colors = useMemo(
     () => ({

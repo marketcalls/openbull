@@ -159,6 +159,25 @@ export function SymbolHeader({
     [snapshot?.legs, chain?.atm],
   );
 
+  // Synthetic Future via put-call parity at the ATM strike:
+  //   F ≈ K + C(K) − P(K)
+  // For European-style INR index options this is the broker-implied forward
+  // and is typically within a basis point of the listed FUT price. Using
+  // chain LTPs avoids a separate /quotes call for the futures contract.
+  // Returns null if either ATM CE or PE LTP is missing.
+  const syntheticFuture = useMemo<number | null>(() => {
+    if (!chain) return null;
+    const ce = chain.ceLtpByStrike.get(chain.atm);
+    const pe = chain.peLtpByStrike.get(chain.atm);
+    if (typeof ce !== "number" || typeof pe !== "number" || ce <= 0 || pe <= 0) {
+      return null;
+    }
+    return chain.atm + ce - pe;
+  }, [chain]);
+
+  const futuresDelta =
+    syntheticFuture !== null && spot !== null ? syntheticFuture - spot : null;
+
   const hasData = spot !== null;
   const dteTone: MetricCellProps["tone"] =
     dte === null ? "muted" : dte <= 2 ? "warn" : "muted";
@@ -216,8 +235,9 @@ export function SymbolHeader({
         </div>
       </div>
 
-      {/* Metrics grid */}
-      <div className="grid grid-cols-2 divide-x divide-y sm:grid-cols-4 sm:divide-y-0">
+      {/* Metrics grid — Spot + Futures get the bold accent treatment;
+          ATM IV / DTE / Lot Size sit alongside as secondary metrics. */}
+      <div className="grid grid-cols-2 divide-x divide-y sm:grid-cols-3 sm:divide-y-0 lg:grid-cols-5">
         <MetricCell
           label="Spot"
           value={spot !== null ? spot.toFixed(2) : "—"}
@@ -225,13 +245,23 @@ export function SymbolHeader({
           accent
         />
         <MetricCell
-          label="Lot Size"
-          value={lotSize !== null ? String(lotSize) : "—"}
+          label="Futures"
+          value={syntheticFuture !== null ? syntheticFuture.toFixed(2) : "—"}
           sub={
-            lotSize !== null && spot !== null
-              ? `notional ≈ ₹${(lotSize * spot).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
+            futuresDelta !== null
+              ? `${futuresDelta > 0 ? "+" : ""}${futuresDelta.toFixed(2)}`
+              : syntheticFuture === null && hasData
+              ? "synthetic"
               : undefined
           }
+          tone="profit"
+          accent
+        />
+        <MetricCell
+          label="ATM IV"
+          value={atmIv !== null ? `${atmIv.toFixed(2)}%` : "—"}
+          sub={atmIv === null && hasData ? "add legs to read" : undefined}
+          tone="warn"
         />
         <MetricCell
           label="DTE"
@@ -240,10 +270,13 @@ export function SymbolHeader({
           tone={dteTone}
         />
         <MetricCell
-          label="ATM IV"
-          value={atmIv !== null ? `${atmIv.toFixed(2)}%` : "—"}
-          sub={atmIv === null && hasData ? "add legs to read" : undefined}
-          tone="warn"
+          label="Lot Size"
+          value={lotSize !== null ? String(lotSize) : "—"}
+          sub={
+            lotSize !== null && spot !== null
+              ? `≈ ₹${(lotSize * spot).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
+              : undefined
+          }
         />
       </div>
     </div>

@@ -79,3 +79,45 @@ export async function placeBasketOrder(
   });
   return response.data;
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Margin requirement (POST /api/v1/margin)
+// ────────────────────────────────────────────────────────────────────────
+
+export interface MarginPosition {
+  symbol: string;
+  exchange: string;
+  action: Action;
+  quantity: number;
+  product: Product;
+  pricetype: PriceType;
+  price?: number;
+}
+
+export interface MarginResponseData {
+  /** Net margin required after hedge benefits — what the broker would
+   *  block in the user's account. */
+  total_margin_required: number;
+  span_margin?: number;
+  exposure_margin?: number;
+  /** initial.total − final.total — premium saved vs treating each leg
+   *  as standalone. */
+  margin_benefit?: number;
+}
+
+export interface MarginResponse {
+  status: "success" | "error";
+  data?: MarginResponseData;
+  message?: string;
+}
+
+export async function getBasketMargin(
+  positions: MarginPosition[],
+): Promise<MarginResponse> {
+  const apikey = await resolveApiKey();
+  const response = await api.post<MarginResponse>("/api/v1/margin", {
+    apikey,
+    positions,
+  });
+  return response.data;
+}

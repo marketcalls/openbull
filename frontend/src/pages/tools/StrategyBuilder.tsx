@@ -28,11 +28,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { fetchExpiries } from "@/api/optionchain";
+import { getBasketMargin } from "@/api/basketorder";
 import { getStrategy } from "@/api/strategies";
 import { ExpiryPicker, convertExpiryForApi } from "@/components/strategy-builder/ExpiryPicker";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { GreeksPanel } from "@/components/strategy-builder/GreeksPanel";
 import { LegRow, type BuilderLeg } from "@/components/strategy-builder/LegRow";
+import { AddPositionCard } from "@/components/strategy-builder/AddPositionCard";
 import { LoadStrategyPicker } from "@/components/strategy-builder/LoadStrategyPicker";
 import {
   MultiStrikeOITab,
@@ -68,6 +70,8 @@ import { resolveStrikeOffset, type StrategyTemplate } from "@/lib/strategyTempla
 import { cn } from "@/lib/utils";
 import type { FnoExchange } from "@/types/optionchain";
 import type {
+  Action,
+  OptionType,
   SnapshotLegInput,
   StrategyLeg,
 } from "@/types/strategy";
@@ -272,6 +276,12 @@ export default function StrategyBuilder() {
       spot: simulation.simulatedSpot,
       pnl: simulation.simulatedPnl,
       label: parts.length > 0 ? `What-if: ${parts.join(", ")}` : "What-if",
+      // Pass IV / Days shifts through so PayoffChart's T+0 curve responds
+      // to the IV and Days sliders (not just the Spot slider). Without
+      // these, the dashed T+0 line stays frozen at "now" and only the
+      // marker dot moves.
+      ivShiftPct: simulation.ivShiftPct,
+      daysForward: simulation.daysForward,
     };
   }, [simulation]);
 
@@ -502,6 +512,34 @@ export default function StrategyBuilder() {
     return snapshot.legs.filter((l) => enabledLegSymbols.has(l.symbol));
   }, [snapshot, enabledLegSymbols]);
 
+  // Margin requirement for the *enabled* leg set (defined-risk strategies
+  // get hedge benefit, so changing the enabled subset re-quotes the broker).
+  // Stale-time keeps slider drags from hammering the endpoint.
+  const marginPositions = useMemo(() => {
+    return legs
+      .filter((l) => l.symbol && enabledLegSymbols.has(l.symbol) && l.lots > 0)
+      .map((l) => ({
+        symbol: l.symbol,
+        exchange: exchange as string,
+        action: l.action,
+        quantity: l.lots * l.lot_size,
+        product: "NRML" as const,
+        pricetype: "MARKET" as const,
+      }));
+  }, [legs, enabledLegSymbols, exchange]);
+  const marginKey = JSON.stringify(marginPositions);
+  const marginQuery = useQuery({
+    queryKey: ["basket-margin", marginKey],
+    queryFn: () => getBasketMargin(marginPositions),
+    enabled: marginPositions.length > 0,
+    staleTime: 30_000,
+    retry: 0,
+  });
+  const marginRequired =
+    marginQuery.data?.status === "success"
+      ? marginQuery.data.data?.total_margin_required ?? null
+      : null;
+
   // ── Re-resolve symbols when underlying / expiry / per-leg fields change ─
   // Keeps the displayed symbol in each LegRow consistent without needing
   // every onChange to re-derive it.
@@ -549,6 +587,59 @@ export default function StrategyBuilder() {
       newLeg(expiryApi, {}, lotSizeForUnderlying),
     ]);
   }, [expiryApi, lotSizeForUnderlying]);
+
+  /** AddPositionCard hands us a fully-specified leg (display-format expiry,
+   *  strike, type, side, lots, entry price). We convert the expiry to the
+   *  backend's "DDMMMYY" format and append. */
+  const handleAddPositionFromCard = useCallback(
+    (p: {
+      action: Action;
+      option_type: OptionType;
+      strike: number;
+      lots: number;
+      lot_size: number;
+      expiry_display: string;
+      entry_price: number;
+      symbol: string;
+    }) => {
+      const legExpiryApi = convertExpiryForApi(p.expiry_display);
+      setLegs((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          action: p.action,
+          option_type: p.option_type,
+          strike: p.strike,
+          lots: p.lots,
+          lot_size: p.lot_size,
+          expiry_date: legExpiryApi,
+          entry_price: p.entry_price,
+          symbol: p.symbol,
+        },
+      ]);
+    },
+    [],
+  );
+
+  /** AddPositionCard's symbol builder — converts display expiry to API
+   *  format then calls the existing buildOptionSymbol so the result is
+   *  the same OpenAlgo format the rest of the page uses. */
+  const buildSymbolForCard = useCallback(
+    (
+      und: string,
+      expiryDisplay: string,
+      strike: number,
+      optType: OptionType,
+    ): string => {
+      return buildOptionSymbol(
+        und,
+        convertExpiryForApi(expiryDisplay),
+        strike,
+        optType,
+      );
+    },
+    [],
+  );
 
   const handleLegChange = useCallback((updated: BuilderLeg) => {
     setLegs((prev) => {
@@ -836,26 +927,40 @@ export default function StrategyBuilder() {
 
         {/* Legs tab */}
         <TabsContent value="legs">
-          <Card>
-            <CardContent className="space-y-3 p-4">
-              {legs.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-2 py-8 text-center text-muted-foreground">
-                  <p className="text-sm">No legs yet.</p>
-                  <p className="text-xs">
-                    Pick a template above, or add legs manually below.
-                  </p>
-                </div>
-              ) : (
-                legs.map((leg) => (
-                  <LegRow
-                    key={leg.id}
-                    leg={leg}
-                    onChange={handleLegChange}
-                    onRemove={() => handleLegRemove(leg.id)}
-                    chainContext={chain.context}
-                  />
-                ))
-              )}
+          <div className="space-y-3">
+            {/* Manual leg builder — quick way to add a leg with explicit
+                expiry / strike / type / side / lots, mirroring openalgo. */}
+            <AddPositionCard
+              chain={chain.context}
+              expiries={expiriesList}
+              primaryExpiry={expiry}
+              underlying={underlying}
+              defaultLotSize={lotSizeForUnderlying}
+              buildSymbol={buildSymbolForCard}
+              onAddPosition={handleAddPositionFromCard}
+            />
+
+            <Card>
+              <CardContent className="space-y-3 p-4">
+                {legs.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center gap-2 py-8 text-center text-muted-foreground">
+                    <p className="text-sm">No legs yet.</p>
+                    <p className="text-xs">
+                      Use the form above to add a leg manually, or pick a
+                      template from the gallery.
+                    </p>
+                  </div>
+                ) : (
+                  legs.map((leg) => (
+                    <LegRow
+                      key={leg.id}
+                      leg={leg}
+                      onChange={handleLegChange}
+                      onRemove={() => handleLegRemove(leg.id)}
+                      chainContext={chain.context}
+                    />
+                  ))
+                )}
               <div className="flex items-center justify-between">
                 <Button variant="outline" onClick={handleAddLeg} disabled={!expiryApi}>
                   + Add Leg
@@ -910,8 +1015,9 @@ export default function StrategyBuilder() {
                   </div>
                 </div>
               )}
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          </div>
         </TabsContent>
 
         {/* Greeks tab — per-leg + aggregate */}
@@ -943,6 +1049,21 @@ export default function StrategyBuilder() {
                     onToggleSymbol={handleToggleLegSymbol}
                     onToggleAll={handleToggleAllLegs}
                     onReset={handleResetLegSelection}
+                    onEditLeg={(sym) => {
+                      // Switch to the Legs tab so the user can use the
+                      // inline LegRow editor. Symbol is unique per leg, so
+                      // this is unambiguous; we don't scroll-to-leg yet,
+                      // openalgo's pencil also just navigates without
+                      // anchor highlight.
+                      setActiveTab("legs");
+                      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                      void sym;
+                    }}
+                    onDeleteLeg={(sym) => {
+                      const target = legs.find((l) => l.symbol === sym);
+                      if (target) handleLegRemove(target.id);
+                    }}
+                    marginRequired={marginRequired}
                     footerActions={
                       <>
                         {/* openalgo puts Save + Execute right under the
