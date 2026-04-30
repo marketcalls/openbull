@@ -9,8 +9,11 @@ The candidate with the smallest total pain is the "max pain" strike — the
 expiry settle most adverse to net option buyers (and most favourable to net
 sellers).
 
-Reuses get_option_chain (45 strikes around ATM) so it shares the same DB
-lookups and quote calls as the OI Tracker.
+Reuses get_option_chain (23 strikes around ATM = 47 strikes, 94 symbols)
+so the request fits inside the Fyers multiquote OI bucket (<=100 symbols).
+A wider window pushes the symbol count past the threshold, the broker
+skips OI fetch entirely, and every pain row collapses to 0 — the page
+then renders empty. Same constraint as the OI Tracker; matches openalgo.
 """
 
 import logging
@@ -20,7 +23,7 @@ from backend.services.option_chain_service import get_option_chain
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_STRIKE_HALF_WINDOW = 45
+_DEFAULT_STRIKE_HALF_WINDOW = 23
 
 
 def _build_pain_curve(chain: list[dict]) -> list[dict]:
@@ -70,9 +73,9 @@ def get_max_pain_data(
 ) -> tuple[bool, dict[str, Any], int]:
     """Build the Max Pain payload for a (underlying, exchange, expiry).
 
-    Strategy: pull a wide option chain (45 strikes either side of ATM) so the
-    pain curve has enough range for the minimum to be the actual minimum, not
-    a window-clipped artefact.
+    Strategy: 23 strikes either side of ATM (94 symbols total) — the
+    largest window that still gets per-symbol OI populated under Fyers'
+    100-symbol multiquote OI cap.
     """
     try:
         ok, chain_resp, status = get_option_chain(
