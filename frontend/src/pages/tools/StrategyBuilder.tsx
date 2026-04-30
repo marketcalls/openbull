@@ -847,14 +847,14 @@ export default function StrategyBuilder() {
                       tone={totals.premium_paid >= 0 ? "neutral" : "positive"}
                       hint={totals.premium_paid >= 0 ? "Debit" : "Credit"}
                     />
-                    <SummaryStat label="Δ" value={totals.delta.toFixed(2)} />
-                    <SummaryStat label="Γ" value={totals.gamma.toFixed(4)} />
+                    <SummaryStat label="Delta" value={totals.delta.toFixed(2)} />
+                    <SummaryStat label="Gamma" value={totals.gamma.toFixed(4)} />
                     <SummaryStat
-                      label="Θ /day"
+                      label="Theta /day"
                       value={totals.theta.toFixed(2)}
                       tone={totals.theta < 0 ? "negative" : "positive"}
                     />
-                    <SummaryStat label="V /1%" value={totals.vega.toFixed(2)} />
+                    <SummaryStat label="Vega /1%" value={totals.vega.toFixed(2)} />
                     {totals.unrealized_pnl !== undefined && (
                       <SummaryStat
                         label="Unrealized P&L"

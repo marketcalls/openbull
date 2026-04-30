@@ -404,8 +404,8 @@ export default function OptionGreeks() {
         <CardHeader className="pb-4">
           <CardTitle className="text-xl font-semibold">Option Greeks</CardTitle>
           <p className="text-sm text-muted-foreground">
-            Black-76 IV and Δ/Γ/Θ/V at every candle close for the ATM CE & PE — pulled from
-            OHLCV history and computed in-process. NSE / BSE derivatives only.
+            Black-76 IV and Delta / Gamma / Theta / Vega at every candle close for the ATM CE & PE —
+            pulled from OHLCV history and computed in-process. NSE / BSE derivatives only.
           </p>
         </CardHeader>
         <CardContent>

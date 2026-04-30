@@ -282,15 +282,15 @@ export function WhatIfPanel({
             big
           />
           <Stat
-            label="Simulated Δ"
+            label="Simulated Delta"
             value={sim.agg.delta.toFixed(2)}
           />
           <Stat
-            label="Simulated Γ"
+            label="Simulated Gamma"
             value={sim.agg.gamma.toFixed(4)}
           />
           <Stat
-            label="Simulated Θ /day"
+            label="Simulated Theta /day"
             value={sim.agg.theta.toFixed(2)}
             tone={signTone(sim.agg.theta)}
           />

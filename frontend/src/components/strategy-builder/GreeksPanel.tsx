@@ -91,10 +91,10 @@ export function GreeksPanel({ snapshot, loading, error }: Props) {
               <TableHead className="text-right">Lots</TableHead>
               <TableHead className="text-right">LTP</TableHead>
               <TableHead className="text-right">IV %</TableHead>
-              <TableHead className="text-right">Δ</TableHead>
-              <TableHead className="text-right">Γ</TableHead>
-              <TableHead className="text-right">Θ /day</TableHead>
-              <TableHead className="text-right">V /1%</TableHead>
+              <TableHead className="text-right">Delta</TableHead>
+              <TableHead className="text-right">Gamma</TableHead>
+              <TableHead className="text-right">Theta /day</TableHead>
+              <TableHead className="text-right">Vega /1%</TableHead>
               <TableHead className="text-right">DTE</TableHead>
             </TableRow>
           </TableHeader>

@@ -181,7 +181,7 @@ export function PnLTab({ legs, enabled }: Props) {
               <TableHead className="text-right">Lots</TableHead>
               <TableHead className="text-right">Entry ₹</TableHead>
               <TableHead className="text-right">LTP</TableHead>
-              <TableHead className="text-right">Δ from entry</TableHead>
+              <TableHead className="text-right">Change from entry</TableHead>
               <TableHead className="text-right">P&L (₹)</TableHead>
             </TableRow>
           </TableHeader>
