@@ -65,6 +65,15 @@ def _create_adapter(broker_name: str, auth_token: str, config: dict) -> BaseBrok
     elif broker_name == "zerodha":
         from backend.broker.zerodha.streaming.zerodha_adapter import ZerodhaAdapter
         return ZerodhaAdapter(auth_token, config)
+    elif broker_name == "fyers":
+        from backend.broker.fyers.streaming.fyers_adapter import FyersAdapter
+        return FyersAdapter(auth_token, config)
+    elif broker_name == "dhan":
+        from backend.broker.dhan.streaming.dhan_adapter import DhanAdapter
+        return DhanAdapter(auth_token, config)
+    elif broker_name == "angel":
+        from backend.broker.angel.streaming.angel_adapter import AngelAdapter
+        return AngelAdapter(auth_token, config)
     raise ValueError(f"No streaming adapter for broker: {broker_name}")
 
 
