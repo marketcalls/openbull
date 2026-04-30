@@ -24,8 +24,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 
+import { fetchExpiries } from "@/api/optionchain";
 import { getStrategy } from "@/api/strategies";
 import { ExpiryPicker, convertExpiryForApi } from "@/components/strategy-builder/ExpiryPicker";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -42,7 +44,7 @@ import {
   type ChartLegInput,
 } from "@/components/strategy-builder/StrategyChartTab";
 import { SaveStrategyDialog } from "@/components/strategy-builder/SaveStrategyDialog";
-import { StrategyTemplatePicker } from "@/components/strategy-builder/StrategyTemplatePicker";
+import { TemplateGrid } from "@/components/strategy-builder/TemplateGrid";
 import { UnderlyingPicker } from "@/components/strategy-builder/UnderlyingPicker";
 import {
   BasketOrderDialog,
@@ -55,7 +57,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useTradingMode } from "@/contexts/TradingModeContext";
 import { useChainContext } from "@/hooks/useChainContext";
 import { useStrategySnapshot } from "@/hooks/useStrategySnapshot";
-import { resolveOffset, type StrategyTemplate } from "@/lib/strategyTemplates";
+import { resolveStrikeOffset, type StrategyTemplate } from "@/lib/strategyTemplates";
 import { cn } from "@/lib/utils";
 import type { FnoExchange } from "@/types/optionchain";
 import type {
@@ -172,10 +174,26 @@ export default function StrategyBuilder() {
   const [strategyNotes, setStrategyNotes] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
   const [basketOpen, setBasketOpen] = useState(false);
-  const [templateValue] = useState("");
   const [simulation, setSimulation] = useState<SimulationOutput | null>(null);
 
   const expiryApi = useMemo(() => convertExpiryForApi(expiry), [expiry]);
+
+  // ── Expiries list — needed so calendar / diagonal templates can resolve
+  // ``expiryOffset`` (0 = same expiry, 1 = next further-out expiry, …)
+  // against the broker's expiry chain. The query key matches the one inside
+  // ExpiryPicker, so react-query dedupes — only one network call. ────────
+  const expiriesQuery = useQuery({
+    queryKey: ["expiries", underlying, exchange],
+    queryFn: () =>
+      fetchExpiries({ symbol: underlying, exchange, instrumenttype: "options" }),
+    enabled: !!underlying && !!exchange,
+    retry: 0,
+  });
+  const expiriesList = useMemo(
+    () =>
+      expiriesQuery.data?.status === "success" ? expiriesQuery.data.data : [],
+    [expiriesQuery.data],
+  );
 
   // ── Chain context (ATM, strike grid, lot_size, per-strike LTPs) ──────
   const chain = useChainContext({ underlying, exchange, expiryApi });
@@ -463,27 +481,56 @@ export default function StrategyBuilder() {
       }
       const lotSize = lotSizeForUnderlying;
       const ctx = chain.context;
+      // Resolve template's expiryOffset (used by calendar/diagonal templates)
+      // against the broker's expiry list. Index 0 = the user's picked expiry;
+      // +1 = next further-out expiry; −1 would be a nearer one (rare). Falls
+      // back to the picked expiry when the offset would walk off the list,
+      // which we surface to the user via a toast below.
+      const baseExpiryIdx = expiriesList.indexOf(expiry);
+      let expiryFallbackUsed = false;
+      const resolveLegExpiryApi = (offset: number | undefined): string => {
+        const off = offset ?? 0;
+        if (off === 0 || baseExpiryIdx < 0) return expiryApi;
+        const targetIdx = baseExpiryIdx + off;
+        const display = expiriesList[targetIdx];
+        if (!display) {
+          expiryFallbackUsed = true;
+          return expiryApi;
+        }
+        return convertExpiryForApi(display);
+      };
+
       const newLegs: BuilderLeg[] = template.legs.map((tl) => {
         let strike = Number.NaN;
         let entryPrice = 0;
         let symbol = "";
+        const legExpiryApi = resolveLegExpiryApi(tl.expiryOffset);
         if (ctx) {
-          const resolved = resolveOffset(
-            tl.offset,
+          // Math invariant: strikeOffset is signed (positive = above ATM,
+          // negative = below ATM), so the same resolver works for both CE
+          // and PE. The option-type only affects which LTP map we read
+          // for the entry-price default.
+          const resolved = resolveStrikeOffset(
+            tl.strikeOffset,
             ctx.atm,
             ctx.strikes,
-            tl.option_type,
           );
           if (resolved !== null) {
             strike = resolved;
-            const ltp =
-              tl.option_type === "CE"
-                ? ctx.ceLtpByStrike.get(resolved)
-                : ctx.peLtpByStrike.get(resolved);
-            if (ltp && ltp > 0) entryPrice = Number(ltp.toFixed(2));
+            // Entry-price default only valid when the leg's expiry matches
+            // the chain context's expiry. For far-leg calendar legs the
+            // chain doesn't know the far LTP — leave entry_price at 0 and
+            // let the user fill it from the snapshot.
+            if (legExpiryApi === expiryApi) {
+              const ltp =
+                tl.option_type === "CE"
+                  ? ctx.ceLtpByStrike.get(resolved)
+                  : ctx.peLtpByStrike.get(resolved);
+              if (ltp && ltp > 0) entryPrice = Number(ltp.toFixed(2));
+            }
             symbol = buildOptionSymbol(
               underlying,
-              expiryApi,
+              legExpiryApi,
               resolved,
               tl.option_type,
             );
@@ -496,11 +543,17 @@ export default function StrategyBuilder() {
           strike,
           lots: tl.lots,
           lot_size: lotSize,
-          expiry_date: expiryApi,
+          expiry_date: legExpiryApi,
           entry_price: entryPrice,
           symbol,
         };
       });
+
+      if (expiryFallbackUsed) {
+        toast.message(
+          `'${template.name}' wanted a far-dated expiry that isn't on the chain — those legs fell back to the picked expiry. Adjust manually if needed.`,
+        );
+      }
       setLegs(newLegs);
       setStrategyName((prev) => prev || template.name);
 
@@ -513,7 +566,7 @@ export default function StrategyBuilder() {
         toast.success(`Applied '${template.name}' (${newLegs.length} legs).`);
       }
     },
-    [expiryApi, lotSizeForUnderlying, chain.context, underlying],
+    [expiryApi, expiry, expiriesList, lotSizeForUnderlying, chain.context, underlying],
   );
 
   // ── Refresh button — manual refetch on top of the auto-debounce ─────
@@ -568,10 +621,6 @@ export default function StrategyBuilder() {
             exchange={exchange}
             expiry={expiry}
             onExpiryChange={setExpiry}
-          />
-          <StrategyTemplatePicker
-            value={templateValue}
-            onApply={handleApplyTemplate}
           />
           <Button
             variant="outline"
@@ -628,6 +677,18 @@ export default function StrategyBuilder() {
           </>
         )}
       </div>
+
+      {/* ── Template gallery ─────────────────────────────────────────── */}
+      <Card>
+        <CardContent className="p-3 sm:p-4">
+          <TemplateGrid onPick={handleApplyTemplate} disabled={!expiryApi} />
+          {!expiryApi && (
+            <p className="mt-3 text-[11px] text-muted-foreground">
+              Pick an expiry above to enable template loading.
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       {/* ── Tabs ──────────────────────────────────────────────────────── */}
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as string)}>
