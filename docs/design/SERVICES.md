@@ -2326,7 +2326,63 @@ Historical combined-premium time series for an arbitrary leg list — generalise
 
 `entry_premium` is null when any leg lacks `entry_price`. In that case `combined_series[*].pnl` is also absent — the chart falls back to the value series.
 
+**openalgo-parity columns (April 2026):** every candle additionally carries `net_premium` and `combined_premium` (per-share), and the top-level response carries `tag` (`"credit"` / `"debit"` / `"flat"`), `entry_net_premium`, `entry_abs_premium`. These mirror openalgo's signed-per-share convention (SELL=+1) alongside openbull's signed-rupee `value` (BUY=+1). The two views are mathematically equivalent — see the worked example in the service docstring. The Strategy Chart UI uses `value`/`pnl` for the chart and reads `tag` for the credit/debit badge.
+
 **Returns:** `(success, response_data, http_status_code)`. The 200 path is wrapped in a `data` key (matches the OpenAlgo straddle-chart shape); error responses are flat `{status, message}`.
+
+---
+
+### MultiStrikeOI
+
+Per-leg historical Open Interest series for the Strategy Builder's "Multi-Strike OI" tab. Mirrors `strategy_chart_service` but extracts the broker-reported `oi` field instead of `close`, and doesn't sum across legs (each leg is its own line on the chart).
+
+**Function:** `get_multi_strike_oi_data(legs, underlying, exchange, interval, auth_token, broker, config=None, options_exchange=None, days=5, include_underlying=True)`
+
+**Location:** `backend/services/multi_strike_oi_service.py`
+
+**Endpoint:** `POST /web/strategybuilder/multi-strike-oi`
+
+**Request body:** same shape as `StrategyChart`, plus optional per-leg `strike` / `option_type` / `expiry_date` for legend labels.
+
+**How it works:**
+
+1. Validate leg shape; reject empties.
+2. Calendar window: `today − (days × 2 + 2)` (same as strategy chart).
+3. Fetch underlying history (optional overlay). `underlying_available=false` on broker failure — leg-only chart still renders.
+4. Per-leg history fan-out, **deduped by `(symbol, exchange)`** — two template legs at the same strike+expiry+option_type share one candle stream.
+5. Build a `{ts -> oi}` map per leg via `_candle_oi_map()`. Zero OI rows are *kept* (legitimate at start-of-day); only candles with missing `oi` field are dropped.
+6. Each leg's series is sorted by timestamp and tagged with `has_oi` (true when any candle's OI > 0). The frontend skips drawing flat-zero legs.
+7. Trim to the last `days` distinct trading dates, propagating the cutoff to underlying series too.
+8. Fetch current underlying LTP for the header card.
+
+**Example response shape:**
+
+```json
+{
+  "status": "success",
+  "data": {
+    "underlying": "NIFTY",
+    "underlying_ltp": 24177.65,
+    "exchange": "NSE_INDEX",
+    "interval": "5m",
+    "days": 5,
+    "underlying_available": true,
+    "underlying_series": [{"time": 1714330000, "value": 24100.0}, ...],
+    "legs": [
+      {
+        "index": 0, "symbol": "NIFTY05MAY2624000CE", "exchange": "NFO",
+        "action": "SELL", "strike": 24000, "option_type": "CE", "expiry": "05MAY26",
+        "has_oi": true,
+        "series": [{"time": 1714330000, "value": 633000}, ...]
+      }
+    ]
+  }
+}
+```
+
+**Math:** none — OI is broker-reported, not computed. The history-service contract expects every broker plugin's `get_history` to return `oi` per candle (zero when unsupported, never absent). See [broker-integration.md](./broker-integration.md#5-market-data-apidatapy) for the contract.
+
+**Returns:** `(success, response_data, http_status_code)`.
 
 ---
 

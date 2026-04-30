@@ -220,7 +220,7 @@ module = importlib.import_module(f"backend.broker.{broker_name}.api.order_api")
 res, data, order_id = module.place_order_api(order_data, auth_token)
 ```
 
-Swap `broker_name` from `"upstox"` to `"zerodha"` and the same service hits a different broker API with zero code changes.
+Swap `broker_name` between `"upstox"`, `"zerodha"`, `"angel"`, `"dhan"`, or `"fyers"` and the same service hits a different broker API with zero code changes. See [broker-integration.md](./broker-integration.md) for the full broker-plugin spec.
 
 ### 2. Abstract Base Class (Streaming Adapters)
 
@@ -236,7 +236,7 @@ class BaseBrokerAdapter(ABC):
     def disconnect()                 # Abstract: broker-specific
 ```
 
-`UpstoxAdapter` decodes protobuf. `ZerodhaAdapter` parses binary structs. Both publish the same normalized JSON.
+Five concrete adapters ship today: `UpstoxAdapter` (protobuf v3), `ZerodhaAdapter` (KiteTicker binary), `AngelAdapter` (SmartStream binary), `DhanAdapter` (Dhan binary), `FyersAdapter` (HSM binary). All publish the same normalised JSON tick payload to the ZMQ bus regardless of the upstream protocol.
 
 ### 3. Pub/Sub (ZeroMQ Market Data Bus)
 
@@ -556,32 +556,49 @@ The Option Chain page also opens its own WS subscription to the proxy (`useOptio
 
 ### Strategy Builder + Portfolio
 
-Two paired pages that together implement the multi-leg-strategy lifecycle: design → save → live monitor → close.
+Two paired pages implementing the multi-leg-strategy lifecycle: design → save → live monitor → close. The UI was iteratively brought to parity with openalgo's reference design and now exceeds it on several axes (T+0 sim correctness, modal-driven leg edits, lightweight-charts adoption).
 
-**Strategy Builder (`/tools/strategybuilder`)** is a five-tab page (Legs / Greeks / Payoff / Chart / P&L) that owns the entire builder state in one component. Components are presentation-only with `value + onChange` props so the URL `?load=<id>` round-trip stays trivial.
+**Strategy Builder (`/tools/strategybuilder`)** is a six-tab page that owns the entire builder state in one component. Children are presentation-only with `value + onChange` props so the URL `?load=<id>` round-trip stays trivial.
 
-- **Legs tab** — manual leg edit + 14-template preset registry (Long/Short Straddle, Strangle, Iron Condor, Iron Butterfly, Bull/Bear spreads, Calendar/Diagonal, single legs). Templates use *relative* offsets (`ATM`, `OTM2`, `ITM3`) which the page resolves to absolute strikes via `useChainContext` (chain query → ATM + strike grid + per-strike LTPs). Entry prices auto-prefill from the live LTP at the chosen strike.
-- **Greeks tab** — per-leg row plus a sticky aggregate row, fed by the snapshot endpoint. Shows the same `totals` the backend returns, so cross-tab numbers match.
-- **Payoff tab** — Plotly Scattergl with three computed curves (At-Expiry intrinsic, T+0 mark-to-market via local Black-76, optional what-if simulated point) plus profit/loss zone shading, ±1σ/±2σ bands sized off the shortest-DTE leg, breakeven verticals, and a "POP N.N%" corner badge (lognormal CDF over profit regions). "Unlimited loss/profit" annotations driven by `asymptoticSlopes()`.
-- **Chart tab** — historical combined-premium with optional underlying overlay on a secondary y-axis; per-leg dotted lines toggle on; PnL/Premium view switch; IST tick formatting via `+05:30` unix shift.
-- **P&L tab** — tab-scoped `useMarketData("Quote")` subscription. Per-leg row with flash-on-tick `LivePriceCell` for live LTP and signed P&L. Stale-tick warning when no symbol has updated in 30s+.
+The page header carries:
 
-The builder also hosts a **What-if simulator** (Spot ±10% / IV ±10pp / Days forward) that drives the chart's simulation marker via local-only Black-76 — no broker round-trips per slider tick. Saved strategies hit `POST /web/strategies`; basket execute fires `POST /api/v1/basketorder` with absolute symbols (NOT `optionsmultiorder`, which would re-resolve from offset+ATM at execute time and risk a different strike).
+- `UnderlyingPicker` + `ExpiryPicker` — exchange / underlying / expiry selection
+- `LoadStrategyPicker` — in-page dropdown listing the user's active saved strategies for the current trading mode; the cache invalidates on save so a fresh save lands one click away
+- `Save` / `Execute Basket` / `Clear` buttons (also mirrored in `PositionsPanel` footer for the Payoff tab)
 
-**Strategy Portfolio (`/tools/strategyportfolio`)** lists every saved strategy for the current user with live aggregate P&L per card. Architecture choices:
+Below the header sits `SymbolHeader` — a horizontal chip strip with `Spot`, `Futures` (synthetic via put-call parity at ATM, no extra broker call), `ATM IV` (averaged from the snapshot's ATM-strike legs), `DTE` (parsed off the picked expiry with 15:30-IST roll), `Lot Size`. A live-status pill on the right pulses green when chain + snapshot are both fresh.
 
-- **One shared WebSocket** across the page — collects unique `(symbol, exchange)` tuples from every visible *active* strategy's open legs and passes them to a single `useMarketData` call. A symbol used in three strategies streams once, not three times. The tick map is projected to a `Map<key, ltp>` and passed down to every `StrategyCard` so cards stay presentation-only.
-- **Filters** by mode (live/sandbox/all), status (active/closed/expired/all), and underlying-substring; defaults follow the global trading-mode toggle so a sandbox session naturally surfaces sandbox strategies.
+Then a card hosting the **30-template Strategy Library** — `TemplateGrid` with mini SVG payoff icons, direction tabs (Bullish / Bearish / Neutral) with live counts, and a search box. Clicking a card opens **`TemplateConfigDialog`**: a preview modal that shows resolved legs (chain-sourced strike dropdowns, editable lots / entry, net debit/credit summary). The user tweaks and confirms → legs land in the builder. Calendar / diagonal templates correctly resolve `expiryOffset` against the broker's expiry list (a long-standing bug fixed in this iteration).
+
+The six tabs:
+
+- **Legs** — `AddPositionCard` (manual leg builder with explicit Segment / Expiry / Strike / Type / Side / Lot Qty + dedicated ADD BUY / ADD SELL buttons) on top, then a list of `LegRow`s. Each leg has a chain-sourced strike dropdown with a moneyness chip (ATM / ITMn / OTMn) and an entry-price field that auto-fills from chain LTP on strike or option-type change. Pencil icon opens **`EditLegDialog`** — full per-leg modal with Action pills, Type pills, Expiry select, Strike dropdown with moneyness, Lot Qty stepper, Entry Price (auto-LTP), resolved-symbol preview, and Save / Delete actions.
+- **Greeks** — per-leg row plus a sticky aggregate row, fed by the snapshot endpoint. **Plain-English labels** (Delta / Gamma / Theta / Vega — never the Greek glyphs; openbull is a retail product).
+- **Payoff** — two-pane layout. Left: `PositionsPanel` with per-leg checkbox toggle (drop a leg from the curve without deleting it), 2-column stats grid (Max Profit / Max Loss / POP / RR Ratio / Total P&L / Net Credit / Est. Premium / **Margin Req.** sourced live from `/api/v1/margin`), breakevens row with chip badges, and Save + Execute Basket buttons in the footer. Right: `PayoffChart` with At-Expiry + T+0 curves, ±1σ/±2σ bands sized off the shortest-DTE leg, breakeven verticals, "Unlimited" annotations driven by `asymptoticSlopes()`, and a "POP N.N%" corner badge. The **`WhatIfPanel`** (Spot ±10% / IV ±10pp / Days forward) sits below — its `ivShiftPct` and `daysForward` flow into the marker dot AND the dashed T+0 curve, so dragging the IV slider re-prices every leg in real time, not just the marker.
+- **Strategy Chart** — historical combined-premium time series on `lightweight-charts` (migrated from Plotly for the perf win on dense intraday series). P&L vs Premium toggle, per-leg dotted lines, optional underlying overlay on the right axis, IST tick formatting via `+05:30` unix shift, openalgo-parity columns surfaced as badges (`Net credit · ₹X/sh`).
+- **Multi-Strike OI** — per-leg historical Open Interest series on `lightweight-charts`, underlying close on the second axis. New endpoint: `POST /web/strategybuilder/multi-strike-oi`. `has_oi=false` legs (broker doesn't ship historical OI) are badged and skipped.
+- **P&L** — tab-scoped `useMarketData("Quote")` subscription. Per-leg row with flash-on-tick `LivePriceCell` for live LTP and signed P&L. Stale-tick warning when no symbol has updated in 30s+.
+
+Saved strategies hit `POST /web/strategies`; basket execute fires `POST /api/v1/basketorder` with absolute symbols (NOT `optionsmultiorder`, which would re-resolve from offset+ATM at execute time and risk a different strike). The `BasketOrderDialog` carries per-leg controls — Use checkbox, editable Lots, editable tick-snapped Price (disabled for MARKET / SL-M), inline per-row result indicators (✓ orderid on success, × message on error).
+
+**Strategy Portfolio (`/tools/strategyportfolio`)** lists every saved strategy with live aggregate P&L per card. 2-column grid on lg+ viewports, segmented pill filter for status, polished empty state.
+
+- **One shared WebSocket** across the page — collects unique `(symbol, exchange)` tuples from every visible *active* strategy's open legs and passes them to a single `useMarketData` call. A symbol used in three strategies streams once, not three times.
+- **Filters** by mode (live/sandbox/all), status (active/closed/expired/all), and underlying-substring; defaults follow the global trading-mode toggle.
 - **Active strategies** show unrealized P&L (LTP − entry); **closed/expired** show realized P&L (exit_price − entry, frozen).
-- **Optimistic UI** updates on close + delete via `queryClient.setQueriesData` so rows re-render instantly while a background invalidate reconciles with the server.
-- **Close dialog** reuses the same shared `liveLtpMap` for exit-price defaults — no extra fetches for the modal.
+- **Optimistic UI** on close + delete via `queryClient.setQueriesData` so rows re-render instantly while a background invalidate reconciles.
+- **Close dialog** reuses the shared `liveLtpMap` for exit-price defaults.
 
-**Persistence model** lives in `backend/models/strategies.py` — one `strategies` table with `user_id` FK, JSONB `legs` column, and a composite `(user_id, mode, status)` index. JSON keeps the schema loose so future leg metadata (broker order ids on basket-execute, custom tags, manual exit prices) can land without per-feature migrations. Alembic revision `20260429_strategies` chains from `20260427_sbx_margin`.
+**Persistence model** lives in `backend/models/strategies.py` — one `strategies` table with `user_id` FK, JSONB `legs` column, composite `(user_id, mode, status)` index. JSON keeps the schema loose so future leg metadata can land without per-feature migrations.
 
-**Math separation** — Black-76 is implemented twice:
+**Math separation** — Black-76 is implemented twice and stays in lockstep:
 - `backend/services/option_greeks_service.py` (pure-Python `math.erf`) — source of truth for snapshot pricing.
-- `frontend/src/lib/black76.ts` — frontend mirror used by the what-if sliders for instant feedback. Same model, same units (theta/day, vega/1%, rho/1%) so simulator and snapshot Greeks agree at zero-shift.
+- `frontend/src/lib/black76.ts` — frontend mirror used by the What-if sliders for instant feedback. Same model, same units (theta/day, vega/1%, rho/1%) so simulator and snapshot Greeks agree at zero-shift.
 
-`frontend/src/lib/probabilityOfProfit.ts` runs lognormal CDF integration over profit regions identified on the at-expiry curve. Verified offline: long straddle POP matches expected ±premium breakevens; iron condor POP matches expected `strike ± net_credit` breakevens.
+`frontend/src/lib/probabilityOfProfit.ts` runs lognormal CDF integration over profit regions identified on the at-expiry curve.
 
-A small `ErrorBoundary` (`frontend/src/components/ErrorBoundary.tsx`) wraps the chart-heavy panels so a Plotly render error doesn't unmount the whole page — local fallback with a Retry button instead.
+**Strategy Chart formula parity** — `backend/services/strategy_chart_service.py` emits both openbull's signed-rupee `value` (P&L scale, BUY=+1) and openalgo's per-share `net_premium` / `combined_premium` (SELL=+1, with absolute-value alongside). Conventions are equivalent given the sign-flip; the docstring carries a worked example. The Strategy Chart UI uses the openbull column for P&L view and the openalgo `tag` (`credit`/`debit`/`flat`) for the badge.
+
+**Multi-Strike OI service** — `backend/services/multi_strike_oi_service.py` mirrors the `strategy_chart_service` pattern but extracts the broker-reported `oi` field instead of `close`. Per-leg history is fetched in parallel (deduped by symbol+exchange), trading window cap matches the chart endpoint. `has_oi` flag set when any candle has nonzero OI.
+
+`ErrorBoundary` wraps each chart panel so a render error doesn't unmount the whole page — local Retry button instead.

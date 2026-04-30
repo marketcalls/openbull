@@ -6,14 +6,27 @@ describes the wire protocol implemented by `backend/websocket_proxy/server.py`.
 ## Overview
 
 OpenBull exposes a broker-agnostic WebSocket endpoint streaming real-time
-market data (LTP, Quote, full Depth) from the configured broker (Upstox or
-Zerodha). A per-broker adapter connects upstream, normalizes ticks, and
-publishes them on an internal ZeroMQ PUB socket; the WS proxy fans those
-messages out to authenticated clients per their subscriptions.
+market data (LTP, Quote, full Depth) from the user's configured broker. A
+per-broker streaming adapter connects upstream over the broker's native
+binary / protobuf protocol, normalises ticks into a common dict shape, and
+publishes them on an internal ZeroMQ PUB socket; the WS proxy SUBs to that
+bus and fans messages out to authenticated clients per their subscriptions.
 
-The protocol is JSON over WebSocket, single-user (one broker session at a
-time), and stateless on reconnect — clients must re-authenticate and
-re-subscribe.
+Five broker adapters ship today (`backend/broker/{name}/streaming/`):
+
+| Broker | Wire protocol |
+|--------|---------------|
+| Upstox | Protobuf v3 over WSS |
+| Zerodha | KiteTicker binary frames |
+| Angel One | SmartStream binary frames |
+| Dhan | Dhan binary frames |
+| Fyers | HSM binary frames (fyers v3 streaming) |
+
+The proxy protocol itself is JSON over WebSocket, single-user (one broker
+session per OpenBull user), and stateless on reconnect — clients must
+re-authenticate and re-subscribe after a disconnect. The proxy mode
+hierarchy (DEPTH ⊇ QUOTE ⊇ LTP) lets a client get all three message
+types from a single subscription.
 
 ## WebSocket URL
 
@@ -50,8 +63,8 @@ Success response:
 {"type": "auth", "status": "success", "broker": "upstox"}
 ```
 
-`broker` is the name of the broker the user is logged into, currently
-`"upstox"` or `"zerodha"`.
+`broker` is the name of the broker the user is logged into. One of:
+`"upstox"`, `"zerodha"`, `"angel"`, `"dhan"`, `"fyers"`.
 
 Error responses:
 
