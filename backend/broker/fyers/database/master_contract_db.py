@@ -255,7 +255,17 @@ def _process_fo_csv(path: Path, br_exchange: str) -> pd.DataFrame:
     df = pd.read_csv(path, names=_CSV_HEADERS, dtype=_CSV_DTYPES)
 
     df["token"] = df["Fytoken"]
-    df["name"] = df["Symbol Details"]
+    # Fyers' "Symbol Details" on F&O rows is the full per-contract
+    # description (e.g. "NIFTY 02 Jun 26 18650 CE"). Using it as `name`
+    # makes the underlyings picker show every option contract instead of
+    # the underlying — see screenshot in the openbull issue tracker.
+    # Fall back to the bare "Underlying symbol" so the picker groups all
+    # NIFTY options under a single "NIFTY" row, matching the Zerodha /
+    # Angel / Upstox / Dhan masters where `name` already holds the
+    # underlying ticker. Cash-market rows (_process_nse_cm /
+    # _process_bse_cm) keep "Symbol Details" because there it IS the
+    # company / index name ("RELIANCE INDUSTRIES LIMITED", "NIFTY 50").
+    df["name"] = df["Underlying symbol"]
 
     # Convert epoch-seconds expiry to DD-MMM-YY uppercase
     df["expiry"] = pd.to_datetime(
@@ -298,7 +308,12 @@ def _process_json_master(path: Path, br_exchange: str) -> pd.DataFrame:
     df = pd.DataFrame(list(data.values()))
 
     df["token"] = df["fyToken"]
-    df["name"] = df.get("symbolDetails", df.get("symDetails", ""))
+    # Same bug as the F&O CSV path above: the JSON's symDetails is the
+    # per-contract description ("USDINR 27 May 26 84.5"), not the
+    # underlying. Extract the first whitespace-separated token, which
+    # is consistently the underlying ticker in Fyers' format.
+    sym_details = df.get("symbolDetails", df.get("symDetails", pd.Series(dtype=str)))
+    df["name"] = sym_details.fillna("").astype(str).str.split().str[0]
 
     df["expiry"] = pd.to_datetime(
         pd.to_numeric(df["expiryDate"], errors="coerce"), unit="s",
