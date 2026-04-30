@@ -245,3 +245,62 @@ export interface ChartResponse {
   status: "success";
   data: ChartResponseData;
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Multi-strike OI endpoint (POST /web/strategybuilder/multi-strike-oi)
+// ────────────────────────────────────────────────────────────────────────
+
+export interface MultiStrikeOILegInput {
+  symbol: string;
+  action: Action;
+  exchange?: string;
+  strike?: number;
+  option_type?: OptionType;
+  expiry_date?: string;
+}
+
+export interface MultiStrikeOIRequest {
+  underlying: string;
+  exchange?: string;
+  options_exchange?: string;
+  interval: string;
+  days?: number;
+  include_underlying?: boolean;
+  legs: MultiStrikeOILegInput[];
+}
+
+/** {time: unix-seconds, value: OI count or underlying close}. */
+export interface MultiStrikeOIPoint {
+  time: number;
+  value: number;
+}
+
+export interface MultiStrikeOILeg {
+  index: number;
+  symbol: string;
+  exchange: string;
+  action: Action;
+  strike?: number;
+  option_type?: OptionType;
+  expiry?: string;
+  /** False when the broker returned an all-zero OI series. */
+  has_oi: boolean;
+  series: MultiStrikeOIPoint[];
+  error?: string;
+}
+
+export interface MultiStrikeOIData {
+  underlying: string;
+  underlying_ltp: number;
+  exchange: string;
+  interval: string;
+  days: number;
+  underlying_available: boolean;
+  underlying_series: MultiStrikeOIPoint[];
+  legs: MultiStrikeOILeg[];
+}
+
+export interface MultiStrikeOIResponse {
+  status: "success";
+  data: MultiStrikeOIData;
+}

@@ -17,6 +17,9 @@ import type {
   ChartRequest,
   ChartResponse,
   ChartResponseData,
+  MultiStrikeOIData,
+  MultiStrikeOIRequest,
+  MultiStrikeOIResponse,
   SnapshotRequest,
   SnapshotResponse,
 } from "@/types/strategy";
@@ -36,6 +39,16 @@ export async function getStrategyChart(
 ): Promise<ChartResponseData> {
   const response = await api.post<ChartResponse>(
     "/web/strategybuilder/chart",
+    payload,
+  );
+  return response.data.data;
+}
+
+export async function getMultiStrikeOI(
+  payload: MultiStrikeOIRequest,
+): Promise<MultiStrikeOIData> {
+  const response = await api.post<MultiStrikeOIResponse>(
+    "/web/strategybuilder/multi-strike-oi",
     payload,
   );
   return response.data.data;

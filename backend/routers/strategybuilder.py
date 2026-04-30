@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.dependencies import BrokerContext, get_broker_context
+from backend.services.multi_strike_oi_service import get_multi_strike_oi_data
 from backend.services.strategy_builder_service import get_strategy_snapshot
 from backend.services.strategy_chart_service import get_strategy_chart_data
 
@@ -149,5 +150,72 @@ async def strategy_chart(
         raise HTTPException(
             status_code=status_code,
             detail=response_data.get("message", "Chart fetch failed"),
+        )
+    return response_data
+
+
+class MultiStrikeOILeg(BaseModel):
+    """Leg shape for the multi-strike OI endpoint. Strike / option_type /
+    expiry_date are pass-through metadata used purely for legend labels —
+    the OI data itself comes from broker history keyed on ``symbol``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str = Field(..., min_length=1)
+    action: Literal["BUY", "SELL"]
+    exchange: Optional[str] = None
+    strike: Optional[float] = None
+    option_type: Optional[Literal["CE", "PE"]] = None
+    expiry_date: Optional[str] = None
+
+
+class MultiStrikeOIRequest(BaseModel):
+    underlying: str = Field(..., min_length=1)
+    exchange: Optional[str] = None
+    options_exchange: Optional[str] = "NFO"
+    interval: str = Field(..., min_length=1)
+    days: int = Field(5, ge=1, le=60)
+    include_underlying: bool = True
+    legs: List[MultiStrikeOILeg] = Field(..., min_length=1)
+
+
+@router.post("/multi-strike-oi")
+async def multi_strike_oi(
+    payload: MultiStrikeOIRequest,
+    ctx: BrokerContext = Depends(get_broker_context),
+):
+    """Per-leg historical OI series + underlying close for the Strategy
+    Builder's Multi-Strike OI tab.
+
+    Each option leg is fetched separately (deduped by symbol+exchange) and
+    returned as its own series so the chart can overlay them with
+    independent colours and toggle visibility per leg without re-fetching.
+    """
+    legs_payload = [leg.model_dump(mode="json") for leg in payload.legs]
+
+    # Service expects ``lots``/``lot_size`` for parity with the chart endpoint
+    # but we don't actually use them for OI display — fill defaults so the
+    # validator inside the service doesn't reject the call.
+    for leg in legs_payload:
+        leg.setdefault("lots", 1)
+        leg.setdefault("lot_size", 1)
+
+    success, response_data, status_code = get_multi_strike_oi_data(
+        legs=legs_payload,
+        underlying=payload.underlying,
+        exchange=payload.exchange,
+        options_exchange=payload.options_exchange,
+        interval=payload.interval,
+        days=payload.days,
+        include_underlying=payload.include_underlying,
+        auth_token=ctx.auth_token,
+        broker=ctx.broker_name,
+        config=ctx.broker_config,
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status_code,
+            detail=response_data.get("message", "Multi-strike OI fetch failed"),
         )
     return response_data

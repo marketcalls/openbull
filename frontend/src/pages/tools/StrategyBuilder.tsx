@@ -34,6 +34,10 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { GreeksPanel } from "@/components/strategy-builder/GreeksPanel";
 import { LegRow, type BuilderLeg } from "@/components/strategy-builder/LegRow";
 import {
+  MultiStrikeOITab,
+  type OILegInput,
+} from "@/components/strategy-builder/MultiStrikeOITab";
+import {
   PayoffChart,
   type SimulationMarker,
 } from "@/components/strategy-builder/PayoffChart";
@@ -297,6 +301,22 @@ export default function StrategyBuilder() {
           entryPrice: l.entry_price,
         })),
     [legs, exchange],
+  );
+
+  // Adapter for the Multi-Strike OI tab. Same filtering as snapshotLegs but
+  // also exposes strike/option_type/expiry for legend labels.
+  const oiLegs = useMemo<OILegInput[]>(
+    () =>
+      legs
+        .filter((l) => l.symbol)
+        .map((l) => ({
+          symbol: l.symbol,
+          action: l.action,
+          strike: l.strike,
+          optionType: l.option_type,
+          expiryDate: l.expiry_date,
+        })),
+    [legs],
   );
 
   // Adapter for the P&L tab — maps builder legs to the streaming-table shape.
@@ -697,6 +717,7 @@ export default function StrategyBuilder() {
           <TabsTrigger value="greeks">Greeks</TabsTrigger>
           <TabsTrigger value="payoff">Payoff</TabsTrigger>
           <TabsTrigger value="chart">Chart</TabsTrigger>
+          <TabsTrigger value="oi">Multi-Strike OI</TabsTrigger>
           <TabsTrigger value="pnl">P&amp;L</TabsTrigger>
         </TabsList>
 
@@ -843,6 +864,22 @@ export default function StrategyBuilder() {
                   optionsExchange={exchange}
                   legs={chartLegs}
                   enabled={activeTab === "chart"}
+                />
+              </ErrorBoundary>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Multi-Strike OI tab — per-leg OI history + underlying overlay */}
+        <TabsContent value="oi">
+          <Card>
+            <CardContent className="p-3 sm:p-4">
+              <ErrorBoundary label="Multi-strike OI">
+                <MultiStrikeOITab
+                  underlying={underlying}
+                  optionsExchange={exchange}
+                  legs={oiLegs}
+                  enabled={activeTab === "oi"}
                 />
               </ErrorBoundary>
             </CardContent>
