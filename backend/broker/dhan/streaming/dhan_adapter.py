@@ -55,6 +55,11 @@ _OPENBULL_TO_DHAN_MODE = {
 RECONNECT_MAX_TRIES = 50
 RECONNECT_MAX_DELAY = 60
 MAX_INSTRUMENTS_PER_REQUEST = 100
+# Coalesce subscribe() calls within this window into one upstream WS message
+# per (segment, mode) group. Matches openalgo's pattern: an option-chain
+# mount that fires N component-level subscribes ends up as ~2 messages
+# instead of N. Trade-off: subscribe takes up to BATCH_DELAY to surface ticks.
+BATCH_DELAY_SECONDS = 0.5
 
 
 def _strip_token_suffix(token: str) -> str:
@@ -74,6 +79,12 @@ class DhanAdapter(BaseBrokerAdapter):
         # key: (exchange_segment_str, security_id_str) -> (mode_int, symbol, exchange)
         self._subs: dict[tuple[str, str], tuple[int, str, str]] = {}
         self._subs_lock = threading.Lock()
+        # Batched subscribe queue: items appended by subscribe(), flushed by
+        # a single timer thread BATCH_DELAY_SECONDS later. Each entry is
+        # {"instrument": {...}, "dhan_mode": "TICKER"|"QUOTE"|"FULL"}.
+        self._sub_queue: list[dict] = []
+        self._batch_timer: threading.Timer | None = None
+        self._batch_lock = threading.Lock()
 
     def _extract_client_id(self) -> str | None:
         cfg = self.broker_config or {}
@@ -127,9 +138,7 @@ class DhanAdapter(BaseBrokerAdapter):
             logger.error("Invalid Dhan mode %s; expected one of %s", mode, list(_OPENBULL_TO_DHAN_MODE))
             return
 
-        # Group instruments by (segment, mode) for batched subscribe
-        groups: dict[str, list[dict]] = defaultdict(list)
-
+        new_items: list[dict] = []
         with self._subs_lock:
             for item in symbols:
                 sym = item.get("symbol")
@@ -151,38 +160,98 @@ class DhanAdapter(BaseBrokerAdapter):
                 # Upgrade subscription mode if requested mode is higher
                 new_mode = max(current, mode)
                 self._subs[key] = (new_mode, sym, exch)
-                groups[_OPENBULL_TO_DHAN_MODE[mode]].append(
-                    {"ExchangeSegment": dhan_segment, "SecurityId": security_id}
-                )
+                new_items.append({
+                    "instrument": {"ExchangeSegment": dhan_segment, "SecurityId": security_id},
+                    "dhan_mode": _OPENBULL_TO_DHAN_MODE[mode],
+                })
 
-        if not self._connected:
-            return  # _on_open will resubscribe everything
+        if not self._connected or not new_items:
+            return  # _on_open will resubscribe from self._subs
+
+        # Enqueue and arm the batch timer. If the queue was empty before this
+        # call, start a new timer; otherwise piggyback on the in-flight one
+        # so two near-simultaneous subscribes flush together.
+        with self._batch_lock:
+            was_empty = not self._sub_queue
+            self._sub_queue.extend(new_items)
+            if was_empty:
+                self._start_batch_timer()
+
+    def _start_batch_timer(self) -> None:
+        """Arm a one-shot timer to drain the subscribe queue."""
+        # Caller must already hold self._batch_lock.
+        if self._batch_timer is not None:
+            self._batch_timer.cancel()
+        self._batch_timer = threading.Timer(BATCH_DELAY_SECONDS, self._flush_sub_queue)
+        self._batch_timer.daemon = True
+        self._batch_timer.start()
+
+    def _flush_sub_queue(self) -> None:
+        """Drain the queue, group by dhan_mode, send one WS message per group."""
+        with self._batch_lock:
+            queued = self._sub_queue
+            self._sub_queue = []
+            self._batch_timer = None
+
+        if not queued or not self._connected:
+            return
+
+        groups: dict[str, list[dict]] = defaultdict(list)
+        for item in queued:
+            groups[item["dhan_mode"]].append(item["instrument"])
 
         for dhan_mode, instruments in groups.items():
-            self._send_subscribe(instruments, dhan_mode)
+            try:
+                logger.info(
+                    "Batch subscribing %d instruments in %s mode", len(instruments), dhan_mode
+                )
+                self._send_subscribe(instruments, dhan_mode)
+            except Exception as e:
+                logger.error("Batch subscribe failed for %s: %s", dhan_mode, e)
 
     def unsubscribe(self, symbols: list[dict], mode: int) -> None:
-        # Dhan has no real unsubscribe; we just drop local tracking so
-        # _on_data ignores any further packets for these instruments.
+        # Dhan has no real upstream unsubscribe — once a SUBSCRIBE is on the
+        # wire it sticks. Drop matching entries from the queue (in case the
+        # batch timer hasn't fired yet) and from the local subs table so
+        # _on_data ignores any further packets.
+        from backend.broker.upstox.mapping.order_data import get_token_from_cache
+
+        targets: list[tuple[str, str]] = []
+        for item in symbols:
+            sym = item.get("symbol")
+            exch = item.get("exchange")
+            if not sym or not exch:
+                continue
+            token = get_token_from_cache(sym, exch)
+            if not token:
+                continue
+            security_id = _strip_token_suffix(token)
+            dhan_segment = DhanExchangeMapper.get_dhan_exchange(exch)
+            if not dhan_segment:
+                continue
+            targets.append((dhan_segment, security_id))
+
         with self._subs_lock:
-            from backend.broker.upstox.mapping.order_data import get_token_from_cache
-            for item in symbols:
-                sym = item.get("symbol")
-                exch = item.get("exchange")
-                if not sym or not exch:
-                    continue
-                token = get_token_from_cache(sym, exch)
-                if not token:
-                    continue
-                security_id = _strip_token_suffix(token)
-                dhan_segment = DhanExchangeMapper.get_dhan_exchange(exch)
-                if not dhan_segment:
-                    continue
-                self._subs.pop((dhan_segment, security_id), None)
+            for key in targets:
+                self._subs.pop(key, None)
+
+        if targets:
+            target_set = set(targets)
+            with self._batch_lock:
+                self._sub_queue = [
+                    item for item in self._sub_queue
+                    if (item["instrument"]["ExchangeSegment"], item["instrument"]["SecurityId"])
+                    not in target_set
+                ]
 
     def disconnect(self) -> None:
         self._running = False
         self._connected = False
+        with self._batch_lock:
+            if self._batch_timer is not None:
+                self._batch_timer.cancel()
+                self._batch_timer = None
+            self._sub_queue.clear()
         if self._ws:
             try:
                 self._ws.send(json.dumps({"RequestCode": _REQUEST_CODES["DISCONNECT"]}))

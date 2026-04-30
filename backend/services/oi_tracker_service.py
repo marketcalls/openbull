@@ -98,15 +98,17 @@ def get_oi_tracker_data(
 ) -> tuple[bool, dict[str, Any], int]:
     """Build the OI Tracker payload for a (underlying, exchange, expiry).
 
-    Strategy: pull a wide option chain (45 strikes either side of ATM), then
-    aggregate totals/PCR/per-strike OI and look up the matching FUT price.
+    Strategy: pull an option chain (23 strikes each side of ATM = 47 strikes,
+    94 symbols), then aggregate totals/PCR/per-strike OI and look up the
+    matching FUT price. Sized to fit the Fyers multiquote OI bucket
+    (<=100 symbols) so OI is populated instead of returning 0 for every strike.
     """
     try:
         ok, chain_resp, status = get_option_chain(
             underlying=underlying,
             exchange=exchange,
             expiry_date=expiry_date,
-            strike_count=45,
+            strike_count=23,
             auth_token=auth_token,
             broker=broker,
             config=config,

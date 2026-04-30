@@ -36,13 +36,18 @@ SUPPORTED_INTERVALS = {
     "days": ["D"],
 }
 
-DHAN_MIN_REQUEST_INTERVAL = 1.0
+DHAN_MIN_REQUEST_INTERVAL = 1.1
 _last_api_call_time = 0.0
 _rate_limit_lock = threading.Lock()
 
 
 def _apply_rate_limit() -> None:
-    """Serialize Dhan data API calls at <= 1 req/sec to avoid error 805."""
+    """Serialize Dhan data API calls to avoid error 805.
+
+    Dhan's /v2/marketfeed/* enforces 1 req/sec on a rolling window; spacing
+    at exactly 1.0s frequently lands on the boundary and trips 805. 100ms
+    of margin keeps polls inside the allowed window with no latency cost.
+    """
     global _last_api_call_time
     sleep_time = 0.0
     with _rate_limit_lock:
