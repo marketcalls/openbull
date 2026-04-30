@@ -1,30 +1,52 @@
 """
-Fyers v3 streaming adapter.
+Fyers v3 streaming adapter — HSM (binary) protocol.
 
-Connects to Fyers' Data WebSocket, decodes ticks (delivered as JSON over the
-data socket) and publishes normalized market data to a ZeroMQ PUB socket.
+Replaces the legacy ``wss://api-t1.fyers.in/data?access_token=...`` JSON
+endpoint (deprecated by Fyers; returns 404 from Cloudflare) with the v3
+HSM data feed at ``wss://socket.fyers.in/hsm/v1-5/prod`` exposed by
+:mod:`backend.broker.fyers.streaming.fyers_hsm_websocket`.
 
-Wire protocol (Fyers Data WS v3):
-    URL: wss://api-t1.fyers.in/data?access_token={api_key}:{access_token}
-    Subscribe : {"T":"SUB_L2","SLIST":[<broker_symbols>],"SUB_T":1}
-    Unsubscribe: {"T":"SUB_L2","SLIST":[<broker_symbols>],"SUB_T":-1}
-    Mode flag: SUB_T = 1 (subscribe), -1 (unsubscribe)
+Architecture (mirrors openalgo's `broker/fyers/streaming/fyers_adapter.py`):
 
-We always subscribe in the richest available mode and let the proxy do
-per-client filtering at the topic layer (LTP / QUOTE / DEPTH).
+* :class:`FyersHSMWebSocket` owns the binary frame parsing, auth handshake,
+  reconnect with backoff, and resubscribe-on-reconnect. We hand it
+  per-message callbacks and let it run.
+* :class:`FyersTokenConverter` resolves OpenBull ``(symbol, exchange)``
+  pairs to Fyers HSM tokens (``sf|nse_cm|2885`` for the symbol feed,
+  ``dp|...`` for depth, ``if|...`` for indices) by calling
+  ``/data/symbol-token`` once per ``subscribe()`` batch.
+* This adapter joins HSM tokens back to ``EXCHANGE:SYMBOL`` *through the
+  broker symbol* (NOT positionally — Fyers' API does not preserve input
+  order; openalgo commit ``5eb7baaa`` documents the bug). Inbound ticks
+  are mapped to OpenBull's flat dict shape and published on
+  ``{exchange}_{symbol}_LTP|QUOTE|DEPTH`` ZMQ topics.
+
+Subscribe semantics:
+
+* ``MODE_LTP`` / ``MODE_QUOTE`` -> ``"SymbolUpdate"`` HSM type (sf / if
+  feeds carry ltp + ohlc + bid/ask + volume + oi).
+* ``MODE_DEPTH`` -> two parallel HSM subscriptions: one ``"SymbolUpdate"``
+  for the price/ohlc fields and one ``"DepthUpdate"`` for the 5-level
+  buy/sell ladder. Without both, depth subscribers would have no LTP.
+
+HSM has no per-symbol unsubscribe — :meth:`unsubscribe` drops local
+client-mode tracking but keeps the upstream stream live. The WS proxy's
+ZMQ filter layer (``backend/websocket_proxy/server.py``) takes care of
+not delivering ticks the client no longer wants.
 """
 
-import json
+from __future__ import annotations
+
 import logging
-import ssl
 import threading
 import time
+from collections import defaultdict
+from typing import Any
 
-import websocket
-
-from backend.broker.upstox.mapping.order_data import (
-    get_brsymbol_from_cache,
-    get_symbol_from_brsymbol_cache,
+from backend.broker.fyers.streaming.fyers_hsm_websocket import FyersHSMWebSocket
+from backend.broker.fyers.streaming.fyers_token_converter import (
+    FyersTokenConverter,
+    get_br_symbol,
 )
 from backend.websocket_proxy.base_adapter import (
     BaseBrokerAdapter,
@@ -36,316 +58,363 @@ from backend.websocket_proxy.base_adapter import (
 
 logger = logging.getLogger("fyers_stream")
 
-RECONNECT_MAX_TRIES = 50
-RECONNECT_MAX_DELAY = 60
-SUBSCRIBE_BATCH_SIZE = 100
+# How long to wait for the HSM auth ack before giving up. Slightly longer
+# than the HSM client's own 10s SSL timeout to leave room for retry.
+_CONNECT_TIMEOUT_SECONDS = 15
+
+# Exchanges where Fyers reports prices in paisa (multiply-divide by 100 on top
+# of the per-tick multiplier). Indices are quoted directly so they're excluded.
+_PAISA_EXCHANGES = {"BSE", "MCX", "NSE", "NFO", "BFO", "CDS", "BCD"}
 
 
 class FyersAdapter(BaseBrokerAdapter):
-    """Fyers v3 streaming adapter."""
+    """Fyers v3 HSM streaming adapter."""
 
     def __init__(self, auth_token: str, broker_config: dict):
-        """auth_token is the combined ``api_key:access_token`` string."""
+        """``auth_token`` is the combined ``"api_key:access_token"`` string set by
+        :func:`backend.broker.fyers.api.auth_api.authenticate_broker`."""
         super().__init__(auth_token, broker_config)
-        self._ws: websocket.WebSocketApp | None = None
-        self._ws_thread: threading.Thread | None = None
-        self._health_thread: threading.Thread | None = None
-        self._connected = False
-        self._last_msg_time: float | None = None
 
-        # broker_symbol -> (symbol, exchange, mode)
-        self._subs: dict[str, tuple[str, str, int]] = {}
+        self._hsm: FyersHSMWebSocket | None = None
+        self._converter: FyersTokenConverter | None = None
+        self._connected = False
+        self._connect_lock = threading.Lock()
         self._sub_lock = threading.Lock()
 
-        # cache last close for change/change_percent calc
-        self._last_close: dict[str, float] = {}
+        # full_symbol ("EXCHANGE:SYMBOL") -> highest mode subscribed (1/2/3).
+        self._mode_for: dict[str, int] = {}
 
-    # ---- BaseBrokerAdapter interface ----
+        # Per-(symbol, exchange) input we last saw — used so we can resubscribe
+        # on reconnect through the openbull side rather than the HSM-token side.
+        # (HSM client itself remembers tokens; we remember inputs so a new
+        # subscribe for the same symbol upgrades modes correctly.)
+        self._inputs: dict[str, dict[str, str]] = {}  # full_symbol -> {symbol, exchange}
+
+        # HSM token -> full_symbol. Built per subscribe() call by joining
+        # through the broker symbol (NOT positionally — see module docstring).
+        self._hsm_to_full: dict[str, str] = {}
+
+    # ---- BaseBrokerAdapter interface --------------------------------
 
     def connect(self) -> None:
-        ws_url = (
-            "wss://api-t1.fyers.in/data?access_token="
-            + self.auth_token
-        )
-
-        self._running = True
-        self._ws = websocket.WebSocketApp(
-            ws_url,
-            on_open=self._on_open,
-            on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close,
-        )
-
-        self._ws_thread = threading.Thread(target=self._run_ws, daemon=True, name="fyers-ws")
-        self._ws_thread.start()
-
-        # Wait up to 10s for handshake.
-        for _ in range(100):
+        with self._connect_lock:
             if self._connected:
                 return
-            time.sleep(0.1)
-        if not self._connected:
-            raise ConnectionError("Fyers WebSocket connection timed out")
-
-    def subscribe(self, symbols: list[dict], mode: int) -> None:
-        new_brsymbols: list[str] = []
-        for item in symbols:
-            sym, exch = item.get("symbol"), item.get("exchange")
-            if not sym or not exch:
-                continue
-            br = get_brsymbol_from_cache(sym, exch)
-            if not br:
-                logger.warning("Fyers WS: no broker symbol for %s/%s", sym, exch)
-                continue
-            with self._sub_lock:
-                existing = self._subs.get(br)
-                effective_mode = max(mode, existing[2]) if existing else mode
-                self._subs[br] = (sym, exch, effective_mode)
-            new_brsymbols.append(br)
-
-        if not new_brsymbols or not self._connected:
-            return
-
-        for i in range(0, len(new_brsymbols), SUBSCRIBE_BATCH_SIZE):
-            batch = new_brsymbols[i:i + SUBSCRIBE_BATCH_SIZE]
-            self._send(json.dumps({"T": "SUB_L2", "SLIST": batch, "SUB_T": 1}))
-
-    def unsubscribe(self, symbols: list[dict], mode: int) -> None:
-        brsymbols: list[str] = []
-        for item in symbols:
-            sym, exch = item.get("symbol"), item.get("exchange")
-            if not sym or not exch:
-                continue
-            br = get_brsymbol_from_cache(sym, exch)
-            if not br:
-                continue
-            with self._sub_lock:
-                self._subs.pop(br, None)
-            brsymbols.append(br)
-
-        if brsymbols and self._connected:
-            for i in range(0, len(brsymbols), SUBSCRIBE_BATCH_SIZE):
-                batch = brsymbols[i:i + SUBSCRIBE_BATCH_SIZE]
-                self._send(json.dumps({"T": "SUB_L2", "SLIST": batch, "SUB_T": -1}))
-
-    def disconnect(self) -> None:
-        self._running = False
-        self._connected = False
-        if self._ws:
             try:
-                self._ws.close()
+                self._hsm = FyersHSMWebSocket(access_token=self.auth_token)
+            except ValueError as e:
+                # Raised by HSM client when JWT can't be parsed / has expired.
+                raise ConnectionError(f"Fyers HSM auth token unusable: {e}") from e
+
+            self._converter = FyersTokenConverter(access_token=self.auth_token)
+
+            self._hsm.set_callbacks(
+                on_message=self._on_hsm_message,
+                on_error=self._on_hsm_error,
+                on_open=self._on_hsm_open,
+                on_close=self._on_hsm_close,
+            )
+
+            self._hsm.connect()  # spawns its own background WS thread
+
+            # Wait for the HSM client to finish its auth handshake.
+            deadline = time.time() + _CONNECT_TIMEOUT_SECONDS
+            while time.time() < deadline:
+                if self._hsm.is_connected():
+                    self._connected = True
+                    self._running = True
+                    logger.info("Fyers HSM WebSocket connected")
+                    return
+                time.sleep(0.1)
+
+            # Couldn't connect — drop the partial state so the WS proxy can
+            # surface a clean failure and the next attempt starts fresh.
+            try:
+                self._hsm.disconnect()
             except Exception:
                 pass
+            self._hsm = None
+            raise ConnectionError("Fyers HSM WebSocket connection timed out")
+
+    def subscribe(self, symbols: list[dict], mode: int) -> None:
+        if not self._hsm or not self._connected:
+            logger.warning("Fyers HSM not connected; ignoring subscribe(%d symbols)", len(symbols))
+            return
+        if mode not in (MODE_LTP, MODE_QUOTE, MODE_DEPTH):
+            logger.error("Unknown subscribe mode %s for fyers", mode)
+            return
+
+        # Track inputs + per-symbol mode (highest wins) before we hit the
+        # converter so even invalid-symbol responses don't drop bookkeeping.
+        valid_inputs: list[dict] = []
         with self._sub_lock:
-            self._subs.clear()
+            for item in symbols:
+                sym = item.get("symbol")
+                exch = item.get("exchange")
+                if not sym or not exch:
+                    continue
+                full = f"{exch}:{sym}"
+                self._inputs[full] = {"symbol": sym, "exchange": exch}
+                self._mode_for[full] = max(self._mode_for.get(full, 0), mode)
+                valid_inputs.append({"symbol": sym, "exchange": exch})
+
+        if not valid_inputs:
+            return
+
+        # MODE_DEPTH needs BOTH the symbol-update feed (LTP/OHLC) and the
+        # depth-update feed; LTP/QUOTE only need the symbol-update feed.
+        data_types = ["SymbolUpdate"]
+        if mode == MODE_DEPTH:
+            data_types.append("DepthUpdate")
+
+        for data_type in data_types:
+            self._subscribe_data_type(valid_inputs, data_type)
+
+    def unsubscribe(self, symbols: list[dict], mode: int) -> None:
+        # HSM has no selective unsub — the upstream stream stays live but we
+        # drop local mode tracking so the WS proxy stops forwarding ticks
+        # for unsubscribed symbols. Matches openalgo's behavior
+        # (broker/fyers/streaming/fyers_adapter.py:310-317).
+        with self._sub_lock:
+            for item in symbols:
+                sym = item.get("symbol")
+                exch = item.get("exchange")
+                if not sym or not exch:
+                    continue
+                full = f"{exch}:{sym}"
+                self._mode_for.pop(full, None)
+                self._inputs.pop(full, None)
+
+    def disconnect(self) -> None:
+        with self._connect_lock:
+            self._connected = False
+            self._running = False
+            hsm = self._hsm
+            self._hsm = None
+            self._converter = None
+        if hsm is not None:
+            try:
+                hsm.disconnect()
+            except Exception:
+                logger.exception("Error during Fyers HSM disconnect")
+        with self._sub_lock:
+            self._mode_for.clear()
+            self._inputs.clear()
+            self._hsm_to_full.clear()
         logger.info("Fyers adapter disconnected")
 
-    # ---- WS internals ----
+    # ---- subscribe helpers -----------------------------------------
 
-    def _send(self, frame: str) -> None:
+    def _subscribe_data_type(self, inputs: list[dict], data_type: str) -> None:
+        """Convert inputs -> HSM tokens and send one HSM SUBSCRIBE message."""
         try:
-            if self._ws and self._connected:
-                self._ws.send(frame)
-        except Exception as e:
-            logger.error("Fyers WS send error: %s", e)
+            hsm_tokens, token_mappings, invalid = (
+                self._converter.convert_openalgo_symbols_to_hsm(inputs, data_type)
+            )
+        except Exception:
+            logger.exception("Fyers symbol-to-HSM conversion failed for %s", data_type)
+            return
 
-    def _run_ws(self) -> None:
-        reconnect_attempts = 0
-        while self._running:
-            try:
-                self._ws.run_forever(
-                    sslopt={"cert_reqs": ssl.CERT_REQUIRED},
-                    ping_interval=30,
-                    ping_timeout=10,
+        if invalid:
+            logger.warning("Fyers invalid symbols (%s): %s", data_type, invalid)
+        if not hsm_tokens:
+            logger.warning("Fyers HSM produced no tokens for %s", data_type)
+            return
+
+        # Join HSM tokens to full_symbol THROUGH the broker symbol — the
+        # /data/symbol-token API does not preserve input order in its
+        # validSymbol map, so positional pairing scrambles ticks (openalgo
+        # commit 5eb7baaa for the same bug + symptom write-up).
+        brsymbol_to_full: dict[str, str] = {}
+        for s in inputs:
+            br = get_br_symbol(s["symbol"], s["exchange"])
+            if br:
+                brsymbol_to_full[br] = f"{s['exchange']}:{s['symbol']}"
+
+        with self._sub_lock:
+            for token in hsm_tokens:
+                br = token_mappings.get(token)
+                if not br:
+                    continue
+                full = brsymbol_to_full.get(br)
+                if not full:
+                    logger.warning(
+                        "Fyers brsymbol %s did not match any input subscription", br
+                    )
+                    continue
+                self._hsm_to_full[token] = full
+
+        try:
+            self._hsm.subscribe_symbols(hsm_tokens, token_mappings)
+            logger.info(
+                "Fyers HSM subscribed %d tokens (%s) — %d total mappings",
+                len(hsm_tokens), data_type, len(self._hsm_to_full),
+            )
+        except Exception:
+            logger.exception("Fyers HSM subscribe_symbols raised")
+
+    # ---- HSM -> openbull mapping -----------------------------------
+
+    def _on_hsm_message(self, fyers_data: dict[str, Any]) -> None:
+        """Receive a parsed HSM tick (sf | dp | if) and fan out to ZMQ topics."""
+        try:
+            hsm_token = fyers_data.get("hsm_token")
+            full = self._hsm_to_full.get(hsm_token) if hsm_token else None
+            if not full:
+                # Fyers occasionally sends snapshot frames before our mapping
+                # is in place (HSM resubscribe race). Fall back to the
+                # `original_symbol` carried in the frame; if that's absent or
+                # not in our active set, drop the tick silently.
+                orig = fyers_data.get("original_symbol")
+                full = orig if orig in self._mode_for else None
+                if not full:
+                    return
+
+            exchange, symbol = full.split(":", 1)
+            highest_mode = self._mode_for.get(full, MODE_LTP)
+            feed_type = fyers_data.get("type")
+
+            if feed_type == "dp":
+                # Depth feed — only matters when caller asked for DEPTH.
+                if highest_mode >= MODE_DEPTH:
+                    depth_payload = self._map_depth(fyers_data, symbol, exchange)
+                    if depth_payload is not None:
+                        self.publish(f"{exchange}_{symbol}_DEPTH", depth_payload)
+                return
+
+            # sf / if — symbol or index feed. Carries LTP/OHLC; emit LTP
+            # always and QUOTE if the caller subscribed at >= MODE_QUOTE.
+            ltp_payload = self._map_ltp(fyers_data, symbol, exchange)
+            if ltp_payload is not None:
+                self.publish(f"{exchange}_{symbol}_LTP", ltp_payload)
+
+            if highest_mode >= MODE_QUOTE:
+                quote_payload = self._map_quote(fyers_data, symbol, exchange)
+                if quote_payload is not None:
+                    self.publish(f"{exchange}_{symbol}_QUOTE", quote_payload)
+
+        except Exception:
+            logger.exception("Fyers HSM dispatch failed")
+
+    def _on_hsm_open(self) -> None:
+        logger.info("Fyers HSM WebSocket socket opened")
+
+    def _on_hsm_close(self) -> None:
+        logger.info("Fyers HSM WebSocket socket closed")
+        self._connected = False
+
+    def _on_hsm_error(self, error: Any) -> None:
+        logger.error("Fyers HSM WebSocket error: %s", error)
+
+    # ---- price helpers ---------------------------------------------
+
+    @staticmethod
+    def _segment_divisor(exchange: str, is_index: bool) -> int:
+        """Fyers reports paisa for cash + F&O segments; indices are direct."""
+        if is_index:
+            return 1
+        return 100 if exchange.upper() in _PAISA_EXCHANGES else 1
+
+    @classmethod
+    def _convert_price(
+        cls, value: Any, multiplier: int, precision: int, segment_divisor: int
+    ) -> float:
+        if not value or multiplier <= 0:
+            return 0.0
+        return round(float(value) / multiplier / segment_divisor, precision)
+
+    def _map_ltp(self, fyers_data: dict[str, Any], symbol: str, exchange: str) -> dict | None:
+        if "ltp" not in fyers_data:
+            return None
+        is_index = fyers_data.get("type") == "if"
+        multiplier = int(fyers_data.get("multiplier", 100) or 100)
+        precision = int(fyers_data.get("precision", 2) or 2)
+        seg = self._segment_divisor(exchange, is_index)
+        ltp = self._convert_price(fyers_data.get("ltp", 0), multiplier, precision, seg)
+        return {
+            "symbol": symbol,
+            "exchange": exchange,
+            "ltp": ltp,
+            "timestamp": int(time.time()),
+            "data_type": "LTP",
+        }
+
+    def _map_quote(self, fyers_data: dict[str, Any], symbol: str, exchange: str) -> dict | None:
+        is_index = fyers_data.get("type") == "if"
+        multiplier = int(fyers_data.get("multiplier", 100) or 100)
+        precision = int(fyers_data.get("precision", 2) or 2)
+        seg = self._segment_divisor(exchange, is_index)
+
+        def cp(v: Any) -> float:
+            return self._convert_price(v, multiplier, precision, seg)
+
+        return {
+            "symbol": symbol,
+            "exchange": exchange,
+            "ltp": cp(fyers_data.get("ltp", 0)),
+            "open": cp(fyers_data.get("open_price", 0)),
+            "high": cp(fyers_data.get("high_price", 0)),
+            "low": cp(fyers_data.get("low_price", 0)),
+            "close": cp(fyers_data.get("prev_close_price", 0)),
+            "prev_close": cp(fyers_data.get("prev_close_price", 0)),
+            "bid": cp(fyers_data.get("bid_price", 0)),
+            "ask": cp(fyers_data.get("ask_price", 0)),
+            "bid_qty": int(fyers_data.get("bid_size", 0) or 0),
+            "ask_qty": int(fyers_data.get("ask_size", 0) or 0),
+            "volume": int(fyers_data.get("vol_traded_today", 0) or 0),
+            "oi": int(fyers_data.get("OI", 0) or 0),
+            "upper_circuit": cp(fyers_data.get("upper_ckt", 0)),
+            "lower_circuit": cp(fyers_data.get("lower_ckt", 0)),
+            "last_traded_time": int(fyers_data.get("last_traded_time", 0) or 0),
+            "exchange_time": int(fyers_data.get("exch_feed_time", 0) or 0),
+            "avg_trade_price": cp(fyers_data.get("avg_trade_price", 0)),
+            "last_trade_quantity": int(fyers_data.get("last_traded_qty", 0) or 0),
+            "total_buy_quantity": int(fyers_data.get("tot_buy_qty", 0) or 0),
+            "total_sell_quantity": int(fyers_data.get("tot_sell_qty", 0) or 0),
+            "timestamp": int(time.time()),
+            "data_type": "Quote",
+        }
+
+    def _map_depth(self, fyers_data: dict[str, Any], symbol: str, exchange: str) -> dict | None:
+        if fyers_data.get("type") != "dp":
+            return None
+        multiplier = int(fyers_data.get("multiplier", 100) or 100)
+        precision = int(fyers_data.get("precision", 2) or 2)
+        seg = self._segment_divisor(exchange, is_index=False)
+
+        def cp(v: Any) -> float:
+            return self._convert_price(v, multiplier, precision, seg)
+
+        buy_levels: list[dict] = []
+        sell_levels: list[dict] = []
+        for i in range(1, 6):
+            bid_price = cp(fyers_data.get(f"bid_price{i}", 0))
+            bid_size = int(fyers_data.get(f"bid_size{i}", 0) or 0)
+            bid_orders = int(fyers_data.get(f"bid_order{i}", 0) or 0)
+            ask_price = cp(fyers_data.get(f"ask_price{i}", 0))
+            ask_size = int(fyers_data.get(f"ask_size{i}", 0) or 0)
+            ask_orders = int(fyers_data.get(f"ask_order{i}", 0) or 0)
+            if bid_price > 0:
+                buy_levels.append(
+                    {"price": bid_price, "quantity": bid_size, "orders": bid_orders}
                 )
-            except Exception as e:
-                logger.error("Fyers WS run_forever error: %s", e)
+            if ask_price > 0:
+                sell_levels.append(
+                    {"price": ask_price, "quantity": ask_size, "orders": ask_orders}
+                )
 
-            self._connected = False
-            if not self._running:
-                break
+        # Mid-price LTP fallback when the depth packet is the first thing
+        # we get for a symbol — keeps the UI from showing 0 while sf/if
+        # is still in flight.
+        ltp = 0.0
+        if buy_levels and sell_levels:
+            ltp = round((buy_levels[0]["price"] + sell_levels[0]["price"]) / 2, precision)
 
-            reconnect_attempts += 1
-            if reconnect_attempts > RECONNECT_MAX_TRIES:
-                logger.error("Fyers max reconnect attempts (%d) reached", RECONNECT_MAX_TRIES)
-                break
-
-            delay = min(2 * (1.5 ** reconnect_attempts), RECONNECT_MAX_DELAY)
-            logger.info("Reconnecting in %.1fs (attempt %d)", delay, reconnect_attempts)
-            time.sleep(delay)
-
-    def _on_open(self, ws) -> None:
-        logger.info("Fyers Data WebSocket connected")
-        self._connected = True
-        self._last_msg_time = time.time()
-        self._start_health_check()
-
-        # Re-subscribe on reconnect.
-        with self._sub_lock:
-            brsymbols = list(self._subs.keys())
-        for i in range(0, len(brsymbols), SUBSCRIBE_BATCH_SIZE):
-            batch = brsymbols[i:i + SUBSCRIBE_BATCH_SIZE]
-            self._send(json.dumps({"T": "SUB_L2", "SLIST": batch, "SUB_T": 1}))
-        if brsymbols:
-            logger.info("Re-subscribed %d Fyers symbols after reconnect", len(brsymbols))
-
-    def _on_message(self, ws, message) -> None:
-        self._last_msg_time = time.time()
-
-        if isinstance(message, (bytes, bytearray)):
-            # Fyers' Data WS may send compact binary payloads; we forward the
-            # raw bytes to the JSON path only when it can be decoded. Most
-            # market-data ticks come as JSON text on this endpoint.
-            try:
-                message = message.decode("utf-8")
-            except Exception:
-                return
-
-        if not isinstance(message, str):
-            return
-
-        try:
-            payload = json.loads(message)
-        except json.JSONDecodeError:
-            logger.debug("Fyers WS non-JSON: %s", message[:120])
-            return
-
-        # Tick payloads come either as a top-level object or as a list.
-        if isinstance(payload, list):
-            for item in payload:
-                if isinstance(item, dict):
-                    self._handle_tick(item)
-        elif isinstance(payload, dict):
-            # Server-side acks / errors look like {"s":"ok",...} or {"s":"error",...}
-            if payload.get("s") == "error":
-                logger.error("Fyers WS server error: %s", payload.get("message"))
-                return
-            self._handle_tick(payload)
-
-    def _on_error(self, ws, error) -> None:
-        logger.error("Fyers WS error: %s", error)
-        self._connected = False
-
-    def _on_close(self, ws, code, msg) -> None:
-        logger.info("Fyers WS closed (code=%s, msg=%s)", code, msg)
-        self._connected = False
-
-    # ---- Tick handling ----
-
-    def _handle_tick(self, tick: dict) -> None:
-        """Translate a Fyers tick dict to LTP/QUOTE/DEPTH topics on ZMQ."""
-        # Fyers data WS uses 'symbol' for the broker symbol.
-        br = tick.get("symbol") or tick.get("n")
-        if not br:
-            return
-
-        with self._sub_lock:
-            sub = self._subs.get(br)
-        if sub:
-            symbol, exchange, _mode = sub
-        else:
-            # Fall back to a cache lookup — covers ticks whose broker symbol
-            # arrives before our subscribe ack pass.
-            symbol = None
-            exchange = None
-            for exch_candidate in ("NSE", "BSE", "NFO", "BFO", "MCX", "CDS"):
-                resolved = get_symbol_from_brsymbol_cache(br, exch_candidate)
-                if resolved:
-                    symbol = resolved
-                    exchange = exch_candidate
-                    break
-            if not symbol or not exchange:
-                return
-
-        # Fyers field names (Data WS v3):
-        #   ltp, type, ch, chp, open_price, high_price, low_price, prev_close_price,
-        #   vol_traded_today, last_traded_qty, avg_trade_price, tot_buy_qty,
-        #   tot_sell_qty, exch_feed_time, bid_size, ask_size, bid_price, ask_price,
-        #   bids, asks (5-level depth arrays)
-        ltp = float(tick.get("ltp", 0) or 0)
-        prev_close = float(tick.get("prev_close_price", 0) or 0)
-        if prev_close:
-            self._last_close[br] = prev_close
-        else:
-            prev_close = self._last_close.get(br, 0.0)
-
-        change = round(ltp - prev_close, 4) if (ltp and prev_close) else 0.0
-        change_pct = round((ltp - prev_close) / prev_close * 100, 4) if prev_close else 0.0
-        ts_now = int(tick.get("exch_feed_time") or time.time())
-
-        ltp_data = {
-            "symbol": symbol, "exchange": exchange, "mode": "ltp",
-            "ltp": ltp, "ltt": ts_now,
-            "cp": prev_close, "change": change, "change_percent": change_pct,
+        return {
+            "symbol": symbol,
+            "exchange": exchange,
+            "ltp": ltp,
+            "depth": {"buy": buy_levels, "sell": sell_levels},
+            "timestamp": int(time.time()),
+            "data_type": "Depth",
         }
-        self.publish(f"{exchange}_{symbol}_LTP", ltp_data)
-
-        quote_data = {
-            **ltp_data,
-            "mode": "quote",
-            "open": float(tick.get("open_price", 0) or 0),
-            "high": float(tick.get("high_price", 0) or 0),
-            "low": float(tick.get("low_price", 0) or 0),
-            "close": prev_close,
-            "volume": int(tick.get("vol_traded_today", 0) or 0),
-            "ltq": int(tick.get("last_traded_qty", 0) or 0),
-            "average_price": float(tick.get("avg_trade_price", 0) or 0),
-            "total_buy_quantity": int(tick.get("tot_buy_qty", 0) or 0),
-            "total_sell_quantity": int(tick.get("tot_sell_qty", 0) or 0),
-            "oi": int(tick.get("tot_oi", 0) or 0),
-            "bid": float(tick.get("bid_price", 0) or 0),
-            "ask": float(tick.get("ask_price", 0) or 0),
-            "bid_qty": int(tick.get("bid_size", 0) or 0),
-            "ask_qty": int(tick.get("ask_size", 0) or 0),
-        }
-        self.publish(f"{exchange}_{symbol}_QUOTE", quote_data)
-
-        bids = tick.get("bids")
-        asks = tick.get("asks") or tick.get("ask")
-        if isinstance(bids, list) and isinstance(asks, list):
-            depth_data = {
-                **quote_data,
-                "mode": "full",
-                "depth": {
-                    "buy": [
-                        {
-                            "price": float(b.get("price", 0) or 0),
-                            "quantity": int(b.get("volume", b.get("qty", 0)) or 0),
-                            "orders": int(b.get("ord", b.get("orders", 0)) or 0),
-                        }
-                        for b in bids[:5]
-                    ],
-                    "sell": [
-                        {
-                            "price": float(a.get("price", 0) or 0),
-                            "quantity": int(a.get("volume", a.get("qty", 0)) or 0),
-                            "orders": int(a.get("ord", a.get("orders", 0)) or 0),
-                        }
-                        for a in asks[:5]
-                    ],
-                },
-            }
-            self.publish(f"{exchange}_{symbol}_DEPTH", depth_data)
-
-    # ---- Health check ----
-
-    def _start_health_check(self) -> None:
-        if self._health_thread and self._health_thread.is_alive():
-            return
-        self._health_thread = threading.Thread(target=self._health_loop, daemon=True)
-        self._health_thread.start()
-
-    def _health_loop(self) -> None:
-        while self._running and self._connected:
-            time.sleep(30)
-            if not self._running or not self._connected:
-                break
-            if self._last_msg_time and (time.time() - self._last_msg_time) > 90:
-                logger.error("Fyers data stall (>90s). Forcing reconnect.")
-                if self._ws:
-                    try:
-                        self._ws.close()
-                    except Exception:
-                        pass
-                break
