@@ -37,11 +37,13 @@ import {
   MultiStrikeOITab,
   type OILegInput,
 } from "@/components/strategy-builder/MultiStrikeOITab";
+import { SymbolHeader } from "@/components/strategy-builder/SymbolHeader";
 import {
   PayoffChart,
   type SimulationMarker,
 } from "@/components/strategy-builder/PayoffChart";
 import { PnLTab, type PnlLeg } from "@/components/strategy-builder/PnLTab";
+import { PositionsPanel } from "@/components/strategy-builder/PositionsPanel";
 import { WhatIfPanel, type SimulationOutput } from "@/components/strategy-builder/WhatIfPanel";
 import {
   StrategyChartTab,
@@ -179,6 +181,13 @@ export default function StrategyBuilder() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [basketOpen, setBasketOpen] = useState(false);
   const [simulation, setSimulation] = useState<SimulationOutput | null>(null);
+  // Per-leg "include in payoff" toggle. Symbols listed here are drawn on
+  // the payoff chart and counted in the PositionsPanel stats. New legs
+  // are auto-enabled (see effect below); the user can untick to "what if
+  // I dropped this leg" without deleting it.
+  const [enabledLegSymbols, setEnabledLegSymbols] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const expiryApi = useMemo(() => convertExpiryForApi(expiry), [expiry]);
 
@@ -406,6 +415,67 @@ export default function StrategyBuilder() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Keep enabledLegSymbols in sync with the leg list ────────────────
+  // Newly-added legs are auto-enabled; legs the user removed are dropped
+  // from the set so the PositionsPanel doesn't keep stale references.
+  useEffect(() => {
+    setEnabledLegSymbols((prev) => {
+      const currentSyms = new Set(
+        legs.map((l) => l.symbol).filter((s): s is string => Boolean(s)),
+      );
+      const next = new Set(prev);
+      let mutated = false;
+      for (const sym of currentSyms) {
+        if (!next.has(sym)) {
+          next.add(sym);
+          mutated = true;
+        }
+      }
+      for (const sym of Array.from(next)) {
+        if (!currentSyms.has(sym)) {
+          next.delete(sym);
+          mutated = true;
+        }
+      }
+      return mutated ? next : prev;
+    });
+  }, [legs]);
+
+  const handleToggleLegSymbol = useCallback((sym: string) => {
+    setEnabledLegSymbols((prev) => {
+      const next = new Set(prev);
+      if (next.has(sym)) next.delete(sym);
+      else next.add(sym);
+      return next;
+    });
+  }, []);
+
+  const handleToggleAllLegs = useCallback(
+    (enable: boolean) => {
+      if (enable) {
+        const all = new Set(
+          legs.map((l) => l.symbol).filter((s): s is string => Boolean(s)),
+        );
+        setEnabledLegSymbols(all);
+      } else {
+        setEnabledLegSymbols(new Set());
+      }
+    },
+    [legs],
+  );
+
+  const handleResetLegSelection = useCallback(() => {
+    handleToggleAllLegs(true);
+  }, [handleToggleAllLegs]);
+
+  // Snapshot legs filtered to the enabled set — fed to the PayoffChart
+  // and WhatIfPanel so a deselected leg is removed from the curve and
+  // P&L marker without touching the underlying leg list.
+  const enabledSnapshotLegs = useMemo(() => {
+    if (!snapshot) return [];
+    return snapshot.legs.filter((l) => enabledLegSymbols.has(l.symbol));
+  }, [snapshot, enabledLegSymbols]);
 
   // ── Re-resolve symbols when underlying / expiry / per-leg fields change ─
   // Keeps the displayed symbol in each LegRow consistent without needing
@@ -670,7 +740,17 @@ export default function StrategyBuilder() {
         </div>
       </div>
 
-      {/* ── Status badges ─────────────────────────────────────────────── */}
+      {/* ── Symbol header — Spot / Lot / DTE / ATM IV chip strip ─────── */}
+      <SymbolHeader
+        underlying={underlying}
+        exchange={exchange}
+        expiryDisplay={expiry}
+        chain={chain.context}
+        snapshot={snapshot}
+        loading={chain.loading || snapshotLoading}
+      />
+
+      {/* ── Secondary status badges ───────────────────────────────────── */}
       <div className="flex flex-wrap gap-2">
         {strategyId !== null && (
           <Badge variant="secondary">
@@ -685,16 +765,10 @@ export default function StrategyBuilder() {
             ATM: {chain.context.atm} · {chain.context.strikes.length} strikes
           </Badge>
         )}
-        {chain.loading && !chain.context && (
-          <Badge variant="outline" className="animate-pulse">
-            Loading chain…
-          </Badge>
-        )}
         {snapshot && (
-          <>
-            <Badge variant="secondary">Spot: {snapshot.spot_price.toFixed(2)}</Badge>
-            <Badge variant="secondary">As of: {new Date(snapshot.as_of).toLocaleTimeString()}</Badge>
-          </>
+          <Badge variant="secondary">
+            Snapshot: {new Date(snapshot.as_of).toLocaleTimeString()}
+          </Badge>
         )}
       </div>
 
@@ -815,33 +889,42 @@ export default function StrategyBuilder() {
           </Card>
         </TabsContent>
 
-        {/* Payoff tab — At-Expiry + T+0 curves + What-if simulator */}
+        {/* Payoff tab — Positions panel (left) + Payoff chart + What-if (right) */}
         <TabsContent value="payoff">
           <Card>
-            <CardContent className="space-y-3 p-2 sm:p-4">
+            <CardContent className="p-2 sm:p-4">
               {snapshot ? (
-                <>
-                  <ErrorBoundary label="Payoff chart">
-                    <PayoffChart
-                      snapshotLegs={snapshot.legs}
-                      entryPriceBySymbol={entryPriceBySymbol}
-                      spot={snapshot.spot_price}
-                      simulationMarker={simulationMarker}
-                    />
-                  </ErrorBoundary>
-                  <WhatIfPanel
+                <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+                  <PositionsPanel
                     snapshotLegs={snapshot.legs}
                     entryPriceBySymbol={entryPriceBySymbol}
                     spot={snapshot.spot_price}
-                    onSimulationChange={setSimulation}
+                    enabledSymbols={enabledLegSymbols}
+                    onToggleSymbol={handleToggleLegSymbol}
+                    onToggleAll={handleToggleAllLegs}
+                    onReset={handleResetLegSelection}
                   />
-                </>
+                  <div className="space-y-3">
+                    <ErrorBoundary label="Payoff chart">
+                      <PayoffChart
+                        snapshotLegs={enabledSnapshotLegs}
+                        entryPriceBySymbol={entryPriceBySymbol}
+                        spot={snapshot.spot_price}
+                        simulationMarker={simulationMarker}
+                      />
+                    </ErrorBoundary>
+                    <WhatIfPanel
+                      snapshotLegs={enabledSnapshotLegs}
+                      entryPriceBySymbol={entryPriceBySymbol}
+                      spot={snapshot.spot_price}
+                      onSimulationChange={setSimulation}
+                    />
+                  </div>
+                </div>
               ) : (
                 <div className="flex h-[420px] flex-col items-center justify-center gap-1 text-center text-muted-foreground">
                   <p className="text-sm">
-                    {snapshotLoading
-                      ? "Pricing legs…"
-                      : "No snapshot yet."}
+                    {snapshotLoading ? "Pricing legs…" : "No snapshot yet."}
                   </p>
                   <p className="text-xs">
                     {snapshotLoading
