@@ -84,27 +84,52 @@ def _br_symbol(symbol: str, exchange: str) -> str | None:
     return get_brsymbol_from_cache(symbol, exchange)
 
 
+# 429 retry policy. Fyers' rolling-window throttle is short — a single
+# back-off + retry usually clears. Two attempts cap latency at ~1.5s
+# extra in the worst case while letting the rolling window slide.
+_RATE_LIMIT_RETRY_DELAYS = (0.5, 1.0)
+
+
 def _api_get(endpoint: str, auth_token: str) -> dict:
-    """GET ``endpoint`` on Fyers and return parsed JSON."""
+    """GET ``endpoint`` on Fyers and return parsed JSON.
+
+    On a 429 (rolling-window rate limit) we retry with the back-off
+    schedule in ``_RATE_LIMIT_RETRY_DELAYS``. Without this, a transient
+    burst — option-chain spot fetch firing right after a 47-strike OI
+    sweep on the same window — surfaces "request limit reached" all the
+    way to the user as a hard error. Two retries ($0.5$s, $1.0$s) is
+    cheap and lets the rolling window slide naturally.
+    """
     client = get_httpx_client()
     url = f"https://api-t1.fyers.in{endpoint}"
-    try:
-        response = client.get(url, headers=_headers(auth_token))
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPStatusError as e:
-        # 429 is the rate-limiter saying "back off" — expected when the OI
-        # tracker bursts depth calls faster than Fyers' rolling window. Log
-        # at WARNING so it doesn't dominate the error feed.
-        log_fn = logger.warning if e.response.status_code == 429 else logger.error
-        log_fn("Fyers HTTP %s on %s: %s", e.response.status_code, endpoint, e.response.text)
+
+    last_exc: Exception | None = None
+    for attempt in range(len(_RATE_LIMIT_RETRY_DELAYS) + 1):
         try:
-            return e.response.json()
-        except Exception:
+            response = client.get(url, headers=_headers(auth_token))
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            last_exc = e
+            if e.response.status_code == 429 and attempt < len(_RATE_LIMIT_RETRY_DELAYS):
+                delay = _RATE_LIMIT_RETRY_DELAYS[attempt]
+                logger.warning(
+                    "Fyers 429 on %s, retrying in %.1fs (attempt %d/%d)",
+                    endpoint, delay, attempt + 1, len(_RATE_LIMIT_RETRY_DELAYS) + 1,
+                )
+                time.sleep(delay)
+                continue
+            log_fn = logger.warning if e.response.status_code == 429 else logger.error
+            log_fn("Fyers HTTP %s on %s: %s", e.response.status_code, endpoint, e.response.text)
+            try:
+                return e.response.json()
+            except Exception:
+                return {"s": "error", "message": str(e)}
+        except Exception as e:
+            logger.exception("Error during Fyers GET %s", endpoint)
             return {"s": "error", "message": str(e)}
-    except Exception as e:
-        logger.exception("Error during Fyers GET %s", endpoint)
-        return {"s": "error", "message": str(e)}
+
+    return {"s": "error", "message": str(last_exc) if last_exc else "Unknown error"}
 
 
 def get_quotes(
