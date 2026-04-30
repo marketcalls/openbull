@@ -19,6 +19,7 @@ from sqlalchemy import delete, select
 from backend.models.sandbox import SandboxHolding, SandboxPosition
 from backend.sandbox import fund_manager
 from backend.sandbox._db import session_scope
+from backend.sandbox._session import session_start_ist
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,14 @@ def _compute_pnl_percent(avg_price: float, ltp: float) -> float:
 def settle_cnc_to_holdings() -> int:
     """Move long CNC positions into holdings. Returns the number of rows moved.
 
+    T+1 semantics: only positions whose ``updated_at`` predates the
+    current session are eligible. A buy placed today stays in the
+    positions book for the rest of today — it will be settled on the
+    *next* EOD pass after at least one session has elapsed. Without
+    this filter a same-day buy at 10:00 would land in holdings at 23:55
+    the same evening, which contradicts T+1 and creates a confusing
+    "I just bought it but it's already in holdings" UX.
+
     Margin bookkeeping for the move follows openalgo:
     ``fund.used_margin`` decreases by the position's blocked margin, but
     ``available`` stays the same — the cash that backed the margin is now
@@ -43,6 +52,7 @@ def settle_cnc_to_holdings() -> int:
     """
     moved = 0
     settle_iso = datetime.now(tz=IST).date().isoformat()
+    today_session_start = session_start_ist()
     # Collected per-user margin transfers — applied after the position
     # transaction commits so the funds row update stays in its own scope
     # under the per-user lock.
@@ -53,6 +63,7 @@ def settle_cnc_to_holdings() -> int:
                 select(SandboxPosition).where(
                     SandboxPosition.product == "CNC",
                     SandboxPosition.net_quantity > 0,
+                    SandboxPosition.updated_at < today_session_start,
                 )
             )
             .scalars()

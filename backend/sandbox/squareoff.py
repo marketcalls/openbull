@@ -18,7 +18,8 @@ from typing import Iterable
 
 from sqlalchemy import select
 
-from backend.models.sandbox import SandboxPosition
+from backend.models.sandbox import SandboxOrder, SandboxPosition
+from backend.sandbox import fund_manager
 from backend.sandbox._db import session_scope
 from backend.services import sandbox_service
 
@@ -31,6 +32,55 @@ EXCHANGE_BUCKETS: dict[str, list[str]] = {
     "cds": ["CDS", "BCD"],
     "mcx": ["MCX"],
 }
+
+
+def _cancel_pending_mis_orders(exchanges: Iterable[str]) -> int:
+    """Cancel MIS limit/SL orders that are still ``open`` or
+    ``trigger_pending`` at squareoff time, releasing each one's blocked
+    margin. Mirrors openalgo's ``_cancel_open_mis_orders`` — without it
+    a stale MIS limit could fill in the next session and silently open a
+    fresh intraday position the user never authorised.
+    """
+    exchanges = list(exchanges)
+    cancelled = 0
+    margin_releases: dict[int, float] = {}
+
+    with session_scope() as db:
+        rows = (
+            db.execute(
+                select(SandboxOrder).where(
+                    SandboxOrder.product == "MIS",
+                    SandboxOrder.status.in_(("open", "trigger_pending")),
+                    SandboxOrder.exchange.in_(exchanges),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for o in rows:
+            margin = float(o.margin_blocked or 0.0)
+            if margin > 0:
+                margin_releases[o.user_id] = margin_releases.get(o.user_id, 0.0) + margin
+            o.status = "cancelled"
+            o.rejection_reason = "Auto-cancelled at MIS squareoff"
+            o.margin_blocked = 0.0
+            cancelled += 1
+
+    for uid, amount in margin_releases.items():
+        try:
+            fund_manager.release_margin(uid, amount, realized_pnl=0.0)
+        except Exception:
+            logger.exception(
+                "sandbox squareoff: release_margin failed for user=%d amount=%.2f",
+                uid, amount,
+            )
+
+    if cancelled:
+        logger.info(
+            "sandbox squareoff: cancelled %d pending MIS order(s) on %s",
+            cancelled, exchanges,
+        )
+    return cancelled
 
 
 def _open_mis_positions(exchanges: Iterable[str]) -> list[dict]:
@@ -68,13 +118,22 @@ def _open_mis_positions(exchanges: Iterable[str]) -> list[dict]:
 def squareoff_bucket(bucket_key: str) -> int:
     """Square off every MIS position in the given exchange bucket.
 
-    Returns the number of reverse orders placed. Safe to call when no MIS
-    positions are open — a no-op in that case.
+    Two-step: (1) cancel any pending MIS limit/SL orders in the bucket
+    so they can't fill in a future session and (2) place reverse market
+    orders against open MIS positions. Returns the number of reverse
+    orders placed.
     """
     exchanges = EXCHANGE_BUCKETS.get(bucket_key)
     if not exchanges:
         return 0
 
+    # Step 1: cancel pending MIS orders + release their margin.
+    try:
+        _cancel_pending_mis_orders(exchanges)
+    except Exception:
+        logger.exception("sandbox squareoff: cancel-pending step failed for %s", bucket_key)
+
+    # Step 2: reverse open MIS positions.
     positions = _open_mis_positions(exchanges)
     if not positions:
         return 0

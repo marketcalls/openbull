@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from backend.models.sandbox import SandboxOrder, SandboxTrade
 from backend.sandbox._db import session_scope
+from backend.sandbox._session import session_start_ist
 
 logger = logging.getLogger(__name__)
 
@@ -96,33 +97,39 @@ def get_order(user_id: int, orderid: str) -> SandboxOrder | None:
         return row
 
 
-def list_orders(user_id: int) -> list[SandboxOrder]:
+def list_orders(user_id: int, *, all_history: bool = False) -> list[SandboxOrder]:
+    """Return the user's sandbox orderbook.
+
+    Filtered to the *current session* by default — orders placed before
+    the last ``session_expiry_time`` boundary (00:00 IST default) are
+    hidden so the orderbook view rolls over cleanly each day instead of
+    growing forever. Pass ``all_history=True`` for diagnostics or audit
+    paths that want the full history.
+    """
     with session_scope() as db:
-        rows = (
-            db.execute(
-                select(SandboxOrder)
-                .where(SandboxOrder.user_id == user_id)
-                .order_by(SandboxOrder.order_timestamp.desc())
-            )
-            .scalars()
-            .all()
-        )
+        stmt = select(SandboxOrder).where(SandboxOrder.user_id == user_id)
+        if not all_history:
+            stmt = stmt.where(SandboxOrder.order_timestamp >= session_start_ist())
+        stmt = stmt.order_by(SandboxOrder.order_timestamp.desc())
+        rows = db.execute(stmt).scalars().all()
         for r in rows:
             db.expunge(r)
         return list(rows)
 
 
-def list_trades(user_id: int) -> list[SandboxTrade]:
+def list_trades(user_id: int, *, all_history: bool = False) -> list[SandboxTrade]:
+    """Return the user's sandbox tradebook.
+
+    Same session-window filter as :func:`list_orders` — yesterday's
+    fills don't pollute today's view. ``all_history=True`` returns the
+    full table.
+    """
     with session_scope() as db:
-        rows = (
-            db.execute(
-                select(SandboxTrade)
-                .where(SandboxTrade.user_id == user_id)
-                .order_by(SandboxTrade.timestamp.desc())
-            )
-            .scalars()
-            .all()
-        )
+        stmt = select(SandboxTrade).where(SandboxTrade.user_id == user_id)
+        if not all_history:
+            stmt = stmt.where(SandboxTrade.timestamp >= session_start_ist())
+        stmt = stmt.order_by(SandboxTrade.timestamp.desc())
+        rows = db.execute(stmt).scalars().all()
         for r in rows:
             db.expunge(r)
         return list(rows)
