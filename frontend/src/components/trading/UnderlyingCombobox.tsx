@@ -41,18 +41,23 @@ export function UnderlyingCombobox({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
+  // Display the bare ticker only (NIFTY, BANKNIFTY, RELIANCE) — not the
+  // long company / contract name. Some brokers (Fyers) populate `name`
+  // with the per-contract description which is noisy and useless to a
+  // trader who's already on a F&O screen.
   const selectedLabel = useMemo(() => {
     const opt = options.find((o) => o.symbol === value);
-    if (opt) return opt.name && opt.name !== opt.symbol ? `${opt.symbol} — ${opt.name}` : opt.symbol;
-    return value;
+    return opt ? opt.symbol : value;
   }, [options, value]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toUpperCase();
     if (!q) return options.slice(0, MAX_RESULTS);
     const out: UnderlyingOption[] = [];
+    // Symbol-only search — the name column isn't displayed any more, so
+    // matching against it would produce confusing "ghost" results.
     for (const o of options) {
-      if (o.symbol.includes(q) || o.name.toUpperCase().includes(q)) {
+      if (o.symbol.includes(q)) {
         out.push(o);
         if (out.length >= MAX_RESULTS) break;
       }
@@ -174,7 +179,7 @@ export function UnderlyingCombobox({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={onKey}
-                placeholder={loading ? "Loading underlyings…" : "Search symbol or name…"}
+                placeholder={loading ? "Loading underlyings…" : "Search symbol…"}
                 className="h-7 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                 autoComplete="off"
                 spellCheck={false}
@@ -233,16 +238,6 @@ export function UnderlyingCombobox({
                       >
                         {o.symbol}
                       </span>
-                      {o.name && o.name !== o.symbol && (
-                        <span
-                          className={cn(
-                            "ml-auto truncate text-xs",
-                            active ? "text-primary-foreground/80" : "text-muted-foreground"
-                          )}
-                        >
-                          {o.name}
-                        </span>
-                      )}
                     </li>
                   );
                 })}
