@@ -813,6 +813,7 @@ export default function StrategyBuilder() {
                     leg={leg}
                     onChange={handleLegChange}
                     onRemove={() => handleLegRemove(leg.id)}
+                    chainContext={chain.context}
                   />
                 ))
               )}

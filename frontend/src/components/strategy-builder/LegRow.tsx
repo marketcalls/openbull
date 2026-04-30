@@ -2,22 +2,26 @@
  * Editable row for one strategy leg.
  *
  * The page owns the leg array and passes a single ``leg`` plus an
- * ``onChange`` callback so React state stays simple. Strike is a free
- * numeric input in this Phase 5 skeleton — Phase 6 will swap in a
- * dropdown sourced from the option chain.
+ * ``onChange`` callback so React state stays simple.
  *
- * Color convention follows the rest of OpenBull: CE is RED (#ef4444),
- * PE is GREEN (#22c55e). This is opposite the typical "calls = bull"
- * mental model — high CE OI is bearish in our palette because the
- * convention reflects OI semantics, not direction. Same as OptionChain
- * and OITracker.
+ * Phase 2 (April 2026, openalgo UI port): strike is now a dropdown sourced
+ * from the chain context when available, with a moneyness chip beside it
+ * (ATM / ITMn / OTMn). Editing the strike OR the option type auto-fills
+ * ``entry_price`` from the chain's CE/PE LTP map — same UX shortcut openalgo
+ * uses in its EditLegDialog. Falls back to a free-text input when the chain
+ * hasn't loaded yet.
+ *
+ * Color convention follows the rest of OpenBull: CE is RED, PE is GREEN.
+ * High CE OI = bearish in our palette because the convention reflects OI
+ * semantics, not direction.
  */
 
-import { useId } from "react";
+import { useId, useMemo } from "react";
 import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import type { ChainContext } from "@/hooks/useChainContext";
 import { cn } from "@/lib/utils";
 
 import type { Action, OptionType } from "@/types/strategy";
@@ -42,9 +46,61 @@ interface Props {
   onChange: (leg: BuilderLeg) => void;
   onRemove: () => void;
   disabled?: boolean;
+  /** Live chain — when present, strike becomes a dropdown and entry_price
+   *  auto-fills from LTP. Optional so unit tests / callers without chain
+   *  data can still render. */
+  chainContext?: ChainContext | null;
 }
 
-export function LegRow({ leg, onChange, onRemove, disabled }: Props) {
+interface Moneyness {
+  label: string;
+  kind: "ATM" | "ITM" | "OTM";
+}
+
+/**
+ * Classify a strike's moneyness relative to ATM, returning a short label
+ * like "ATM", "ITM2", "OTM3". Returns null when inputs aren't enough to
+ * compute (no ATM, missing strike step).
+ *
+ *   CE: strike < ATM → ITM, strike > ATM → OTM
+ *   PE: strike > ATM → ITM, strike < ATM → OTM
+ */
+function strikeMoneyness(
+  strike: number,
+  atm: number | undefined,
+  strikes: number[] | undefined,
+  optType: OptionType,
+): Moneyness | null {
+  if (
+    !Number.isFinite(strike) ||
+    atm === undefined ||
+    !strikes ||
+    strikes.length < 2
+  ) {
+    return null;
+  }
+  const sorted = [...strikes].sort((a, b) => a - b);
+  // Use the median spacing as the "step" — robust to one-off gaps.
+  const diffs: number[] = [];
+  for (let i = 1; i < sorted.length; i++) diffs.push(sorted[i] - sorted[i - 1]);
+  diffs.sort((a, b) => a - b);
+  const step = diffs[Math.floor(diffs.length / 2)] || 0;
+  if (step <= 0) return null;
+  const steps = Math.round((strike - atm) / step);
+  if (steps === 0) return { label: "ATM", kind: "ATM" };
+  const isCallITM = optType === "CE" && steps < 0;
+  const isPutITM = optType === "PE" && steps > 0;
+  const kind: "ITM" | "OTM" = isCallITM || isPutITM ? "ITM" : "OTM";
+  return { label: `${kind}${Math.abs(steps)}`, kind };
+}
+
+export function LegRow({
+  leg,
+  onChange,
+  onRemove,
+  disabled,
+  chainContext,
+}: Props) {
   const ceTone = leg.option_type === "CE";
   const ids = {
     action: useId(),
@@ -54,9 +110,49 @@ export function LegRow({ leg, onChange, onRemove, disabled }: Props) {
     entry: useId(),
   };
 
+  const moneyness = useMemo(
+    () =>
+      strikeMoneyness(
+        leg.strike,
+        chainContext?.atm,
+        chainContext?.strikes,
+        leg.option_type,
+      ),
+    [leg.strike, leg.option_type, chainContext],
+  );
+
   const set = <K extends keyof BuilderLeg>(key: K, value: BuilderLeg[K]) => {
     onChange({ ...leg, [key]: value });
   };
+
+  /** Apply (strike, option_type) and auto-fill entry_price from the chain's
+   *  LTP at that combo. Triggered on either field's onChange so the user
+   *  doesn't have to retype premium after switching to a different strike. */
+  const applyStrikeAndType = (
+    nextStrike: number,
+    nextType: OptionType,
+  ) => {
+    const ltp =
+      chainContext &&
+      Number.isFinite(nextStrike) &&
+      (nextType === "CE"
+        ? chainContext.ceLtpByStrike.get(nextStrike)
+        : chainContext.peLtpByStrike.get(nextStrike));
+    onChange({
+      ...leg,
+      strike: nextStrike,
+      option_type: nextType,
+      entry_price:
+        typeof ltp === "number" && ltp > 0
+          ? Number(ltp.toFixed(2))
+          : leg.entry_price,
+    });
+  };
+
+  const useStrikeDropdown =
+    chainContext !== null &&
+    chainContext !== undefined &&
+    chainContext.strikes.length > 0;
 
   return (
     <div className="grid grid-cols-12 items-end gap-2 rounded-md border border-border bg-card/50 p-2">
@@ -90,7 +186,9 @@ export function LegRow({ leg, onChange, onRemove, disabled }: Props) {
         <select
           id={ids.type}
           value={leg.option_type}
-          onChange={(e) => set("option_type", e.target.value as OptionType)}
+          onChange={(e) =>
+            applyStrikeAndType(leg.strike, e.target.value as OptionType)
+          }
           disabled={disabled}
           className={cn(
             "h-8 w-full rounded-lg border bg-background px-2 text-sm font-medium outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50",
@@ -102,25 +200,66 @@ export function LegRow({ leg, onChange, onRemove, disabled }: Props) {
         </select>
       </div>
 
-      {/* Strike */}
+      {/* Strike — dropdown when chain is loaded, free input otherwise */}
       <div className="col-span-3 space-y-1">
-        <label htmlFor={ids.strike} className="block text-[11px] text-muted-foreground">
+        <label
+          htmlFor={ids.strike}
+          className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+        >
           Strike
+          {moneyness && (
+            <span
+              className={cn(
+                "rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wider",
+                moneyness.kind === "ATM" &&
+                  "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+                moneyness.kind === "ITM" &&
+                  "bg-sky-500/15 text-sky-700 dark:text-sky-400",
+                moneyness.kind === "OTM" &&
+                  "bg-muted text-muted-foreground",
+              )}
+            >
+              {moneyness.label}
+            </span>
+          )}
         </label>
-        <Input
-          id={ids.strike}
-          type="number"
-          inputMode="decimal"
-          step="0.5"
-          min="0"
-          value={Number.isFinite(leg.strike) ? leg.strike : ""}
-          onChange={(e) => {
-            const v = e.target.value;
-            set("strike", v === "" ? Number.NaN : Number(v));
-          }}
-          disabled={disabled}
-          className="h-8"
-        />
+        {useStrikeDropdown ? (
+          <select
+            id={ids.strike}
+            value={Number.isFinite(leg.strike) ? String(leg.strike) : ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "") return;
+              applyStrikeAndType(Number(v), leg.option_type);
+            }}
+            disabled={disabled}
+            className="h-8 w-full rounded-lg border border-input bg-background px-2 text-sm tabular-nums outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
+          >
+            {!Number.isFinite(leg.strike) && (
+              <option value="">— pick —</option>
+            )}
+            {chainContext!.strikes.map((s) => (
+              <option key={s} value={String(s)}>
+                {s} {chainContext!.atm === s ? "·ATM" : ""}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <Input
+            id={ids.strike}
+            type="number"
+            inputMode="decimal"
+            step="0.5"
+            min="0"
+            value={Number.isFinite(leg.strike) ? leg.strike : ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              set("strike", v === "" ? Number.NaN : Number(v));
+            }}
+            disabled={disabled}
+            className="h-8"
+          />
+        )}
       </div>
 
       {/* Lots */}

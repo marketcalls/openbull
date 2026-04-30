@@ -208,19 +208,26 @@ export default function StrategyPortfolio() {
           </div>
           <div className="space-y-1">
             <label className="block text-xs text-muted-foreground">Status</label>
-            <select
-              value={statusFilter}
-              onChange={(e) =>
-                setStatusFilter(e.target.value as StrategyStatus | "all")
-              }
-              className="h-8 w-28 rounded-lg border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              {STATUS_OPTIONS.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
+            <div className="inline-flex h-8 rounded-lg border border-input bg-background p-0.5">
+              {STATUS_OPTIONS.map((s) => {
+                const active = statusFilter === s.value;
+                return (
+                  <button
+                    key={s.value}
+                    type="button"
+                    onClick={() => setStatusFilter(s.value)}
+                    className={cn(
+                      "inline-flex h-7 items-center rounded-md px-2.5 text-xs font-medium transition-colors",
+                      active
+                        ? "bg-primary text-primary-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {s.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
           <div className="space-y-1">
             <label className="block text-xs text-muted-foreground">
@@ -310,20 +317,42 @@ export default function StrategyPortfolio() {
         </Card>
       ) : visibleStrategies.length === 0 ? (
         <Card>
-          <CardContent className="flex flex-col items-center justify-center gap-2 py-12 text-center">
-            <p className="text-base font-medium">No strategies match.</p>
-            <p className="max-w-md text-xs text-muted-foreground">
-              {(strategiesQuery.data?.length ?? 0) === 0
-                ? "Build your first strategy in the Strategy Builder, then click Save."
-                : "Adjust the filters above to see more."}
-            </p>
+          <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted/40 text-muted-foreground">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="h-6 w-6"
+              >
+                <path d="M3 3h7v7H3z" />
+                <path d="M14 3h7v7h-7z" />
+                <path d="M3 14h7v7H3z" />
+                <path d="M14 14h7v7h-7z" />
+              </svg>
+            </div>
+            <div className="space-y-1">
+              <p className="text-base font-medium">No strategies match</p>
+              <p className="max-w-md text-xs text-muted-foreground">
+                {(strategiesQuery.data?.length ?? 0) === 0
+                  ? "Build your first strategy in the Strategy Builder, save it, and it'll show up here with live P&L."
+                  : "Adjust the filters above to widen the search."}
+              </p>
+            </div>
             <Link to="/tools/strategybuilder">
-              <Button variant="outline">Open Strategy Builder</Button>
+              <Button variant="outline">+ Open Strategy Builder</Button>
             </Link>
           </CardContent>
         </Card>
       ) : (
-        <div className="space-y-3">
+        // 2-column grid on lg+ so power users can scan a portfolio at a
+        // glance. Single-col on smaller viewports keeps the expanded leg
+        // table from compressing.
+        <div className="grid gap-3 lg:grid-cols-2">
           {visibleStrategies.map((s) => (
             <StrategyCard
               key={s.id}
