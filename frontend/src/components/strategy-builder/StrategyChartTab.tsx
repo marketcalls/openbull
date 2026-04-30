@@ -522,6 +522,27 @@ export function StrategyChartTab({
               Entry premium ₹{data.entry_premium.toFixed(2)}
             </span>
           )}
+          {/* Credit / Debit / Flat — backend-classified per openalgo's
+              convention (SELL=+1 per-share). */}
+          {data.tag === "credit" ? (
+            <span
+              className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 font-medium text-emerald-700 dark:text-emerald-400"
+              title={`Net credit ₹${data.entry_abs_premium.toFixed(2)} per share (openalgo formula)`}
+            >
+              Net credit · ₹{data.entry_abs_premium.toFixed(2)}/sh
+            </span>
+          ) : data.tag === "debit" ? (
+            <span
+              className="rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-1 font-medium text-rose-700 dark:text-rose-400"
+              title={`Net debit ₹${data.entry_abs_premium.toFixed(2)} per share (openalgo formula)`}
+            >
+              Net debit · ₹{data.entry_abs_premium.toFixed(2)}/sh
+            </span>
+          ) : (
+            <span className="rounded-md border border-border bg-muted/40 px-2 py-1 font-medium">
+              Flat
+            </span>
+          )}
           {includeUnderlying && !data.underlying_available && (
             <span className="rounded-md bg-amber-500/10 px-2 py-1 text-amber-600 dark:text-amber-400">
               Underlying intraday history not available — overlay hidden

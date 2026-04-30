@@ -206,11 +206,19 @@ export interface ChartLegSeries {
 
 export interface ChartCombinedPoint {
   time: number;
-  /** Position premium at this candle = sum_legs(sign * lots * lot_size * close). */
+  /** Position premium at this candle (rupees, signed BUY=+1):
+   *  sum_legs(sign * lots * lot_size * close). Positive = net debit. */
   value: number;
+  /** Per-share net premium with openalgo's sign convention (SELL=+1):
+   *  sum_legs(per_share_sign * close). Positive = credit, negative = debit. */
+  net_premium: number;
+  /** |net_premium| — openalgo's "combined_premium" axis label. */
+  combined_premium: number;
   /** Present only when every leg has entry_price. value(t) - entry_premium. */
   pnl?: number;
 }
+
+export type StrategyTag = "credit" | "debit" | "flat";
 
 export interface ChartResponseData {
   underlying: string;
@@ -223,7 +231,14 @@ export interface ChartResponseData {
   underlying_series: ChartCandle[];
   leg_series: ChartLegSeries[];
   combined_series: ChartCombinedPoint[];
+  /** Rupee net debit at entry (positive = paid premium, negative = received). */
   entry_premium: number | null;
+  /** Per-share net premium at entry (openalgo sign: positive = credit). */
+  entry_net_premium: number;
+  /** |entry_net_premium| — what openalgo shows in its info bar. */
+  entry_abs_premium: number;
+  /** openalgo's classification: 'credit' | 'debit' | 'flat'. */
+  tag: StrategyTag;
 }
 
 export interface ChartResponse {

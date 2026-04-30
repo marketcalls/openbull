@@ -8,18 +8,45 @@ time axis. The Strategy Builder by contrast has *fixed* legs — the user
 chose them — so the algorithm reduces to "fetch each leg's history,
 intersect timestamps, sum signed contributions per candle".
 
-Output series:
+Output series — every candle carries TWO equivalent views:
 
-* ``combined_series[*].value`` — position premium at that historical close,
-  signed the same way the snapshot endpoint signs ``position_premium``:
-  ``sum_legs( sign * lots * lot_size * close )`` where ``sign = +1`` for
-  BUY, ``-1`` for SELL. Positive = net debit, negative = net credit.
+* ``combined_series[*].value`` — signed rupee position premium, scaled by
+  the lot multiplier so it's directly an MTM number:
+  ``sum_legs( sign_buy * lots * lot_size * close )`` where
+  ``sign_buy = +1 for BUY, -1 for SELL``. Positive = net debit, negative
+  = net credit. This drives openbull's P&L tab and is the "useful number".
+
+* ``combined_series[*].net_premium`` — openalgo-shape per-share signed
+  net premium: ``sum_legs( sign_sell * close )`` where
+  ``sign_sell = +1 for SELL, -1 for BUY``. Positive = credit, negative
+  = debit. Sign convention is INVERTED from ``value`` (this is openalgo's
+  convention, kept for parity).
+
+* ``combined_series[*].combined_premium`` — ``|net_premium|`` (always
+  positive). This is what openalgo labels "combined premium" on its
+  chart axis. Provided alongside ``value`` so users who want
+  openalgo-identical visuals can render this column instead.
+
 * ``combined_series[*].pnl`` — present only when every leg carries an
-  ``entry_price``. Equals ``value(t) - value(entry)`` so the Portfolio
-  view can render an MTM curve without re-doing the math.
-* Per-leg series and (optional) underlying overlay are returned alongside
-  so the chart can offer "show legs" / "show underlying" toggles without
-  another round-trip.
+  ``entry_price``. Equals ``value(t) - value(entry)``.
+
+The four columns are mutually consistent. Worked example for a 1-lot
+NIFTY (lot_size=75) Bull Call Spread (BUY ATM CE @150, SELL OTM CE @50)
+at a candle where CE@ATM=160 and CE@OTM=55:
+
+  value(t)            = (+1)(1)(75)(160) + (-1)(1)(75)(55) = 7,875
+  net_premium(t)      = (-1)(160)  +  (+1)(55)             = -105
+  combined_premium(t) = |net_premium|                       = 105
+  value / (lots*lot_size) == -net_premium  →  7875/75 == -(-105) ✓
+
+``tag`` (top-level) follows openalgo's classification rule on the entry
+premium: 'credit' if entry_net_premium > 0, 'debit' if < 0, else 'flat'.
+Equivalent to openbull's "entry_premium < 0 → credit" rule given the
+inverted sign conventions.
+
+Per-leg series and (optional) underlying overlay are returned alongside
+so the chart can offer "show legs" / "show underlying" toggles without
+another round-trip.
 
 Critical correctness call: timestamps where *any* leg lacks a close are
 dropped (intersection, not union). Without this you'd see phantom dips
@@ -169,6 +196,7 @@ def get_strategy_chart_data(
     leg_outputs: list[dict] = []
     leg_close_maps: list[dict[int, float]] = []
     leg_multipliers: list[float] = []
+    leg_per_share_signs: list[int] = []  # +1 for SELL, -1 for BUY (openalgo convention)
     leg_entries: list[float | None] = []
 
     for idx, leg in enumerate(legs):
@@ -179,6 +207,11 @@ def get_strategy_chart_data(
         leg_exchange = (leg.get("exchange") or default_opt_exch).upper()
         sign = _action_sign(action)
         multiplier = sign * lots * lot_size
+        # openalgo's per-share net-premium uses SELL=+1 (received) / BUY=-1
+        # (paid). This is the inverse of openbull's `sign` (which uses BUY=+1
+        # for the rupee P&L convention). Both are mathematically valid; we
+        # emit both so the chart can render either view.
+        per_share_sign = -sign
 
         leg_out: dict[str, Any] = {
             "index": idx,
@@ -219,6 +252,7 @@ def get_strategy_chart_data(
 
         leg_close_maps.append(cmap)
         leg_multipliers.append(multiplier)
+        leg_per_share_signs.append(per_share_sign)
         leg_entries.append(entry)
         leg_outputs.append(leg_out)
 
@@ -249,12 +283,22 @@ def get_strategy_chart_data(
         if all_have_entries
         else None
     )
+    # openalgo-shape per-share entry premium (signed). Used for the
+    # credit/debit `tag` classification. Always computable — entry_price
+    # defaults to 0 if any leg is missing it (gives `tag = 'flat'`).
+    entry_net_per_share = sum(
+        sign * (entry or 0.0)
+        for sign, entry in zip(leg_per_share_signs, leg_entries)
+    )
 
     combined_series: list[dict] = []
     for ts in sorted(common_ts):
         value = 0.0
+        net_premium = 0.0
         valid = True
-        for cmap, mult in zip(leg_close_maps, leg_multipliers):
+        for cmap, mult, ps_sign in zip(
+            leg_close_maps, leg_multipliers, leg_per_share_signs
+        ):
             close = cmap.get(ts)
             if close is None:
                 # Should not happen given the intersection above, but the
@@ -263,9 +307,16 @@ def get_strategy_chart_data(
                 valid = False
                 break
             value += mult * close
+            net_premium += ps_sign * close
         if not valid:
             continue
-        entry = {"time": ts, "value": round(value, 2)}
+        entry = {
+            "time": ts,
+            "value": round(value, 2),
+            # openalgo parity:
+            "net_premium": round(net_premium, 2),
+            "combined_premium": round(abs(net_premium), 2),
+        }
         if entry_premium is not None:
             entry["pnl"] = round(value - entry_premium, 2)
         combined_series.append(entry)
@@ -301,6 +352,16 @@ def get_strategy_chart_data(
         except (TypeError, ValueError):
             underlying_ltp = 0.0
 
+    # openalgo-style classification on the entry net premium (per-share).
+    # Sign convention: SELL = +1, BUY = -1 (per leg_per_share_signs). So a
+    # net-credit strategy has entry_net_per_share > 0.
+    if entry_net_per_share > 0:
+        tag = "credit"
+    elif entry_net_per_share < 0:
+        tag = "debit"
+    else:
+        tag = "flat"
+
     return True, {
         "status": "success",
         "data": {
@@ -316,6 +377,10 @@ def get_strategy_chart_data(
             "entry_premium": (
                 round(entry_premium, 2) if entry_premium is not None else None
             ),
+            # openalgo parity (per-share, sign-inverted from `entry_premium`):
+            "entry_net_premium": round(entry_net_per_share, 2),
+            "entry_abs_premium": round(abs(entry_net_per_share), 2),
+            "tag": tag,
         },
     }, 200
 
