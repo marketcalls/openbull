@@ -28,13 +28,21 @@ def get_gex_data(
     broker: str,
     config: dict | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
-    """Compute Gamma Exposure (GEX) per strike from the option chain."""
+    """Compute Gamma Exposure (GEX) per strike from the option chain.
+
+    Strike window sized to 23 either side of ATM (47 strikes = 94
+    symbols). A wider window pushes the request past the Fyers
+    multiquote OI cap (100 symbols, see broker/fyers/api/data.py),
+    OI silently falls back to 0 for every row, and gamma * OI per
+    strike collapses to 0 — the GEX page renders empty. Same
+    constraint as OI Tracker / Max Pain.
+    """
     try:
         ok, chain_response, status_code = get_option_chain(
             underlying=underlying,
             exchange=exchange,
             expiry_date=expiry_date,
-            strike_count=45,
+            strike_count=23,
             auth_token=auth_token,
             broker=broker,
             config=config,
