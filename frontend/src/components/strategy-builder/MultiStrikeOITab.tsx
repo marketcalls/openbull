@@ -1,33 +1,43 @@
 /**
  * Multi-Strike OI tab — overlays each option leg's historical Open Interest
- * on a single chart, with the underlying close on a secondary y-axis. Ported
- * from openalgo's MultiStrikeOITab; rendered via Plotly to stay consistent
- * with openbull's other chart tools (StrategyChartTab, OptionGreeks, etc).
+ * on a single chart, with the underlying close on a secondary y-axis.
  *
  * Data source: POST /web/strategybuilder/multi-strike-oi (see
- * backend/services/multi_strike_oi_service.py). The backend already does
- * the per-leg history fan-out, OI extraction, and trading-window cap, so
- * this component is presentation-only.
+ * backend/services/multi_strike_oi_service.py). Backend handles the per-leg
+ * history fan-out, OI extraction, and trading-window cap, so this component
+ * is presentation-only.
+ *
+ * Chart engine: TradingView lightweight-charts (April 2026 — switched from
+ * Plotly to match openalgo's MultiStrikeOITab and pick up the perf win on
+ * dense intraday OI series). Same chart-init / theme-reactivity / IST-tick
+ * pattern as StrategyChartTab and StraddleChart.
  *
  * No math here — OI is broker-reported, not computed. A leg whose broker
- * doesn't ship historical OI surfaces as ``has_oi=false`` in the response;
+ * doesn't ship historical OI surfaces as `has_oi=false` in the response;
  * we badge it in the UI and skip drawing its (zeroed) line.
- *
- * Tab-scoped fetch: parent gates with ``enabled={activeTab === "oi"}`` so
- * the broker isn't polled on every page mount.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ColorType,
+  CrosshairMode,
+  LineSeries,
+  LineStyle,
+  createChart,
+  type IChartApi,
+  type ISeriesApi,
+  type UTCTimestamp,
+} from "lightweight-charts";
 import { toast } from "sonner";
 
 import { getMultiStrikeOI } from "@/api/strategybuilder";
-import Plot from "@/components/charts/Plot";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/contexts/ThemeContext";
 import { cn } from "@/lib/utils";
 import type {
   Action,
   MultiStrikeOIData,
+  MultiStrikeOILeg,
   MultiStrikeOILegInput,
   OptionType,
 } from "@/types/strategy";
@@ -66,6 +76,8 @@ const LEG_PALETTE: ReadonlyArray<string> = [
   "#8b5cf6", // purple
 ];
 
+const CHART_HEIGHT = 480;
+
 export interface OILegInput {
   symbol: string;
   action: Action;
@@ -82,11 +94,7 @@ interface Props {
   enabled: boolean;
 }
 
-function tsToIstMs(unixSec: number): number {
-  return unixSec * 1000 + 5.5 * 60 * 60 * 1000;
-}
-
-/** "NIFTY 30APR 24000 CALL" — OI legend label. */
+/** "NIFTY 30APR 24000 CALL" — legend / toggle label. */
 function legLabel(
   underlying: string,
   optionType: OptionType | undefined,
@@ -100,7 +108,7 @@ function legLabel(
     .join(" ");
 }
 
-/** Indian short form for OI counts: 12,34,567 → 12.35L, 1,23,45,678 → 1.23Cr. */
+/** Indian short-form OI count: 12,34,567 → 12.35L; 1,23,45,678 → 1.23Cr. */
 function formatOI(v: number): string {
   if (!Number.isFinite(v)) return "—";
   const abs = Math.abs(v);
@@ -123,10 +131,20 @@ export function MultiStrikeOITab({
   const [interval, setInterval] = useState<string>("5m");
   const [days, setDays] = useState<number>(5);
   const [includeUnderlying, setIncludeUnderlying] = useState<boolean>(true);
+  /** Symbols (or "__underlying__") the user has hidden via legend toggles.
+   *  Toggling visibility doesn't refetch — applyOptions on the existing series. */
+  const [hiddenSeries, setHiddenSeries] = useState<Record<string, boolean>>({});
   const [data, setData] = useState<MultiStrikeOIData | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const underlyingSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  /** Keyed by leg.symbol — survives leg add/remove without leaking series. */
+  const legSeriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
+  const dataRef = useRef<MultiStrikeOIData | null>(null);
 
   const apiLegs = useMemo<MultiStrikeOILegInput[]>(
     () =>
@@ -142,11 +160,222 @@ export function MultiStrikeOITab({
 
   const legsKey = JSON.stringify(apiLegs);
 
+  const colors = useMemo(
+    () => ({
+      text: isDark ? "#a6adbb" : "#333",
+      grid: isDark ? "rgba(166,173,187,0.1)" : "rgba(0,0,0,0.08)",
+      border: isDark ? "rgba(166,173,187,0.2)" : "rgba(0,0,0,0.2)",
+      crosshair: isDark ? "rgba(166,173,187,0.5)" : "rgba(0,0,0,0.3)",
+      underlying: isDark ? "#fbbf24" : "#d97706", // amber
+    }),
+    [isDark],
+  );
+
+  // ── Chart init / re-init ────────────────────────────────────────────
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const w = containerRef.current.offsetWidth || 800;
+
+    if (chartRef.current) {
+      chartRef.current.remove();
+      chartRef.current = null;
+      underlyingSeriesRef.current = null;
+      legSeriesRef.current.clear();
+    }
+
+    const chart = createChart(containerRef.current, {
+      width: w,
+      height: CHART_HEIGHT,
+      layout: {
+        background: { type: ColorType.Solid, color: "transparent" },
+        textColor: colors.text,
+      },
+      grid: {
+        vertLines: { color: colors.grid, style: 1 as const, visible: true },
+        horzLines: { color: colors.grid, style: 1 as const, visible: true },
+      },
+      leftPriceScale: {
+        visible: true,
+        borderColor: colors.border,
+        scaleMargins: { top: 0.08, bottom: 0.08 },
+      },
+      rightPriceScale: {
+        visible: true,
+        borderColor: colors.border,
+        scaleMargins: { top: 0.08, bottom: 0.08 },
+      },
+      timeScale: {
+        borderColor: colors.border,
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: (time: number) => {
+          const ist = new Date(time * 1000 + 5.5 * 60 * 60 * 1000);
+          const hh = ist.getUTCHours().toString().padStart(2, "0");
+          const mm = ist.getUTCMinutes().toString().padStart(2, "0");
+          if (days > 1) {
+            const dd = ist.getUTCDate().toString().padStart(2, "0");
+            const mo = (ist.getUTCMonth() + 1).toString().padStart(2, "0");
+            return `${dd}/${mo} ${hh}:${mm}`;
+          }
+          return `${hh}:${mm}`;
+        },
+      },
+      localization: {
+        timeFormatter: (time: number) => {
+          const ist = new Date(time * 1000 + 5.5 * 60 * 60 * 1000);
+          const dd = ist.getUTCDate().toString().padStart(2, "0");
+          const mo = (ist.getUTCMonth() + 1).toString().padStart(2, "0");
+          const yy = ist.getUTCFullYear().toString().slice(-2);
+          const hh = ist.getUTCHours().toString().padStart(2, "0");
+          const mm = ist.getUTCMinutes().toString().padStart(2, "0");
+          return `${dd}/${mo}/${yy} ${hh}:${mm} IST`;
+        },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { width: 1 as const, color: colors.crosshair, style: 2 as const },
+        horzLine: { width: 1 as const, color: colors.crosshair, style: 2 as const },
+      },
+    });
+
+    // Underlying series — left axis if no leg series, right axis when legs
+    // are present (OI on left, underlying on right). We always create on
+    // RIGHT for stability; legs go LEFT (OI Open Interest scale).
+    const u = chart.addSeries(LineSeries, {
+      color: colors.underlying,
+      lineWidth: 2,
+      priceScaleId: "right",
+      title: "Underlying",
+      lastValueVisible: true,
+      priceLineVisible: false,
+      lineStyle: LineStyle.Dotted,
+    });
+
+    chartRef.current = chart;
+    underlyingSeriesRef.current = u;
+
+    if (dataRef.current) applyDataToChart(dataRef.current);
+
+    return () => {
+      chart.remove();
+      chartRef.current = null;
+      underlyingSeriesRef.current = null;
+      legSeriesRef.current.clear();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDark, days]);
+
+  // Resize observer.
+  useEffect(() => {
+    const onResize = () => {
+      if (chartRef.current && containerRef.current) {
+        chartRef.current.applyOptions({ width: containerRef.current.offsetWidth });
+      }
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // ── Data binding ────────────────────────────────────────────────────
+  const applyDataToChart = useCallback(
+    (d: MultiStrikeOIData) => {
+      const chart = chartRef.current;
+      const u = underlyingSeriesRef.current;
+      if (!chart || !u) return;
+
+      // Underlying — only when toggle is on AND backend says it's available.
+      if (
+        includeUnderlying &&
+        d.underlying_available &&
+        d.underlying_series.length > 0
+      ) {
+        const sortedU = [...d.underlying_series].sort((a, b) => a.time - b.time);
+        u.setData(sortedU.map((p) => ({ time: p.time as UTCTimestamp, value: p.value })));
+        u.applyOptions({ visible: !hiddenSeries["__underlying__"] });
+      } else {
+        u.setData([]);
+        u.applyOptions({ visible: false });
+      }
+
+      // Reconcile leg series — drop those for legs that disappeared.
+      const wantSymbols = new Set(d.legs.filter((l) => l.has_oi).map((l) => l.symbol));
+      for (const [sym, series] of legSeriesRef.current.entries()) {
+        if (!wantSymbols.has(sym)) {
+          try {
+            chart.removeSeries(series);
+          } catch {
+            /* already removed */
+          }
+          legSeriesRef.current.delete(sym);
+        }
+      }
+
+      // Bind / update each leg series. has_oi=false legs are skipped — they'd
+      // draw a flat zero line that adds noise.
+      d.legs.forEach((leg, i) => {
+        if (!leg.has_oi || leg.series.length === 0) return;
+        const color = LEG_PALETTE[i % LEG_PALETTE.length];
+        let series = legSeriesRef.current.get(leg.symbol);
+        if (!series) {
+          series = chart.addSeries(LineSeries, {
+            color,
+            lineWidth: 2,
+            priceScaleId: "left",
+            title: legLabel(d.underlying, leg.option_type, leg.strike, leg.expiry),
+            lastValueVisible: true,
+            priceLineVisible: false,
+            visible: !hiddenSeries[leg.symbol],
+          });
+          legSeriesRef.current.set(leg.symbol, series);
+        } else {
+          series.applyOptions({
+            color,
+            title: legLabel(d.underlying, leg.option_type, leg.strike, leg.expiry),
+            visible: !hiddenSeries[leg.symbol],
+          });
+        }
+        const sortedLeg = [...leg.series].sort((a, b) => a.time - b.time);
+        series.setData(
+          sortedLeg.map((p) => ({ time: p.time as UTCTimestamp, value: p.value })),
+        );
+      });
+
+      chart.timeScale().fitContent();
+    },
+    [includeUnderlying, hiddenSeries],
+  );
+
+  // Re-bind when toggles change without refetching.
+  useEffect(() => {
+    if (dataRef.current) applyDataToChart(dataRef.current);
+  }, [applyDataToChart]);
+
+  // Toggle visibility on existing series — no rebind, no refetch.
+  useEffect(() => {
+    underlyingSeriesRef.current?.applyOptions({
+      visible: !hiddenSeries["__underlying__"],
+    });
+    for (const [sym, series] of legSeriesRef.current.entries()) {
+      series.applyOptions({ visible: !hiddenSeries[sym] });
+    }
+  }, [hiddenSeries]);
+
+  // ── Auto-fetch on prop changes ──────────────────────────────────────
   useEffect(() => {
     if (!enabled) return;
     if (apiLegs.length === 0) {
       setData(null);
+      dataRef.current = null;
       setError(null);
+      underlyingSeriesRef.current?.setData([]);
+      for (const series of legSeriesRef.current.values()) {
+        try {
+          chartRef.current?.removeSeries(series);
+        } catch {
+          /* already removed */
+        }
+      }
+      legSeriesRef.current.clear();
       return;
     }
 
@@ -164,7 +393,9 @@ export function MultiStrikeOITab({
     })
       .then((resp) => {
         if (requestIdRef.current !== reqId) return;
+        dataRef.current = resp;
         setData(resp);
+        applyDataToChart(resp);
       })
       .catch((e) => {
         if (requestIdRef.current !== reqId) return;
@@ -210,7 +441,9 @@ export function MultiStrikeOITab({
     })
       .then((resp) => {
         if (requestIdRef.current !== reqId) return;
+        dataRef.current = resp;
         setData(resp);
+        applyDataToChart(resp);
       })
       .catch((e) => {
         if (requestIdRef.current !== reqId) return;
@@ -227,135 +460,17 @@ export function MultiStrikeOITab({
       });
   };
 
-  const colors = useMemo(
-    () => ({
-      text: isDark ? "#e0e0e0" : "#333333",
-      grid: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)",
-      underlying: "#f59e0b",
-      hoverBg: isDark ? "#1e293b" : "#ffffff",
-      hoverText: isDark ? "#e0e0e0" : "#333333",
-      hoverBorder: isDark ? "#475569" : "#e2e8f0",
-    }),
-    [isDark],
-  );
-
-  const traces = useMemo<unknown[]>(() => {
-    if (!data) return [];
-    const out: unknown[] = [];
-
-    // One line per leg with OI data.
-    data.legs.forEach((leg, i) => {
-      if (!leg.has_oi || leg.series.length === 0) return;
-      const color = LEG_PALETTE[i % LEG_PALETTE.length];
-      out.push({
-        x: leg.series.map((p) => tsToIstMs(p.time)),
-        y: leg.series.map((p) => p.value),
-        type: "scattergl",
-        mode: "lines",
-        name: legLabel(data.underlying, leg.option_type, leg.strike, leg.expiry),
-        line: { color, width: 2 },
-        yaxis: "y",
-        hovertemplate:
-          "%{x|%d/%m %H:%M IST}<br>OI %{y:,.0f}<extra></extra>",
-      });
-    });
-
-    // Underlying overlay (right axis).
-    if (
-      includeUnderlying &&
-      data.underlying_available &&
-      data.underlying_series.length > 0
-    ) {
-      out.push({
-        x: data.underlying_series.map((p) => tsToIstMs(p.time)),
-        y: data.underlying_series.map((p) => p.value),
-        type: "scattergl",
-        mode: "lines",
-        name: data.underlying,
-        line: { color: colors.underlying, width: 1.5, dash: "dot" },
-        yaxis: "y2",
-        hovertemplate:
-          "%{x|%d/%m %H:%M IST}<br>" +
-          data.underlying +
-          " %{y:.2f}<extra></extra>",
-      });
-    }
-
-    return out;
-  }, [data, includeUnderlying, colors]);
-
-  const layout = useMemo<Record<string, unknown>>(() => {
-    const showY2 =
-      includeUnderlying &&
-      data?.underlying_available === true &&
-      (data?.underlying_series.length ?? 0) > 0;
-
-    return {
-      paper_bgcolor: "rgba(0,0,0,0)",
-      plot_bgcolor: "rgba(0,0,0,0)",
-      font: { color: colors.text, family: "system-ui, sans-serif" },
-      hovermode: "x unified",
-      hoverlabel: {
-        bgcolor: colors.hoverBg,
-        font: { color: colors.hoverText, size: 12 },
-        bordercolor: colors.hoverBorder,
-      },
-      showlegend: true,
-      legend: {
-        orientation: "h",
-        x: 0.5,
-        xanchor: "center",
-        y: -0.18,
-        font: { color: colors.text, size: 11 },
-      },
-      margin: { l: 70, r: showY2 ? 70 : 30, t: 30, b: 70 },
-      xaxis: {
-        type: "date",
-        tickformat: days > 1 ? "%d/%m %H:%M" : "%H:%M",
-        tickfont: { color: colors.text, size: 10 },
-        gridcolor: colors.grid,
-        zeroline: false,
-      },
-      yaxis: {
-        title: { text: "Open Interest", font: { color: colors.text, size: 12 } },
-        tickfont: { color: colors.text, size: 10 },
-        gridcolor: colors.grid,
-        zeroline: false,
-      },
-      yaxis2: showY2
-        ? {
-            title: {
-              text: `${data?.underlying ?? "Underlying"} Close`,
-              font: { color: colors.underlying, size: 12 },
-            },
-            tickfont: { color: colors.underlying, size: 10 },
-            overlaying: "y",
-            side: "right",
-            showgrid: false,
-            zeroline: false,
-          }
-        : undefined,
-    };
-  }, [data, includeUnderlying, colors, days]);
-
-  const config = useMemo(
-    () => ({
-      displayModeBar: true,
-      displaylogo: false,
-      modeBarButtonsToRemove: [
-        "select2d",
-        "lasso2d",
-        "autoScale2d",
-        "toggleSpikelines",
-      ],
-      responsive: true,
-    }),
-    [],
-  );
+  const toggleSeries = useCallback((key: string) => {
+    setHiddenSeries((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
 
   const hasUsableLegs = apiLegs.length > 0;
   const missingOI = useMemo(
     () => (data?.legs ?? []).filter((l) => !l.has_oi).length,
+    [data],
+  );
+  const visibleLegs = useMemo<MultiStrikeOILeg[]>(
+    () => (data?.legs ?? []).filter((l) => l.has_oi && l.series.length > 0),
     [data],
   );
 
@@ -417,31 +532,28 @@ export function MultiStrikeOITab({
       {data && (
         <div className="flex flex-wrap gap-2 text-xs">
           <span className="rounded-md border border-border bg-muted/40 px-2 py-1">
-            {data.legs.filter((l) => l.has_oi).length} of {data.legs.length}{" "}
-            legs · {data.interval} · {data.days}d
+            {visibleLegs.length} of {data.legs.length} legs · {data.interval} ·{" "}
+            {data.days}d
           </span>
           {data.underlying_ltp > 0 && (
             <span className="rounded-md border border-border bg-muted/40 px-2 py-1">
               {data.underlying} spot {data.underlying_ltp.toFixed(2)}
             </span>
           )}
-          {/* Latest OI per leg, if available */}
-          {data.legs
-            .filter((l) => l.has_oi && l.series.length > 0)
-            .slice(0, 4)
-            .map((l) => {
-              const last = l.series[l.series.length - 1];
-              return (
-                <span
-                  key={l.symbol}
-                  className="rounded-md border border-border bg-muted/40 px-2 py-1"
-                  title={l.symbol}
-                >
-                  {legLabel(data.underlying, l.option_type, l.strike, l.expiry)}{" "}
-                  {formatOI(last.value)}
-                </span>
-              );
-            })}
+          {/* Latest OI per leg, max 4 to keep the strip readable */}
+          {visibleLegs.slice(0, 4).map((l) => {
+            const last = l.series[l.series.length - 1];
+            return (
+              <span
+                key={l.symbol}
+                className="rounded-md border border-border bg-muted/40 px-2 py-1"
+                title={l.symbol}
+              >
+                {legLabel(data.underlying, l.option_type, l.strike, l.expiry)}{" "}
+                {formatOI(last.value)}
+              </span>
+            );
+          })}
           {missingOI > 0 && (
             <span className="rounded-md bg-amber-500/10 px-2 py-1 text-amber-600 dark:text-amber-400">
               {missingOI} leg{missingOI === 1 ? "" : "s"} missing OI history
@@ -461,45 +573,90 @@ export function MultiStrikeOITab({
         </div>
       )}
 
-      {!hasUsableLegs ? (
-        <div className="flex h-[480px] flex-col items-center justify-center gap-1 text-center text-muted-foreground">
-          <p className="text-sm">No legs to track.</p>
-          <p className="text-xs">
-            Add legs with resolved symbols — per-leg OI series will load
-            automatically.
-          </p>
-        </div>
-      ) : loading && !data ? (
-        <div className="flex h-[480px] items-center justify-center text-sm text-muted-foreground">
-          Fetching {apiLegs.length} leg OI histor
-          {apiLegs.length === 1 ? "y" : "ies"}…
-        </div>
-      ) : data &&
-        data.legs.some((l) => l.has_oi && l.series.length > 0) ? (
-        <Plot
-          data={traces}
-          layout={layout}
-          config={config}
-          useResizeHandler
-          style={{ width: "100%", height: "480px" }}
+      {/* Chart */}
+      <div className="relative">
+        <div
+          ref={containerRef}
+          className="relative w-full rounded-lg border border-border/50"
+          style={{ height: CHART_HEIGHT }}
         />
-      ) : data ? (
-        <div className="flex h-[480px] flex-col items-center justify-center gap-1 text-center text-muted-foreground">
-          <p className="text-sm">No OI data.</p>
-          <p className="text-xs">
-            Your broker didn't return historical OI for any of these legs.
-          </p>
-        </div>
-      ) : null}
+        {loading && (
+          <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-background/60">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              Loading OI data…
+            </div>
+          </div>
+        )}
+        {!hasUsableLegs && !loading && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 rounded-lg bg-background/80 text-center text-muted-foreground">
+            <p className="text-sm">No legs to track.</p>
+            <p className="text-xs">
+              Add legs with resolved symbols — per-leg OI series will load
+              automatically.
+            </p>
+          </div>
+        )}
+        {hasUsableLegs && data && visibleLegs.length === 0 && !loading && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 rounded-lg bg-background/80 text-center text-muted-foreground">
+            <p className="text-sm">No OI data.</p>
+            <p className="text-xs">
+              Your broker didn't return historical OI for any of these legs.
+            </p>
+          </div>
+        )}
+      </div>
 
-      {/* Inline note matching openalgo's tooltip / status */}
-      {data && data.legs.some((l) => l.has_oi) && (
-        <p
-          className={cn(
-            "text-[11px] text-muted-foreground",
-            data.legs.length > 1 && "italic",
+      {/* Legend / per-series toggles below the chart */}
+      {data && visibleLegs.length > 0 && (
+        <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
+          {data.underlying_available && (
+            <button
+              type="button"
+              onClick={() => toggleSeries("__underlying__")}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors",
+                !hiddenSeries["__underlying__"]
+                  ? "bg-muted/40 font-medium"
+                  : "opacity-50 hover:opacity-75",
+              )}
+            >
+              <span
+                className="inline-block h-0.5 w-4 rounded"
+                style={{
+                  backgroundColor: colors.underlying,
+                }}
+              />
+              {data.underlying || underlying || "Underlying"}
+            </button>
           )}
-        >
+          {visibleLegs.map((leg, idx) => {
+            const color = LEG_PALETTE[idx % LEG_PALETTE.length];
+            const hidden = hiddenSeries[leg.symbol];
+            return (
+              <button
+                key={leg.symbol}
+                type="button"
+                onClick={() => toggleSeries(leg.symbol)}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors",
+                  !hidden ? "bg-muted/40 font-medium" : "opacity-50 hover:opacity-75",
+                )}
+                title={leg.symbol}
+              >
+                <span
+                  className="inline-block h-0.5 w-4 rounded"
+                  style={{ backgroundColor: color }}
+                />
+                {legLabel(data.underlying, leg.option_type, leg.strike, leg.expiry)}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {data && visibleLegs.length > 0 && (
+        <p className="text-[11px] italic text-muted-foreground">
           Each line shows historical Open Interest for one option leg. Rising
           OI on a short leg = new short positioning building; falling OI =
           unwinding. Overlay the underlying to spot OI shifts at price levels.

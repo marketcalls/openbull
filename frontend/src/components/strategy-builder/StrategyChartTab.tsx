@@ -1,48 +1,52 @@
 /**
- * Historical Strategy Chart tab — combined-premium time series for the
+ * Historical Strategy Chart tab — combined P&L / premium time series for the
  * current leg set, with optional underlying overlay on a secondary y-axis
  * and per-leg toggleable lines.
  *
  * Drives off `POST /web/strategybuilder/chart` (Phase 3 backend service).
- * The backend already does the heavy lifting:
- *   - per-leg history fetches with intersected timestamps (no phantom dips
- *     when one broker candle is late),
- *   - combined-premium series signed by BUY/SELL × lots × lot_size,
- *   - PnL series stamped when every leg has an entry_price,
- *   - underlying-available fallback when intraday history is missing.
+ * The backend returns:
+ *   - combined_series[*].value  — signed rupee position premium
+ *   - combined_series[*].pnl    — value(t) − entry_premium (when all legs
+ *     have entry_price)
+ *   - combined_series[*].combined_premium / .net_premium — openalgo-shape
+ *     per-share parity columns (kept here as a status badge)
+ *   - leg_series[*].series      — per-leg historical close
+ *   - underlying_series         — index close on the second y-axis
  *
- * This component renders that data via Plotly Scattergl (high-perf for
- * many points). Two y-axes — combined premium / P&L on the left, optional
- * underlying close on the right — because the scales are wildly
- * different (a 200-rupee combined premium next to a 24,000-rupee NIFTY
- * spot would crush the premium curve to a flat line on a single axis).
+ * Chart engine: TradingView lightweight-charts. Switched from Plotly
+ * (April 2026) to match openalgo's visual language and pick up the perf
+ * win on dense intraday series. The other openbull tools that already use
+ * lightweight-charts (StraddleChart, OptionGreeks) follow the same chart
+ * init / theme-reactive / IST-formatted timestamp patterns.
  *
- * IST timestamps: Plotly defaults to UTC. We pre-shift unix-seconds by
- * +05:30 and let Plotly render the shifted timestamps as "UTC" — what
- * the user sees is IST. Standard trick for Indian-market Plotly charts;
- * matches the OptionGreeks / StraddleChart inline usage but adapted to
- * Plotly's date axis (those two use lightweight-charts).
+ * IST timestamps: backend stamps Unix seconds; we shift +05:30 inside the
+ * tickMarkFormatter and the localization timeFormatter so users (and
+ * non-IST machines) see Indian-market times.
  *
  * Tab-scoped fetch: parent gates with `enabled={activeTab === "chart"}`
- * so we don't fan out N broker history calls just because the page is
- * mounted. The hook also debounces-on-change so rapid interval/days
- * toggles coalesce.
+ * so the broker isn't polled on every page mount.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ColorType,
+  CrosshairMode,
+  LineSeries,
+  LineStyle,
+  createChart,
+  type IChartApi,
+  type ISeriesApi,
+  type UTCTimestamp,
+} from "lightweight-charts";
 import { toast } from "sonner";
 
 import { getStrategyChart } from "@/api/strategybuilder";
-import Plot from "@/components/charts/Plot";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/contexts/ThemeContext";
 import { cn } from "@/lib/utils";
 import type { Action, ChartResponseData } from "@/types/strategy";
 import type { FnoExchange } from "@/types/optionchain";
 
-// Match the existing tools' INTERVALS list verbatim — keeping the dropdown
-// consistent across all chart tools matters more than supporting every
-// broker-specific interval.
 const INTERVALS: ReadonlyArray<string> = [
   "1m",
   "3m",
@@ -61,6 +65,20 @@ const DAY_RANGES: ReadonlyArray<{ value: number; label: string }> = [
   { value: 15, label: "15 Days" },
   { value: 30, label: "30 Days" },
 ];
+
+// Per-leg palette — cycles past 8 legs (rare in practice).
+const LEG_PALETTE: ReadonlyArray<string> = [
+  "#a855f7", // violet
+  "#06b6d4", // cyan
+  "#ec4899", // pink
+  "#84cc16", // lime
+  "#0ea5e9", // sky
+  "#f97316", // orange
+  "#14b8a6", // teal
+  "#dc2626", // red-600
+];
+
+const CHART_HEIGHT = 480;
 
 type ViewMode = "value" | "pnl";
 
@@ -81,12 +99,6 @@ interface Props {
   legs: ChartLegInput[];
   /** Set false to suppress fetches when the tab isn't active. */
   enabled: boolean;
-}
-
-/** Shift unix-seconds by +05:30 then convert to ms — Plotly sees these as
- * UTC, the user sees IST. */
-function tsToIstMs(unixSec: number): number {
-  return unixSec * 1000 + 5.5 * 60 * 60 * 1000;
 }
 
 export function StrategyChartTab({
@@ -110,16 +122,266 @@ export function StrategyChartTab({
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
 
+  // Refs into the chart so re-renders don't tear it down. The init effect
+  // builds the chart + series; the data effect binds rows; visibility
+  // effects toggle without rebinding.
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const combinedSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const underlyingSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  /** Keyed by leg.symbol — survives leg add/remove without leaking series. */
+  const legSeriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
+  const dataRef = useRef<ChartResponseData | null>(null);
+
   // Stable serialisation of the leg list — avoids refiring on every render
   // that produces a new array reference with identical content.
   const legsKey = JSON.stringify(legs);
 
-  // Auto-fetch when controls change, only while the tab is active.
+  // ── Theme-reactive colour palette (read from refs in event handlers
+  //    that the closure-captures from the init effect would otherwise miss). ──
+  const colors = useMemo(
+    () => ({
+      text: isDark ? "#a6adbb" : "#333",
+      grid: isDark ? "rgba(166,173,187,0.1)" : "rgba(0,0,0,0.08)",
+      border: isDark ? "rgba(166,173,187,0.2)" : "rgba(0,0,0,0.2)",
+      crosshair: isDark ? "rgba(166,173,187,0.5)" : "rgba(0,0,0,0.3)",
+      combined: "#3b82f6", // blue-500
+      underlying: isDark ? "#fbbf24" : "#d97706", // amber
+      zero: isDark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)",
+    }),
+    [isDark],
+  );
+
+  // ── Chart init / re-init ────────────────────────────────────────────
+  // Re-init when theme flips (lightweight-charts colours bake in at init)
+  // or when the days knob changes (tickFormatter depends on it).
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const w = containerRef.current.offsetWidth || 800;
+
+    if (chartRef.current) {
+      chartRef.current.remove();
+      chartRef.current = null;
+      combinedSeriesRef.current = null;
+      underlyingSeriesRef.current = null;
+      legSeriesRef.current.clear();
+    }
+
+    const chart = createChart(containerRef.current, {
+      width: w,
+      height: CHART_HEIGHT,
+      layout: {
+        background: { type: ColorType.Solid, color: "transparent" },
+        textColor: colors.text,
+      },
+      grid: {
+        vertLines: { color: colors.grid, style: 1 as const, visible: true },
+        horzLines: { color: colors.grid, style: 1 as const, visible: true },
+      },
+      leftPriceScale: {
+        visible: true,
+        borderColor: colors.border,
+        scaleMargins: { top: 0.08, bottom: 0.08 },
+      },
+      rightPriceScale: {
+        visible: true,
+        borderColor: colors.border,
+        scaleMargins: { top: 0.08, bottom: 0.08 },
+      },
+      timeScale: {
+        borderColor: colors.border,
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: (time: number) => {
+          // Force IST regardless of user machine TZ.
+          const ist = new Date(time * 1000 + 5.5 * 60 * 60 * 1000);
+          const hh = ist.getUTCHours().toString().padStart(2, "0");
+          const mm = ist.getUTCMinutes().toString().padStart(2, "0");
+          if (days > 1) {
+            const dd = ist.getUTCDate().toString().padStart(2, "0");
+            const mo = (ist.getUTCMonth() + 1).toString().padStart(2, "0");
+            return `${dd}/${mo} ${hh}:${mm}`;
+          }
+          return `${hh}:${mm}`;
+        },
+      },
+      localization: {
+        timeFormatter: (time: number) => {
+          const ist = new Date(time * 1000 + 5.5 * 60 * 60 * 1000);
+          const dd = ist.getUTCDate().toString().padStart(2, "0");
+          const mo = (ist.getUTCMonth() + 1).toString().padStart(2, "0");
+          const yy = ist.getUTCFullYear().toString().slice(-2);
+          const hh = ist.getUTCHours().toString().padStart(2, "0");
+          const mm = ist.getUTCMinutes().toString().padStart(2, "0");
+          return `${dd}/${mo}/${yy} ${hh}:${mm} IST`;
+        },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { width: 1 as const, color: colors.crosshair, style: 2 as const },
+        horzLine: { width: 1 as const, color: colors.crosshair, style: 2 as const },
+      },
+    });
+
+    // Combined series (left axis). The view toggle (P&L vs Premium) flips
+    // which column we bind into this single series — no need for two series.
+    const combined = chart.addSeries(LineSeries, {
+      color: colors.combined,
+      lineWidth: 2,
+      priceScaleId: "left",
+      title: view === "pnl" ? "Strategy P&L" : "Strategy Premium",
+      lastValueVisible: true,
+      priceLineVisible: false,
+    });
+
+    // Underlying overlay (right axis). Present always so toggle is cheap;
+    // `setData([])` blanks it when the user disables the overlay.
+    const u = chart.addSeries(LineSeries, {
+      color: colors.underlying,
+      lineWidth: 2,
+      priceScaleId: "right",
+      title: underlying || "Underlying",
+      lastValueVisible: true,
+      priceLineVisible: false,
+      lineStyle: LineStyle.Dotted,
+    });
+
+    chartRef.current = chart;
+    combinedSeriesRef.current = combined;
+    underlyingSeriesRef.current = u;
+
+    if (dataRef.current) applyDataToChart(dataRef.current);
+
+    return () => {
+      chart.remove();
+      chartRef.current = null;
+      combinedSeriesRef.current = null;
+      underlyingSeriesRef.current = null;
+      legSeriesRef.current.clear();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDark, days, underlying]);
+
+  // Resize observer — keep the chart width in sync with its container.
+  useEffect(() => {
+    const onResize = () => {
+      if (chartRef.current && containerRef.current) {
+        chartRef.current.applyOptions({ width: containerRef.current.offsetWidth });
+      }
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // ── Data binding ────────────────────────────────────────────────────
+  const applyDataToChart = useCallback(
+    (d: ChartResponseData) => {
+      const chart = chartRef.current;
+      const combined = combinedSeriesRef.current;
+      const u = underlyingSeriesRef.current;
+      if (!chart || !combined || !u) return;
+
+      // Combined series — bind the column matching the current view.
+      const sortedCombined = [...d.combined_series].sort((a, b) => a.time - b.time);
+      const combinedField = view === "pnl" ? "pnl" : "value";
+      const combinedPoints = sortedCombined
+        .map((p) => {
+          const v = p[combinedField as "value" | "pnl"];
+          if (v == null || !Number.isFinite(v)) return null;
+          return { time: p.time as UTCTimestamp, value: v };
+        })
+        .filter((p): p is { time: UTCTimestamp; value: number } => p !== null);
+      combined.setData(combinedPoints);
+      combined.applyOptions({
+        title: view === "pnl" ? "Strategy P&L" : "Strategy Premium",
+      });
+
+      // Underlying — only if the toggle is on AND backend says it's available.
+      if (
+        includeUnderlying &&
+        d.underlying_available &&
+        d.underlying_series.length > 0
+      ) {
+        const sortedU = [...d.underlying_series].sort((a, b) => a.time - b.time);
+        u.setData(sortedU.map((p) => ({ time: p.time as UTCTimestamp, value: p.close })));
+        u.applyOptions({ visible: true });
+      } else {
+        u.setData([]);
+        u.applyOptions({ visible: false });
+      }
+
+      // Per-leg lines — reconcile against existing refs so toggling legs
+      // doesn't leak chart resources. Remove series for legs that disappeared.
+      const wantSymbols = showLegs
+        ? new Set(d.leg_series.map((l) => l.symbol))
+        : new Set<string>();
+      for (const [sym, series] of legSeriesRef.current.entries()) {
+        if (!wantSymbols.has(sym)) {
+          try {
+            chart.removeSeries(series);
+          } catch {
+            /* already removed */
+          }
+          legSeriesRef.current.delete(sym);
+        }
+      }
+
+      if (showLegs) {
+        d.leg_series.forEach((leg, i) => {
+          const color = LEG_PALETTE[i % LEG_PALETTE.length];
+          let series = legSeriesRef.current.get(leg.symbol);
+          if (!series) {
+            series = chart.addSeries(LineSeries, {
+              color,
+              lineWidth: 1,
+              priceScaleId: "left",
+              title: `${leg.action} ${leg.symbol}`,
+              lastValueVisible: false,
+              priceLineVisible: false,
+              lineStyle: LineStyle.Dashed,
+            });
+            legSeriesRef.current.set(leg.symbol, series);
+          } else {
+            series.applyOptions({
+              color,
+              title: `${leg.action} ${leg.symbol}`,
+            });
+          }
+          const sortedLeg = [...leg.series].sort((a, b) => a.time - b.time);
+          series.setData(
+            sortedLeg.map((p) => ({ time: p.time as UTCTimestamp, value: p.close })),
+          );
+        });
+      }
+
+      chart.timeScale().fitContent();
+    },
+    [view, includeUnderlying, showLegs],
+  );
+
+  // Re-bind data when the view or visibility toggles change without
+  // refetching — applyDataToChart reads from dataRef.
+  useEffect(() => {
+    if (dataRef.current) applyDataToChart(dataRef.current);
+  }, [applyDataToChart]);
+
+  // ── Auto-fetch on prop changes ──────────────────────────────────────
   useEffect(() => {
     if (!enabled) return;
     if (legs.length === 0) {
       setData(null);
+      dataRef.current = null;
       setError(null);
+      combinedSeriesRef.current?.setData([]);
+      underlyingSeriesRef.current?.setData([]);
+      for (const series of legSeriesRef.current.values()) {
+        try {
+          chartRef.current?.removeSeries(series);
+        } catch {
+          /* already removed */
+        }
+      }
+      legSeriesRef.current.clear();
       return;
     }
 
@@ -137,13 +399,15 @@ export function StrategyChartTab({
     })
       .then((resp) => {
         if (requestIdRef.current !== reqId) return;
+        dataRef.current = resp;
         setData(resp);
-        // If PnL view is selected but the backend has no entry_premium
-        // (a leg lacked entry_price), fall back to value view so the
-        // chart isn't blank.
+        // Fall back to value view if the user picked P&L but no entry premia
+        // exist (one or more legs lack entry_price).
         if (view === "pnl" && resp.entry_premium == null) {
           setView("value");
+          return; // applyDataToChart will re-run from the view-change effect
         }
+        applyDataToChart(resp);
       })
       .catch((e) => {
         if (requestIdRef.current !== reqId) return;
@@ -170,8 +434,6 @@ export function StrategyChartTab({
     includeUnderlying,
   ]);
 
-  // Manual refresh — same pipeline as the auto-fetch above. Forces a
-  // refetch even when the deps haven't changed (useful after market opens).
   const handleRefresh = () => {
     if (legs.length === 0) {
       toast.error("Add legs with resolved symbols before refreshing");
@@ -191,7 +453,9 @@ export function StrategyChartTab({
     })
       .then((resp) => {
         if (requestIdRef.current !== reqId) return;
+        dataRef.current = resp;
         setData(resp);
+        applyDataToChart(resp);
       })
       .catch((e) => {
         if (requestIdRef.current !== reqId) return;
@@ -207,198 +471,6 @@ export function StrategyChartTab({
         if (requestIdRef.current === reqId) setLoading(false);
       });
   };
-
-  const colors = useMemo(
-    () => ({
-      text: isDark ? "#e0e0e0" : "#333333",
-      grid: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)",
-      zero: isDark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)",
-      combined: "#3b82f6", // blue-500
-      pnlPositive: "#22c55e",
-      pnlNegative: "#ef4444",
-      underlying: "#f59e0b", // amber-500
-      legPalette: [
-        "#a855f7", // purple-500
-        "#06b6d4", // cyan-500
-        "#ec4899", // pink-500
-        "#84cc16", // lime-500
-        "#0ea5e9", // sky-500
-        "#f97316", // orange-500
-        "#14b8a6", // teal-500
-        "#dc2626", // red-600
-      ],
-      hoverBg: isDark ? "#1e293b" : "#ffffff",
-      hoverText: isDark ? "#e0e0e0" : "#333333",
-      hoverBorder: isDark ? "#475569" : "#e2e8f0",
-    }),
-    [isDark],
-  );
-
-  const traces = useMemo<unknown[]>(() => {
-    if (!data) return [];
-    const out: unknown[] = [];
-
-    // Combined series (value or pnl) on left axis
-    const combinedField = view === "pnl" ? "pnl" : "value";
-    const combinedX: number[] = [];
-    const combinedY: number[] = [];
-    for (const p of data.combined_series) {
-      const v = p[combinedField as "value" | "pnl"];
-      if (v == null || !Number.isFinite(v)) continue;
-      combinedX.push(tsToIstMs(p.time));
-      combinedY.push(v);
-    }
-
-    out.push({
-      x: combinedX,
-      y: combinedY,
-      type: "scattergl",
-      mode: "lines",
-      name: view === "pnl" ? "Strategy P&L" : "Strategy Premium",
-      line: { color: colors.combined, width: 2 },
-      yaxis: "y",
-      hovertemplate:
-        view === "pnl"
-          ? "%{x|%d/%m %H:%M IST}<br>P&L %{y:.2f}<extra></extra>"
-          : "%{x|%d/%m %H:%M IST}<br>Premium %{y:.2f}<extra></extra>",
-    });
-
-    // Per-leg lines (left axis) — toggled
-    if (showLegs) {
-      data.leg_series.forEach((leg, i) => {
-        const xs = leg.series.map((p) => tsToIstMs(p.time));
-        const ys = leg.series.map((p) => p.close);
-        out.push({
-          x: xs,
-          y: ys,
-          type: "scattergl",
-          mode: "lines",
-          name: `${leg.action} ${leg.symbol}`,
-          line: {
-            color: colors.legPalette[i % colors.legPalette.length],
-            width: 1,
-            dash: "dot",
-          },
-          yaxis: "y",
-          opacity: 0.7,
-          hovertemplate:
-            "%{x|%d/%m %H:%M IST}<br>" +
-            leg.symbol +
-            " %{y:.2f}<extra></extra>",
-        });
-      });
-    }
-
-    // Underlying overlay on right axis
-    if (
-      includeUnderlying &&
-      data.underlying_available &&
-      data.underlying_series.length > 0
-    ) {
-      out.push({
-        x: data.underlying_series.map((p) => tsToIstMs(p.time)),
-        y: data.underlying_series.map((p) => p.close),
-        type: "scattergl",
-        mode: "lines",
-        name: data.underlying,
-        line: { color: colors.underlying, width: 1.5 },
-        yaxis: "y2",
-        hovertemplate:
-          "%{x|%d/%m %H:%M IST}<br>" +
-          data.underlying +
-          " %{y:.2f}<extra></extra>",
-      });
-    }
-
-    return out;
-  }, [data, view, showLegs, includeUnderlying, colors]);
-
-  const layout = useMemo<Record<string, unknown>>(() => {
-    const showY2 =
-      includeUnderlying &&
-      data?.underlying_available === true &&
-      (data?.underlying_series.length ?? 0) > 0;
-
-    const shapes: unknown[] = [];
-    // Zero line on the P&L view
-    if (view === "pnl" && data?.combined_series.length) {
-      shapes.push({
-        type: "line",
-        xref: "paper",
-        x0: 0,
-        x1: 1,
-        y0: 0,
-        y1: 0,
-        line: { color: colors.zero, width: 1, dash: "dot" },
-      });
-    }
-
-    return {
-      paper_bgcolor: "rgba(0,0,0,0)",
-      plot_bgcolor: "rgba(0,0,0,0)",
-      font: { color: colors.text, family: "system-ui, sans-serif" },
-      hovermode: "x unified",
-      hoverlabel: {
-        bgcolor: colors.hoverBg,
-        font: { color: colors.hoverText, size: 12 },
-        bordercolor: colors.hoverBorder,
-      },
-      showlegend: true,
-      legend: {
-        orientation: "h",
-        x: 0.5,
-        xanchor: "center",
-        y: -0.18,
-        font: { color: colors.text, size: 11 },
-      },
-      margin: { l: 70, r: showY2 ? 70 : 30, t: 30, b: 70 },
-      xaxis: {
-        type: "date",
-        tickformat: days > 1 ? "%d/%m %H:%M" : "%H:%M",
-        tickfont: { color: colors.text, size: 10 },
-        gridcolor: colors.grid,
-        zeroline: false,
-      },
-      yaxis: {
-        title: {
-          text: view === "pnl" ? "Strategy P&L (₹)" : "Strategy Premium (₹)",
-          font: { color: colors.text, size: 12 },
-        },
-        tickfont: { color: colors.text, size: 10 },
-        gridcolor: colors.grid,
-        zeroline: false,
-      },
-      yaxis2: showY2
-        ? {
-            title: {
-              text: `${data?.underlying ?? "Underlying"} Close`,
-              font: { color: colors.underlying, size: 12 },
-            },
-            tickfont: { color: colors.underlying, size: 10 },
-            overlaying: "y",
-            side: "right",
-            showgrid: false,
-            zeroline: false,
-          }
-        : undefined,
-      shapes,
-    };
-  }, [data, view, includeUnderlying, colors, days]);
-
-  const config = useMemo(
-    () => ({
-      displayModeBar: true,
-      displaylogo: false,
-      modeBarButtonsToRemove: [
-        "select2d",
-        "lasso2d",
-        "autoScale2d",
-        "toggleSpikelines",
-      ],
-      responsive: true,
-    }),
-    [],
-  );
 
   const hasUsableLegs = legs.length > 0;
   const hasPnlData =
@@ -505,7 +577,7 @@ export function StrategyChartTab({
         </Button>
       </div>
 
-      {/* Chart status badges */}
+      {/* Status badges */}
       {data && (
         <div className="flex flex-wrap gap-2 text-xs">
           <span className="rounded-md border border-border bg-muted/40 px-2 py-1">
@@ -557,36 +629,74 @@ export function StrategyChartTab({
         </div>
       )}
 
-      {/* Empty / loading / chart */}
-      {!hasUsableLegs ? (
-        <div className="flex h-[480px] flex-col items-center justify-center gap-1 text-center text-muted-foreground">
-          <p className="text-sm">No legs to chart.</p>
-          <p className="text-xs">
-            Add legs with resolved symbols — the historical curve will load
-            automatically.
-          </p>
-        </div>
-      ) : loading && !data ? (
-        <div className="flex h-[480px] items-center justify-center text-sm text-muted-foreground">
-          Fetching {legs.length} leg histor{legs.length === 1 ? "y" : "ies"}…
-        </div>
-      ) : data && data.combined_series.length > 0 ? (
-        <Plot
-          data={traces}
-          layout={layout}
-          config={config}
-          useResizeHandler
-          style={{ width: "100%", height: "480px" }}
+      {/* Chart */}
+      <div className="relative">
+        <div
+          ref={containerRef}
+          className="relative w-full rounded-lg border border-border/50"
+          style={{ height: CHART_HEIGHT }}
         />
-      ) : data ? (
-        <div className="flex h-[480px] flex-col items-center justify-center gap-1 text-center text-muted-foreground">
-          <p className="text-sm">No overlapping candles.</p>
-          <p className="text-xs">
-            The legs' histories don't intersect for {interval} / {days}d. Try a
-            larger interval or longer window.
-          </p>
+        {loading && (
+          <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-background/60">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              Loading strategy chart…
+            </div>
+          </div>
+        )}
+        {!hasUsableLegs && !loading && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 rounded-lg bg-background/80 text-center text-muted-foreground">
+            <p className="text-sm">No legs to chart.</p>
+            <p className="text-xs">
+              Add legs with resolved symbols — the historical curve will load
+              automatically.
+            </p>
+          </div>
+        )}
+        {hasUsableLegs && data && data.combined_series.length === 0 && !loading && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 rounded-lg bg-background/80 text-center text-muted-foreground">
+            <p className="text-sm">No overlapping candles.</p>
+            <p className="text-xs">
+              The legs' histories don't intersect for {interval} / {days}d. Try
+              a larger interval or longer window.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Series legend / toggles below the chart */}
+      {data && data.combined_series.length > 0 && (
+        <div className="flex flex-wrap items-center justify-center gap-3 text-xs">
+          <span className="inline-flex items-center gap-1.5 rounded-md bg-muted/40 px-2.5 py-1 font-medium">
+            <span
+              className="inline-block h-0.5 w-4 rounded"
+              style={{ backgroundColor: colors.combined }}
+            />
+            {view === "pnl" ? "Strategy P&L" : "Strategy Premium"}
+          </span>
+          {data.underlying_available && (
+            <button
+              type="button"
+              onClick={() => setIncludeUnderlying((v) => !v)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors",
+                includeUnderlying
+                  ? "bg-muted/40 font-medium"
+                  : "opacity-50 hover:opacity-75",
+              )}
+            >
+              <span
+                className="inline-block h-0.5 w-4 rounded"
+                style={{
+                  backgroundColor: colors.underlying,
+                  borderTop: "1px dotted",
+                }}
+              />
+              {data.underlying || underlying || "Underlying"}
+            </button>
+          )}
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
