@@ -4,14 +4,15 @@ OpenBull is a self-hosted options trading platform for Indian markets. Multi-use
 
 ## Highlights
 
-- **Five broker plugins** out of the box — Upstox, Zerodha, Angel One (SmartAPI), Dhan, Fyers. Plug-and-play architecture: a new broker = one folder + a `plugin.json`.
+- **Five broker plugins** fully wired end-to-end — Upstox, Zerodha, Angel One (SmartAPI), Dhan, Fyers. Each carries auth, orders, funds, history, depth, margin, and a streaming adapter feeding the unified WS proxy. Plug-and-play architecture: a new broker = one folder + a `plugin.json`.
 - **Multi-user**, per-user broker credentials, JWT cookie auth, broker-token revalidation on session resume. OAuth callback redirects use the request hostname so cookies survive the round-trip even when the user mixes `127.0.0.1` and `localhost`.
-- **Live / Sandbox trading-mode toggle** — global setting; every order/info path dispatches through `dispatch_by_mode` so the same UI drives real or simulated orders. Sandbox engine simulates fills via live ticks (or a 5s polling fallback), full T+1 settlement, scheduled squareoff, daily P&L snapshots.
-- **Eight Plotly-backed analytics tools** + the **Strategy Builder + Portfolio** pair (multi-leg designer with live Greeks, At-Expiry / T+0 payoff curves, breakeven markers, sigma bands, Probability of Profit badge, what-if sliders for spot/IV/DTE, historical combined-premium chart, WS-streamed live P&L tab, basket execute, save/reload, close-at-exit).
-- **Unified WebSocket proxy** on port 8765 — single ZeroMQ pub/sub bus fanning broker ticks (Upstox protobuf, Zerodha binary) out to authenticated clients with mode hierarchy (DEPTH includes QUOTE includes LTP) and per-symbol throttling.
+- **Live / Sandbox trading-mode toggle** — global setting; every order/info path dispatches through `dispatch_by_mode` so the same UI drives real or simulated orders. Sandbox engine simulates fills via live ticks (or a 5s polling fallback), EOD rollover, T+1 settlement, scheduled squareoff, daily P&L snapshots.
+- **Eight Plotly-backed analytics tools** + the **Strategy Builder + Portfolio** pair (multi-leg designer with **30 strategy templates** rendered as mini SVG payoff icons, live Greeks, At-Expiry / T+0 payoff curves with sigma bands and breakeven markers, Probability of Profit, real-time what-if sliders that drive both the marker dot and the T+0 curve, **Multi-Strike OI tab**, historical combined-premium chart on `lightweight-charts`, WS-streamed live P&L tab, **per-leg basket execute** with tick-snap pricing, save/reload, close-at-exit).
+- **Unified WebSocket proxy** on port 8765 — single ZeroMQ pub/sub bus fanning broker ticks (Upstox protobuf, Zerodha binary, **Fyers HSM binary**, Dhan, Angel) out to authenticated clients with mode hierarchy (DEPTH includes QUOTE includes LTP) and per-symbol throttling.
 - **Process-wide MarketDataCache** singleton — every tick hits one in-process map; sandbox MTM updater, RMS, and analytics tools read from it instead of re-hitting brokers.
 - **Redis cache layer** — API key, broker context, and master-contract symtoken cached with TTLs and invalidation on logout / OAuth.
 - **Centralized logging** — request-id stamping, sensitive-data redaction, bounded rotating files, DB-backed `error_logs` and `api_logs` tables with worker-trimmed row caps. `/logs` viewer in-app.
+- **Light / Dark / Sandbox theming** — full light & dark modes (preference persists in `localStorage`), plus a fixed slate-indigo palette that activates whenever the global trading mode is sandbox so "not live" reads instantly.
 - **Production install scripts** — `install/install.sh`, `install/update.sh`, `install/perftuning.sh` — Cloudflare-aware, A-grade nginx security headers, certbot-friendly.
 
 ## Tech Stack
@@ -108,7 +109,7 @@ Full per-endpoint docs: [docs/api/README.md](docs/api/README.md). Bruno collecti
 | Group | Endpoints |
 |------|-----------|
 | Auth / setup | `auth/check-setup`, `auth/setup`, `auth/login`, `auth/logout`, `auth/me`, `auth/broker-redirect`, broker callbacks |
-| Strategies | `strategies` (CRUD), `strategybuilder/snapshot`, `strategybuilder/chart` |
+| Strategies | `strategies` (CRUD), `strategybuilder/snapshot`, `strategybuilder/chart`, `strategybuilder/multi-strike-oi` |
 | Trading mode | `trading-mode` (GET/POST) |
 | Sandbox | `sandbox/config`, `sandbox/reset`, `sandbox/summary`, `sandbox/mypnl`, `sandbox/squareoff-now`, `sandbox/settle-now` |
 | Logs | `api-logs`, `error-logs` |
@@ -133,14 +134,29 @@ Mode hierarchy: subscribing to DEPTH includes QUOTE includes LTP automatically. 
 
 ### Strategy Builder + Strategy Portfolio (`/tools/strategybuilder` + `/tools/strategyportfolio`)
 
-The flagship feature pair, shipped over 11 phases:
+The flagship feature pair. UI ported piece-by-piece from openalgo's reference design (and in some places now ahead of it).
 
-- **14 templates** — Long/Short Straddle/Strangle, Iron Condor, Iron Butterfly, Bull Call / Bear Put / Bull Put / Bear Call spreads, Calendar/Diagonal, single legs. Templates use *relative* offsets (`ATM`, `OTM2`, `ITM3`) which the UI resolves to absolute strikes via the live option chain. Entry prices auto-prefill from the per-strike LTP.
-- **Five tabs**: Legs, Greeks (per-leg + aggregate), Payoff (At-Expiry + T+0 + sigma bands + breakevens + POP badge + "Unlimited" annotations), Chart (historical combined premium with optional underlying overlay), P&L (WS-streamed live MTM with flash cells).
-- **What-if simulator**: Spot ±10%, IV ±10pp, Days forward sliders drive a magenta marker on the payoff chart via local-only Black-76 — instant feedback, no broker round-trips.
-- **Save / load** via `/web/strategies/*` (per-user, JSONB legs, tagged with trading mode). Reload into builder via `?load=<id>`.
-- **Basket execute** via `/api/v1/basketorder` — BUY-before-SELL ordering enforced server-side. Sandbox-aware (the same button drives simulated orders when sandbox mode is active).
-- **Strategy Portfolio**: list with mode/status/underlying filters, expandable cards, **one shared WebSocket** across the page (a symbol used in three strategies streams once), live aggregate P&L per card, close-at-exit dialog with editable per-leg exit prices, hard delete.
+**Symbol header** — chip strip across the top: Spot, **Futures** (synthetic via put-call parity, never a separate broker call), ATM IV, DTE (with end-of-day IST rollover), Lot Size, plus a live-status pill.
+
+**30 strategy templates** rendered as a card gallery with **mini SVG payoff icons** — direction tabs (Bullish / Bearish / Neutral) with live counts, search box. Clicking a card opens **TemplateConfigDialog**: a preview modal listing the resolved legs (chain-sourced strike dropdowns, editable lots / entry, net debit/credit summary) so the user can tweak before applying. Calendar / diagonal templates correctly resolve `expiryOffset` against the broker's expiry list.
+
+**Add a Position** card — manual leg builder with explicit Segment / Expiry / Strike (with ATM / ITMn / OTMn moneyness chip) / Type / Side / Lot Qty stepper + dedicated ADD BUY and ADD SELL buttons. Resolves the OpenAlgo symbol live and shows the chain LTP at the top right.
+
+**Six tabs**:
+- **Legs** — manual builder + leg list with chain-sourced strike dropdown + moneyness chip; pencil opens `EditLegDialog` (full per-leg modal with auto-LTP refill on strike/type change), trash deletes.
+- **Greeks** — per-leg + aggregate Greeks, plain-English labels (Delta / Gamma / Theta / Vega — never Δ Γ Θ V; openbull is a retail product).
+- **Payoff** — two-pane: `PositionsPanel` on the left (per-leg checkbox toggle, 2-column stats grid for Max Profit / Max Loss / POP / RR / Total P&L / Net Credit / Est. Premium / **Margin Req.** sourced from `/api/v1/margin`, breakevens row with chip badges, Save + Execute Basket actions in the footer); At-Expiry + T+0 curves + sigma bands + breakeven markers + spot vertical + "Unlimited" annotations + POP badge on the right.
+- **Strategy Chart** — historical combined-premium time series on `lightweight-charts`, P&L vs Premium toggle, per-leg lines, underlying overlay on a secondary y-axis, openalgo-parity columns (`net_premium`, `combined_premium`, `tag` credit/debit/flat).
+- **Multi-Strike OI** — per-leg Open Interest history overlaid on `lightweight-charts`, underlying close on the second axis, IST timestamps.
+- **P&L** — WS-streamed live MTM with flash cells.
+
+**What-if simulator** — Spot ±10%, IV ±10pp, Days forward sliders drive both the magenta marker AND the dashed T+0 curve on the payoff chart (T+0 re-prices every leg under the shifted IV / time, not just the marker). Local-only Black-76 — instant feedback, no broker round-trips.
+
+**Save / load** via `/web/strategies/*` (per-user, JSONB legs, tagged with trading mode). Saved strategies are immediately visible in an in-page **Load Strategy** picker (no need to bounce to the Portfolio page); the cache invalidates on save so a fresh save is always one click away.
+
+**Basket execute** via `/api/v1/basketorder` — `BasketOrderDialog` shows per-leg rows with Use checkbox, editable Lots, editable tick-snapped Price (disabled for MARKET / SL-M), Pricetype + Product as global controls, BUY-before-SELL ordering enforced server-side, inline per-row result indicators (✓ orderid on success, × message on error). Sandbox-aware.
+
+**Strategy Portfolio**: list with mode / status / underlying filters (status as a segmented pill group), 2-column card grid on lg+ viewports, expandable cards, **one shared WebSocket** across the page (a symbol used in three strategies streams once), live aggregate P&L per card, close-at-exit dialog with editable per-leg exit prices, hard delete.
 
 ### Analytics Tools (`/tools`)
 
@@ -209,8 +225,9 @@ openbull/
 │   ├── routers/                # Web routes (cookie auth)
 │   ├── api/                    # External API (/api/v1, key auth)
 │   ├── services/               # Business logic — order, options, analytics,
-│   │                           #   strategy_builder, strategy_chart, sandbox,
-│   │                           #   trading_mode, market_data_cache
+│   │                           #   strategy_builder, strategy_chart,
+│   │                           #   multi_strike_oi, sandbox, trading_mode,
+│   │                           #   market_data_cache, margin
 │   ├── sandbox/                # Simulated trading engine
 │   ├── broker/                 # 5 broker plugins
 │   │   ├── upstox/, zerodha/, angel/, dhan/, fyers/
