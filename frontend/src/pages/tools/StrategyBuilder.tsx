@@ -904,6 +904,33 @@ export default function StrategyBuilder() {
                     onToggleSymbol={handleToggleLegSymbol}
                     onToggleAll={handleToggleAllLegs}
                     onReset={handleResetLegSelection}
+                    footerActions={
+                      <>
+                        {/* openalgo puts Save + Execute right under the
+                            positions panel — quicker eye-path from "do I
+                            like these legs?" → "fire them". */}
+                        <Button
+                          onClick={() => setBasketOpen(true)}
+                          disabled={basketLegs.length === 0}
+                          className="flex-1"
+                          title={
+                            basketLegs.length === 0
+                              ? "Add legs with resolved strikes before executing"
+                              : `Fire ${basketLegs.length} legs as a basket`
+                          }
+                        >
+                          Execute Basket
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => setSaveOpen(true)}
+                          disabled={legs.length === 0}
+                          className="flex-1"
+                        >
+                          {strategyId ? "Update" : "Save"}
+                        </Button>
+                      </>
+                    }
                   />
                   <div className="space-y-3">
                     <ErrorBoundary label="Payoff chart">

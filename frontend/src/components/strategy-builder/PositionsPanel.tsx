@@ -34,6 +34,10 @@ interface Props {
   onToggleSymbol: (symbol: string) => void;
   onToggleAll: (enable: boolean) => void;
   onReset: () => void;
+  /** Optional action footer — rendered below the stats. Used by the Strategy
+   *  Builder page to put Save + Execute Basket buttons right below the
+   *  positions, matching openalgo's layout. */
+  footerActions?: React.ReactNode;
 }
 
 interface EnrichedLeg {
@@ -110,6 +114,7 @@ export function PositionsPanel({
   onToggleSymbol,
   onToggleAll,
   onReset,
+  footerActions,
 }: Props) {
   const allEnriched = useMemo(
     () => buildEnriched(snapshotLegs, entryPriceBySymbol),
@@ -362,6 +367,15 @@ export function PositionsPanel({
             value={fmtIN(Math.abs(stats.netCreditValue))}
             tone={stats.netCreditValue > 0 ? "profit" : "muted"}
           />
+        </div>
+      )}
+
+      {/* Action footer — Save / Execute Basket buttons live here, right
+          under the stats, matching openalgo's layout. Parent passes the
+          wired buttons as a single fragment. */}
+      {footerActions && (
+        <div className="flex flex-wrap gap-2 border-t border-border pt-3">
+          {footerActions}
         </div>
       )}
     </div>
