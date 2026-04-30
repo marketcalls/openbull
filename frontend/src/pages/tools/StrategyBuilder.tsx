@@ -24,7 +24,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { fetchExpiries } from "@/api/optionchain";
@@ -33,6 +33,7 @@ import { ExpiryPicker, convertExpiryForApi } from "@/components/strategy-builder
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { GreeksPanel } from "@/components/strategy-builder/GreeksPanel";
 import { LegRow, type BuilderLeg } from "@/components/strategy-builder/LegRow";
+import { LoadStrategyPicker } from "@/components/strategy-builder/LoadStrategyPicker";
 import {
   MultiStrikeOITab,
   type OILegInput,
@@ -165,6 +166,7 @@ function toPersistedLegs(legs: BuilderLeg[]): StrategyLeg[] {
 export default function StrategyBuilder() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { mode: tradingMode } = useTradingMode();
+  const queryClient = useQueryClient();
 
   // ── Builder state ────────────────────────────────────────────────────
   const [exchange, setExchange] = useState<FnoExchange>("NFO");
@@ -350,6 +352,60 @@ export default function StrategyBuilder() {
     [legs, exchange],
   );
 
+  // Apply a fetched Strategy to local state. Shared between the URL
+  // ?load=<id> auto-loader and the in-page LoadStrategyPicker.
+  const applyLoadedStrategy = useCallback(
+    (s: Awaited<ReturnType<typeof getStrategy>>) => {
+      setExchange((s.exchange as FnoExchange) || "NFO");
+      setUnderlying(s.underlying);
+      setStrategyId(s.id);
+      setStrategyName(s.name);
+      setStrategyNotes(s.notes);
+      const lotSize = s.legs[0]?.lot_size ?? defaultLotSize(s.underlying);
+      setLegs(
+        s.legs.map((l) => ({
+          id: l.id ?? crypto.randomUUID(),
+          action: l.action,
+          option_type: l.option_type,
+          strike: l.strike,
+          lots: l.lots,
+          lot_size: l.lot_size ?? lotSize,
+          expiry_date:
+            l.expiry_date ?? (s.expiry_date ? s.expiry_date : ""),
+          entry_price: l.entry_price ?? 0,
+          symbol:
+            l.symbol ??
+            buildOptionSymbol(
+              s.underlying,
+              l.expiry_date ?? s.expiry_date ?? "",
+              l.strike,
+              l.option_type,
+            ),
+        })),
+      );
+      toast.success(`Loaded '${s.name}'`);
+    },
+    [],
+  );
+
+  /** Fetch a saved strategy and apply it. Called from the picker dropdown. */
+  const handleLoadStrategy = useCallback(
+    async (id: number) => {
+      try {
+        const s = await getStrategy(id);
+        applyLoadedStrategy(s);
+      } catch (e) {
+        const msg =
+          (e as { response?: { data?: { detail?: string } }; message?: string })
+            ?.response?.data?.detail ??
+          (e as { message?: string })?.message ??
+          "Failed to load strategy";
+        toast.error(msg);
+      }
+    },
+    [applyLoadedStrategy],
+  );
+
   // ── Load saved strategy from `?load=<id>` ────────────────────────────
   useEffect(() => {
     const loadParam = searchParams.get("load");
@@ -361,38 +417,7 @@ export default function StrategyBuilder() {
     getStrategy(id)
       .then((s) => {
         if (cancelled) return;
-        setExchange((s.exchange as FnoExchange) || "NFO");
-        setUnderlying(s.underlying);
-        // The saved expiry is in "DDMMMYY" backend format. Display picker
-        // uses "DD-MMM-YYYY" — we'll resync after expiriesQuery loads;
-        // until then set legs anyway with the saved per-leg expiry.
-        setStrategyId(s.id);
-        setStrategyName(s.name);
-        setStrategyNotes(s.notes);
-        const lotSize =
-          s.legs[0]?.lot_size ?? defaultLotSize(s.underlying);
-        setLegs(
-          s.legs.map((l) => ({
-            id: l.id ?? crypto.randomUUID(),
-            action: l.action,
-            option_type: l.option_type,
-            strike: l.strike,
-            lots: l.lots,
-            lot_size: l.lot_size ?? lotSize,
-            expiry_date:
-              l.expiry_date ?? (s.expiry_date ? s.expiry_date : ""),
-            entry_price: l.entry_price ?? 0,
-            symbol:
-              l.symbol ??
-              buildOptionSymbol(
-                s.underlying,
-                l.expiry_date ?? s.expiry_date ?? "",
-                l.strike,
-                l.option_type,
-              ),
-          })),
-        );
-        toast.success(`Loaded '${s.name}'`);
+        applyLoadedStrategy(s);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -668,11 +693,20 @@ export default function StrategyBuilder() {
     await refetchSnapshot();
   }, [snapshotLegs.length, refetchSnapshot]);
 
-  const handleSaved = useCallback((saved: { id: number; name: string; notes: string | null }) => {
-    setStrategyId(saved.id);
-    setStrategyName(saved.name);
-    setStrategyNotes(saved.notes);
-  }, []);
+  const handleSaved = useCallback(
+    (saved: { id: number; name: string; notes: string | null }) => {
+      setStrategyId(saved.id);
+      setStrategyName(saved.name);
+      setStrategyNotes(saved.notes);
+      // Invalidate every cached `["strategies", ...]` query so the in-page
+      // LoadStrategyPicker AND the Strategy Portfolio page both pick up the
+      // newly-saved row on next read. Without this the picker stays stale
+      // for up to its 15s staleTime — the user sees their save but can't
+      // load it from the dropdown until the cache expires.
+      queryClient.invalidateQueries({ queryKey: ["strategies"] });
+    },
+    [queryClient],
+  );
 
   // ── Pre-resolve legs (with current-underlying symbol) for save dialog ─
   const persistedLegs = useMemo(
@@ -711,6 +745,11 @@ export default function StrategyBuilder() {
             exchange={exchange}
             expiry={expiry}
             onExpiryChange={setExpiry}
+          />
+          <LoadStrategyPicker
+            mode={tradingMode === "sandbox" ? "sandbox" : "live"}
+            loadedId={strategyId}
+            onPick={handleLoadStrategy}
           />
           <Button
             variant="outline"
