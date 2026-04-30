@@ -35,7 +35,12 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { GreeksPanel } from "@/components/strategy-builder/GreeksPanel";
 import { LegRow, type BuilderLeg } from "@/components/strategy-builder/LegRow";
 import { AddPositionCard } from "@/components/strategy-builder/AddPositionCard";
+import { EditLegDialog } from "@/components/strategy-builder/EditLegDialog";
 import { LoadStrategyPicker } from "@/components/strategy-builder/LoadStrategyPicker";
+import {
+  TemplateConfigDialog,
+  type AppliedTemplateLeg,
+} from "@/components/strategy-builder/TemplateConfigDialog";
 import {
   MultiStrikeOITab,
   type OILegInput,
@@ -187,6 +192,13 @@ export default function StrategyBuilder() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [basketOpen, setBasketOpen] = useState(false);
   const [simulation, setSimulation] = useState<SimulationOutput | null>(null);
+  // Edit-leg modal state — driven by the pencil icons in PositionsPanel /
+  // LegRow. Holds the *id* (not the leg object) so leg state stays the
+  // single source of truth.
+  const [editingLegId, setEditingLegId] = useState<string | null>(null);
+  // Template-confirmation modal — clicked template card lives here until
+  // the user confirms / cancels Apply.
+  const [pendingTemplate, setPendingTemplate] = useState<StrategyTemplate | null>(null);
   // Per-leg "include in payoff" toggle. Symbols listed here are drawn on
   // the payoff chart and counted in the PositionsPanel stats. New legs
   // are auto-enabled (see effect below); the user can untick to "what if
@@ -775,6 +787,36 @@ export default function StrategyBuilder() {
     [expiryApi, expiry, expiriesList, lotSizeForUnderlying, chain.context, underlying],
   );
 
+  /** Apply a template after the user has confirmed it via TemplateConfigDialog.
+   *  The dialog already resolved strike + expiry + lots — we just build the
+   *  BuilderLeg list and replace state. Bypasses the strikeOffset resolver
+   *  since the dialog let the user override strikes. */
+  const handleApplyTemplateFromDialog = useCallback(
+    (legsIn: AppliedTemplateLeg[], template: StrategyTemplate) => {
+      const lotSize = lotSizeForUnderlying;
+      const newLegs: BuilderLeg[] = legsIn.map((l) => ({
+        id: crypto.randomUUID(),
+        action: l.action,
+        option_type: l.option_type,
+        strike: l.strike,
+        lots: l.lots,
+        lot_size: lotSize,
+        expiry_date: l.expiry_api,
+        entry_price: l.entry_price,
+        symbol: buildOptionSymbol(
+          underlying,
+          l.expiry_api,
+          l.strike,
+          l.option_type,
+        ),
+      }));
+      setLegs(newLegs);
+      setStrategyName((prev) => prev || template.name);
+      toast.success(`Applied '${template.name}' (${newLegs.length} legs).`);
+    },
+    [lotSizeForUnderlying, underlying],
+  );
+
   // ── Refresh button — manual refetch on top of the auto-debounce ─────
   const handleRefreshSnapshot = useCallback(async () => {
     if (snapshotLegs.length === 0) {
@@ -905,7 +947,21 @@ export default function StrategyBuilder() {
       {/* ── Template gallery ─────────────────────────────────────────── */}
       <Card>
         <CardContent className="p-3 sm:p-4">
-          <TemplateGrid onPick={handleApplyTemplate} disabled={!expiryApi} />
+          <TemplateGrid
+            // Template card click opens the confirmation modal — the user
+            // sees resolved strikes / lots and can tweak per leg before the
+            // legs land in the builder. Direct-apply is still available
+            // as the fallback when chain isn't loaded (the modal couldn't
+            // resolve strikes anyway).
+            onPick={(t) => {
+              if (chain.context) {
+                setPendingTemplate(t);
+              } else {
+                handleApplyTemplate(t);
+              }
+            }}
+            disabled={!expiryApi}
+          />
           {!expiryApi && (
             <p className="mt-3 text-[11px] text-muted-foreground">
               Pick an expiry above to enable template loading.
@@ -1050,14 +1106,9 @@ export default function StrategyBuilder() {
                     onToggleAll={handleToggleAllLegs}
                     onReset={handleResetLegSelection}
                     onEditLeg={(sym) => {
-                      // Switch to the Legs tab so the user can use the
-                      // inline LegRow editor. Symbol is unique per leg, so
-                      // this is unambiguous; we don't scroll-to-leg yet,
-                      // openalgo's pencil also just navigates without
-                      // anchor highlight.
-                      setActiveTab("legs");
-                      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                      void sym;
+                      // Open the EditLegDialog for the leg with this symbol.
+                      const target = legs.find((l) => l.symbol === sym);
+                      if (target) setEditingLegId(target.id);
                     }}
                     onDeleteLeg={(sym) => {
                       const target = legs.find((l) => l.symbol === sym);
@@ -1189,6 +1240,57 @@ export default function StrategyBuilder() {
         legs={persistedLegs}
         mode={tradingMode === "sandbox" ? "sandbox" : "live"}
         onSaved={(s) => handleSaved(s)}
+      />
+
+      {/* ── Edit-leg dialog ───────────────────────────────────────────── */}
+      {(() => {
+        const editingLeg = legs.find((l) => l.id === editingLegId) ?? null;
+        // The leg's expiry is in API format; convert to display for the
+        // dropdown by reverse-mapping against the expiriesList.
+        const legExpiryDisplay = editingLeg
+          ? (expiriesList.find(
+              (d) => convertExpiryForApi(d) === editingLeg.expiry_date,
+            ) ?? expiry)
+          : expiry;
+        return (
+          <EditLegDialog
+            open={editingLegId !== null}
+            onOpenChange={(o) => {
+              if (!o) setEditingLegId(null);
+            }}
+            leg={editingLeg}
+            expiries={expiriesList}
+            legExpiryDisplay={legExpiryDisplay}
+            chain={chain.context}
+            underlying={underlying}
+            convertExpiryForApi={convertExpiryForApi}
+            buildOptionSymbol={buildOptionSymbol}
+            onSave={(updated) => {
+              handleLegChange(updated);
+            }}
+            onDelete={(id) => {
+              handleLegRemove(id);
+            }}
+          />
+        );
+      })()}
+
+      {/* ── Template-confirmation dialog ──────────────────────────────── */}
+      <TemplateConfigDialog
+        open={pendingTemplate !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingTemplate(null);
+        }}
+        template={pendingTemplate}
+        chain={chain.context}
+        expiries={expiriesList}
+        primaryExpiry={expiry}
+        underlying={underlying}
+        defaultLotSize={lotSizeForUnderlying}
+        convertExpiryForApi={convertExpiryForApi}
+        onApply={(legsOut, tpl) => {
+          handleApplyTemplateFromDialog(legsOut, tpl);
+        }}
       />
     </div>
   );
