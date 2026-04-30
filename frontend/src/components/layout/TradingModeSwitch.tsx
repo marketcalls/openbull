@@ -60,7 +60,7 @@ export function TradingModeSwitch() {
                 !canToggle && "cursor-not-allowed opacity-70",
                 selected
                   ? sandbox
-                    ? "bg-amber-500 text-white shadow-sm"
+                    ? "bg-indigo-600 text-white shadow-sm"
                     : "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
               )}

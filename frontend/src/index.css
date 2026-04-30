@@ -145,47 +145,49 @@
 }
 
 /* ---------------------------------------------------------------------------
- * Sandbox — fixed amber palette, ignores light/dark.
+ * Sandbox — fixed slate-indigo palette, ignores light/dark.
  *
- * Selector specificity 0,1,1 beats both :root (0,0,1) and .dark (0,1,0), so
- * every bare var is forced to the sandbox value regardless of the user's
- * theme toggle. Destructive stays red (cancel/exit affordance must read
- * "danger" even on an amber surface).
+ * Cool blue-slate signals "test environment" the same way Stripe's test mode
+ * does: visually unmistakable but professional, never sleepy. Selector
+ * specificity 0,1,1 beats both :root (0,0,1) and .dark (0,1,0), so every bare
+ * var is forced to the sandbox value regardless of the user's theme toggle.
+ * Destructive stays red — cancel/exit affordance must read "danger" even on
+ * the cool surface.
  * --------------------------------------------------------------------------- */
 
 html[data-trading-mode="sandbox"] {
-  --background: oklch(0.985 0.025 90);
-  --foreground: oklch(0.22 0.06 60);
-  --card: oklch(0.995 0.018 90);
-  --card-foreground: oklch(0.22 0.06 60);
-  --popover: oklch(0.995 0.018 90);
-  --popover-foreground: oklch(0.22 0.06 60);
-  --primary: oklch(0.72 0.20 75);
-  --primary-foreground: oklch(0.18 0.04 60);
-  --secondary: oklch(0.95 0.05 85);
-  --secondary-foreground: oklch(0.30 0.08 60);
-  --muted: oklch(0.94 0.04 85);
-  --muted-foreground: oklch(0.45 0.07 60);
-  --accent: oklch(0.92 0.08 80);
-  --accent-foreground: oklch(0.25 0.07 60);
+  --background: oklch(0.985 0.008 255);
+  --foreground: oklch(0.20 0.04 265);
+  --card: oklch(1 0.004 255);
+  --card-foreground: oklch(0.20 0.04 265);
+  --popover: oklch(1 0.004 255);
+  --popover-foreground: oklch(0.20 0.04 265);
+  --primary: oklch(0.50 0.18 265);
+  --primary-foreground: oklch(0.985 0.005 255);
+  --secondary: oklch(0.95 0.015 255);
+  --secondary-foreground: oklch(0.28 0.05 265);
+  --muted: oklch(0.95 0.012 255);
+  --muted-foreground: oklch(0.50 0.04 260);
+  --accent: oklch(0.93 0.03 260);
+  --accent-foreground: oklch(0.28 0.06 265);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.84 0.13 85);
-  --input: oklch(0.88 0.10 85);
-  --ring: oklch(0.78 0.18 80);
-  --chart-1: oklch(0.72 0.20 75);
-  --chart-2: oklch(0.62 0.18 60);
-  --chart-3: oklch(0.55 0.15 45);
-  --chart-4: oklch(0.50 0.13 30);
-  --chart-5: oklch(0.45 0.10 90);
-  --sidebar: oklch(0.97 0.04 88);
-  --sidebar-foreground: oklch(0.30 0.07 60);
-  --sidebar-primary: oklch(0.72 0.20 75);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.92 0.08 80);
-  --sidebar-accent-foreground: oklch(0.25 0.07 60);
-  --sidebar-border: oklch(0.84 0.13 85);
-  --sidebar-ring: oklch(0.78 0.18 80);
+  --border: oklch(0.88 0.025 255);
+  --input: oklch(0.90 0.02 255);
+  --ring: oklch(0.55 0.18 265);
+  --chart-1: oklch(0.55 0.18 265);
+  --chart-2: oklch(0.62 0.14 230);
+  --chart-3: oklch(0.50 0.12 290);
+  --chart-4: oklch(0.65 0.10 250);
+  --chart-5: oklch(0.42 0.08 265);
+  --sidebar: oklch(0.97 0.012 255);
+  --sidebar-foreground: oklch(0.30 0.05 265);
+  --sidebar-primary: oklch(0.50 0.18 265);
+  --sidebar-primary-foreground: oklch(0.985 0.005 255);
+  --sidebar-accent: oklch(0.93 0.03 260);
+  --sidebar-accent-foreground: oklch(0.28 0.06 265);
+  --sidebar-border: oklch(0.88 0.025 255);
+  --sidebar-ring: oklch(0.55 0.18 265);
 }
 
 @layer base {
