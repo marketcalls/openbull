@@ -127,6 +127,19 @@ export function impliedVol(
  * Black-76 Greeks. Theta is per CALENDAR DAY; vega is per 1% vol move;
  * rho is per 1% rate move (matches the backend's units exactly so the
  * what-if simulator and the snapshot agree on the numbers).
+ *
+ * Formulas mirror py_vollib's `py_vollib.black.greeks.analytical` exactly:
+ *
+ *   delta_call = e^(-rT)·N(d1)
+ *   delta_put  = -e^(-rT)·N(-d1)
+ *   gamma      = e^(-rT)·n(d1) / (F·σ·√T)
+ *   vega       = F·e^(-rT)·n(d1)·√T            ÷ 100  (per 1% vol)
+ *   theta      = [-F·e^(-rT)·n(d1)·σ/(2√T) + r·premium] ÷ 365  (per day)
+ *   rho        = -T·premium                    ÷ 100  (per 1% rate)
+ *
+ * The theta identity uses the Black-76 fact that
+ *   r·F·e^(-rT)·N(d1) - r·K·e^(-rT)·N(d2) = r·call_premium  (and analogously for puts)
+ * so we can fold the rate term into a single `+r·premium`.
  */
 export function greeks(
   F: number,
@@ -147,7 +160,7 @@ export function greeks(
 
   const delta = flag === "c" ? disc * normCdf(d1) : -disc * normCdf(-d1);
   const gamma = (disc * pdfD1) / (F * sigma * sqrtT);
-  const thetaYear = (-F * disc * pdfD1 * sigma) / (2 * sqrtT) - r * premium;
+  const thetaYear = (-F * disc * pdfD1 * sigma) / (2 * sqrtT) + r * premium;
   const vegaPerUnit = F * disc * pdfD1 * sqrtT;
   const rhoBlack76 = -T * premium;
 

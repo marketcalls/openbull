@@ -122,21 +122,33 @@ def _implied_vol(price: float, F: float, K: float, T: float, r: float, flag: str
 
 
 def _greeks(F: float, K: float, T: float, r: float, sigma: float, flag: str, premium: float) -> dict:
+    """Black-76 Greeks, matching py_vollib's analytical formulas exactly.
+
+    Output units mirror py_vollib (and openalgo's option_greeks_service):
+      theta — per calendar day
+      vega  — per 1 % vol move
+      rho   — per 1 % rate move
+
+    Theta uses the Black-76 identity
+      r·F·e^(-rT)·N(d1) − r·K·e^(-rT)·N(d2) = r·call_premium  (analogue for puts)
+    so the rate term collapses to a single ``+ r·premium``. With r = 0
+    (the INR options default) the term vanishes — but for non-zero r
+    this matches py_vollib while ``- r·premium`` would not.
+    """
     if T <= 0 or sigma <= 0:
         return {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0}
     sqrtT = math.sqrt(T)
     d1 = (math.log(F / K) + 0.5 * sigma * sigma * T) / (sigma * sqrtT)
-    d2 = d1 - sigma * sqrtT  # noqa: F841 (kept for parity with classic derivation)
     disc = math.exp(-r * T)
     pdf_d1 = _norm_pdf(d1)
     if flag == "c":
         delta = disc * _norm_cdf(d1)
     else:
         delta = -disc * _norm_cdf(-d1)
-    theta_year = -F * disc * pdf_d1 * sigma / (2 * sqrtT) - r * premium
+    theta_year = -F * disc * pdf_d1 * sigma / (2 * sqrtT) + r * premium
     gamma = disc * pdf_d1 / (F * sigma * sqrtT)
     vega_per_unit = F * disc * pdf_d1 * sqrtT
-    rho = -T * premium  # Black-76 rho approximation
+    rho = -T * premium  # Black-76 rho: ∂C/∂r = -T·C (and -T·P for puts)
     return {
         "delta": round(delta, 4),
         "gamma": round(gamma, 6),

@@ -43,6 +43,26 @@ interface EnrichedLeg extends PayoffLeg {
   greeks: Greeks;
 }
 
+/**
+ * Average IV across snapshot legs that solved (>0). Used as a fallback for
+ * the T+0 curve on legs whose own IV solver failed (e.g. far-OTM 0.05-rupee
+ * options on expiry day) — without this, a single unsolved leg would
+ * collapse the dashed curve onto the expiry curve at intrinsic.
+ *
+ * Returns 0 when no leg in the snapshot has a solved IV — at which point
+ * the T+0 curve correctly degenerates to intrinsic-only, matching the
+ * at-expiry curve. Same behaviour as openalgo's `fallbackIv` parameter
+ * in `strategyMath.ts:totalPnlAt()`.
+ */
+function deriveFallbackIvDecimal(snapshotLegs: SnapshotLegOutput[]): number {
+  const solved = snapshotLegs
+    .map((l) => l.implied_volatility ?? 0)
+    .filter((iv) => iv > 0);
+  if (solved.length === 0) return 0;
+  const meanPct = solved.reduce((a, b) => a + b, 0) / solved.length;
+  return meanPct / 100;
+}
+
 /** Marker the WhatIfPanel asks the chart to draw + simulation parameters
  *  the T+0 curve uses to re-price the legs.
  *
@@ -78,8 +98,53 @@ interface Props {
   simulationMarker?: SimulationMarker | null;
 }
 
-/** Build enriched legs, dropping any that don't have enough info to price. */
-function buildEnrichedLegs(
+/**
+ * Minimal legs needed to render the **At-Expiry** payoff curve: action,
+ * option type, strike, entry price, lots, lot size. None of these depend
+ * on the broker — they're entered by the user — so we render the orange
+ * curve as soon as the strikes are set, regardless of whether the snapshot
+ * has solved IV / Greeks for each leg.
+ *
+ * `entryPriceBySymbol` is the source of truth for the entry price: it
+ * captures what the user typed in the leg row. The snapshot's `ltp` is
+ * used only as a last-resort fallback (so a brand-new leg with no entry
+ * price typed yet still produces a sensible curve).
+ */
+function buildExpiryLegs(
+  snapshotLegs: SnapshotLegOutput[],
+  entryPriceBySymbol: Record<string, number>,
+): PayoffLeg[] {
+  const out: PayoffLeg[] = [];
+  for (const l of snapshotLegs) {
+    if (!l.strike || !l.option_type) continue;
+    const userEntry = entryPriceBySymbol[l.symbol];
+    const entryPrice =
+      userEntry !== undefined && userEntry > 0
+        ? userEntry
+        : l.ltp != null && l.ltp > 0
+          ? l.ltp
+          : 0;
+    out.push({
+      action: l.action,
+      optionType: l.option_type,
+      strike: l.strike,
+      lots: l.lots,
+      lotSize: l.lot_size,
+      entryPrice,
+    });
+  }
+  return out;
+}
+
+/**
+ * Legs ready for the **T+0** curve — needs IV and DTE on top of the
+ * minimum metadata. Legs whose IV solver failed but whose DTE is known
+ * are kept and the caller substitutes the snapshot-wide average IV via
+ * `tPlusZeroPnl(..., fallbackIv)`. A leg without DTE genuinely cannot be
+ * re-priced, so it's dropped from this list (its at-expiry intrinsic
+ * still contributes via `buildExpiryLegs` above).
+ */
+function buildT0Legs(
   snapshotLegs: SnapshotLegOutput[],
   entryPriceBySymbol: Record<string, number>,
 ): EnrichedLeg[] {
@@ -94,14 +159,16 @@ function buildEnrichedLegs(
     ) {
       continue;
     }
-    const entry = entryPriceBySymbol[l.symbol] ?? l.ltp;
+    const userEntry = entryPriceBySymbol[l.symbol];
+    const entryPrice =
+      userEntry !== undefined && userEntry > 0 ? userEntry : l.ltp;
     out.push({
       action: l.action,
       optionType: l.option_type,
       strike: l.strike,
       lots: l.lots,
       lotSize: l.lot_size,
-      entryPrice: entry > 0 ? entry : l.ltp,
+      entryPrice,
       ivDecimal: (l.implied_volatility ?? 0) / 100,
       dteYears: Math.max((l.days_to_expiry ?? 0) / 365, 0.0001),
       symbol: l.symbol,
@@ -112,22 +179,30 @@ function buildEnrichedLegs(
 }
 
 /** P&L if the user closed at the given spot, with optional IV shift (in
- *  percentage points) and time forward (days). Both default to 0 → priced
+ *  percentage points), time forward (days), and a fallback IV for legs
+ *  whose own IV failed to solve. Defaults to 0 for the shifts → priced
  *  with the leg's currently-solved IV at "now". The shifts let the T+0
- *  curve respond to the What-If panel's IV and Days Forward sliders. */
+ *  curve respond to the What-If panel's IV and Days Forward sliders.
+ *
+ *  `fallbackIvDecimal` mirrors openalgo's `strategyMath.ts:totalPnlAt()`
+ *  fallback — when a leg has iv=0 (solver failed, e.g. far-OTM 0.05-rupee
+ *  on expiry day) the snapshot-wide average IV substitutes so the curve
+ *  doesn't spuriously collapse onto intrinsic. */
 function tPlusZeroPnl(
   legs: EnrichedLeg[],
   spot: number,
   ivShiftPct = 0,
   daysForward = 0,
+  fallbackIvDecimal = 0,
 ): number {
   let total = 0;
   for (const leg of legs) {
     const sign = leg.action === "BUY" ? 1 : -1;
     const flag = leg.optionType === "CE" ? "c" : "p";
-    // Shift IV by the slider's percentage points (e.g. ivShiftPct=+5 on a
-    // leg with iv=18% gives 23%). Floor at 0.001 to keep Black-76 stable.
-    const sigma = Math.max(leg.ivDecimal + ivShiftPct / 100, 0.001);
+    // If this leg's IV solver failed (leg.ivDecimal === 0), borrow the
+    // snapshot-wide average IV. Then apply the slider shift on top.
+    const baseIv = leg.ivDecimal > 0 ? leg.ivDecimal : fallbackIvDecimal;
+    const sigma = Math.max(baseIv + ivShiftPct / 100, 0.001);
     // Advance time by daysForward; floor remaining time at the math lib's
     // tiny epsilon so legs at expiry still price (intrinsic only).
     const tYears = Math.max(leg.dteYears - daysForward / 365, 0.0001);
@@ -145,7 +220,7 @@ function tPlusZeroPnl(
 }
 
 function pickSpotRange(
-  legs: EnrichedLeg[],
+  legs: PayoffLeg[],
   spot: number,
   override?: [number, number],
 ): [number, number] {
@@ -173,23 +248,38 @@ export function PayoffChart({
   const { theme } = useTheme();
   const isDark = theme === "dark";
 
-  const legs = useMemo(
-    () => buildEnrichedLegs(snapshotLegs, entryPriceBySymbol),
+  // Two leg sets:
+  //   expiryLegs — minimum metadata only; drives the orange "At Expiry" curve.
+  //                Renders the moment the user picks a strike, even before
+  //                the snapshot returns IV / Greeks.
+  //   t0Legs    — IV + DTE required; drives the dashed "T+0" curve. Subset
+  //                of expiryLegs in normal cases; smaller when the snapshot
+  //                hasn't populated IV for every leg yet.
+  const expiryLegs = useMemo(
+    () => buildExpiryLegs(snapshotLegs, entryPriceBySymbol),
     [snapshotLegs, entryPriceBySymbol],
+  );
+  const t0Legs = useMemo(
+    () => buildT0Legs(snapshotLegs, entryPriceBySymbol),
+    [snapshotLegs, entryPriceBySymbol],
+  );
+  const fallbackIvDecimal = useMemo(
+    () => deriveFallbackIvDecimal(snapshotLegs),
+    [snapshotLegs],
   );
 
   const range = useMemo(
-    () => pickSpotRange(legs, spot, spotRange),
-    [legs, spot, spotRange],
+    () => pickSpotRange(expiryLegs, spot, spotRange),
+    [expiryLegs, spot, spotRange],
   );
 
-  // Probability of Profit — uses the same payoff legs and the snapshot's
-  // solved IVs / DTEs. Cheap (one extra at-expiry sweep over an 800-pt
-  // grid), so we recompute on every leg or spot change — same dep set
-  // the curve already has, so React batches.
+  // Probability of Profit — needs IV + DTE on every leg, so it's gated on
+  // the t0-eligible set. Returns null while the snapshot is still solving
+  // for any leg, instead of using a partial set that would underreport the
+  // strategy's true distribution.
   const pop = useMemo(() => {
-    if (legs.length === 0) return null;
-    const payoffLegs: PayoffLeg[] = legs.map((l) => ({
+    if (t0Legs.length === 0 || t0Legs.length !== expiryLegs.length) return null;
+    const payoffLegs: PayoffLeg[] = t0Legs.map((l) => ({
       action: l.action,
       optionType: l.optionType,
       strike: l.strike,
@@ -200,10 +290,12 @@ export function PayoffChart({
     return probabilityOfProfit({
       legs: payoffLegs,
       spot,
-      legIvDecimals: legs.map((l) => l.ivDecimal),
-      legDteYears: legs.map((l) => l.dteYears),
+      legIvDecimals: t0Legs.map((l) =>
+        l.ivDecimal > 0 ? l.ivDecimal : fallbackIvDecimal,
+      ),
+      legDteYears: t0Legs.map((l) => l.dteYears),
     });
-  }, [legs, spot]);
+  }, [t0Legs, expiryLegs.length, spot, fallbackIvDecimal]);
 
   // Pull simulation shifts off the marker so the T+0 curve responds to the
   // IV / Days sliders, not just the spot slider. Defaults to 0 when no
@@ -211,62 +303,83 @@ export function PayoffChart({
   const simIvShiftPct = simulationMarker?.ivShiftPct ?? 0;
   const simDaysForward = simulationMarker?.daysForward ?? 0;
 
-  const { xs, expiryY, t0Y, breakevens, bounds, sigmaXs } = useMemo(() => {
-    const [lo, hi] = range;
-    const xsLocal: number[] = new Array(steps);
-    const expiryLocal: number[] = new Array(steps);
-    const t0Local: number[] = new Array(steps);
-    const dx = (hi - lo) / Math.max(steps - 1, 1);
-    const payoffLegs: PayoffLeg[] = legs.map((l) => ({
-      action: l.action,
-      optionType: l.optionType,
-      strike: l.strike,
-      lots: l.lots,
-      lotSize: l.lotSize,
-      entryPrice: l.entryPrice,
-    }));
-    for (let i = 0; i < steps; i++) {
-      const x = lo + i * dx;
-      xsLocal[i] = x;
-      expiryLocal[i] = payoffAtExpiry(payoffLegs, x);
-      t0Local[i] =
-        legs.length > 0
-          ? tPlusZeroPnl(legs, x, simIvShiftPct, simDaysForward)
+  const { xs, expiryY, t0Y, t0Available, breakevens, bounds, sigmaXs } =
+    useMemo(() => {
+      const [lo, hi] = range;
+      const xsLocal: number[] = new Array(steps);
+      const expiryLocal: number[] = new Array(steps);
+      const t0Local: number[] = new Array(steps);
+      const dx = (hi - lo) / Math.max(steps - 1, 1);
+
+      // T+0 is only meaningful when every expiry-eligible leg has IV/DTE
+      // — otherwise the dashed curve sums a partial set against an expiry
+      // curve over the full set, which would draw two visibly inconsistent
+      // lines. Fall back to "no T+0 yet" until the snapshot catches up.
+      const t0Ready =
+        t0Legs.length > 0 && t0Legs.length === expiryLegs.length;
+
+      for (let i = 0; i < steps; i++) {
+        const x = lo + i * dx;
+        xsLocal[i] = x;
+        expiryLocal[i] = payoffAtExpiry(expiryLegs, x);
+        t0Local[i] = t0Ready
+          ? tPlusZeroPnl(
+              t0Legs,
+              x,
+              simIvShiftPct,
+              simDaysForward,
+              fallbackIvDecimal,
+            )
           : 0;
-    }
-    const beCurve = xsLocal.map((x, i) => ({ spot: x, pnl: expiryLocal[i] }));
-    const breakevensLocal = findBreakevens(beCurve);
-    const boundsLocal =
-      payoffLegs.length > 0
-        ? (() => {
-            const slopes = asymptoticSlopes(payoffLegs);
-            return {
-              unlimitedRight: slopes.right !== 0,
-              unlimitedLeft: slopes.left !== 0,
-            };
-          })()
-        : { unlimitedRight: false, unlimitedLeft: false };
+      }
+      const beCurve = xsLocal.map((x, i) => ({ spot: x, pnl: expiryLocal[i] }));
+      const breakevensLocal = findBreakevens(beCurve);
+      const boundsLocal =
+        expiryLegs.length > 0
+          ? (() => {
+              const slopes = asymptoticSlopes(expiryLegs);
+              return {
+                unlimitedRight: slopes.right !== 0,
+                unlimitedLeft: slopes.left !== 0,
+              };
+            })()
+          : { unlimitedRight: false, unlimitedLeft: false };
 
-    // Sigma bands sized off the SHORTEST DTE leg so the band is meaningful
-    // for the strategy's nearest-expiry exposure.
-    const minDte = legs.length
-      ? Math.min(...legs.map((l) => l.dteYears))
-      : 0;
-    const refIv = legs.length
-      ? legs.reduce((s, l) => s + l.ivDecimal, 0) / legs.length
-      : 0;
-    const sigmaPrice = spot * refIv * Math.sqrt(minDte);
-    const sigmaLocal = sigmaPrice > 0 ? [sigmaPrice, sigmaPrice * 2] : [];
+      // Sigma bands sized off the SHORTEST DTE leg so the band is meaningful
+      // for the strategy's nearest-expiry exposure. Needs IV+DTE → uses
+      // t0Legs; with the fallback IV folded in so the band still draws
+      // when every leg's own IV failed but a snapshot-wide average exists.
+      const minDte = t0Legs.length
+        ? Math.min(...t0Legs.map((l) => l.dteYears))
+        : 0;
+      const refIv = t0Legs.length
+        ? t0Legs.reduce((s, l) => {
+            const iv = l.ivDecimal > 0 ? l.ivDecimal : fallbackIvDecimal;
+            return s + iv;
+          }, 0) / t0Legs.length
+        : 0;
+      const sigmaPrice = spot * refIv * Math.sqrt(minDte);
+      const sigmaLocal = sigmaPrice > 0 ? [sigmaPrice, sigmaPrice * 2] : [];
 
-    return {
-      xs: xsLocal,
-      expiryY: expiryLocal,
-      t0Y: t0Local,
-      breakevens: breakevensLocal,
-      bounds: boundsLocal,
-      sigmaXs: sigmaLocal,
-    };
-  }, [range, steps, legs, spot, simIvShiftPct, simDaysForward]);
+      return {
+        xs: xsLocal,
+        expiryY: expiryLocal,
+        t0Y: t0Local,
+        t0Available: t0Ready,
+        breakevens: breakevensLocal,
+        bounds: boundsLocal,
+        sigmaXs: sigmaLocal,
+      };
+    }, [
+      range,
+      steps,
+      expiryLegs,
+      t0Legs,
+      spot,
+      simIvShiftPct,
+      simDaysForward,
+      fallbackIvDecimal,
+    ]);
 
   const colors = useMemo(
     () => ({
@@ -290,9 +403,10 @@ export function PayoffChart({
   );
 
   const traces = useMemo<unknown[]>(() => {
-    if (legs.length === 0) return [];
+    if (expiryLegs.length === 0) return [];
     const out: unknown[] = [
-      // At-expiry curve — primary
+      // At-expiry curve — primary; renders from the user-entered legs
+      // alone, so it appears the moment the strikes are picked.
       {
         x: xs,
         y: expiryY,
@@ -303,8 +417,14 @@ export function PayoffChart({
         hovertemplate:
           "Spot %{x:.2f}<br>P&L %{y:.2f}<extra>At Expiry</extra>",
       },
-      // T+0 curve — dashed
-      {
+    ];
+
+    // T+0 curve — dashed; only drawn when every leg has IV/DTE so the
+    // dashed line is a faithful re-pricing of the same set the orange
+    // curve sums. Skipping it (instead of falling back to expiry) keeps
+    // the chart honest about what's been priced.
+    if (t0Available) {
+      out.push({
         x: xs,
         y: t0Y,
         type: "scattergl",
@@ -312,8 +432,8 @@ export function PayoffChart({
         name: "T+0",
         line: { color: colors.t0, width: 1.5, dash: "dash" },
         hovertemplate: "Spot %{x:.2f}<br>P&L %{y:.2f}<extra>T+0</extra>",
-      },
-    ];
+      });
+    }
 
     // What-if simulation marker — single dot at the simulated point.
     // Re-renders cheaply on every slider tick because it's just two
@@ -341,20 +461,22 @@ export function PayoffChart({
       });
     }
     return out;
-  }, [legs, xs, expiryY, t0Y, colors, simulationMarker]);
+  }, [expiryLegs.length, t0Available, xs, expiryY, t0Y, colors, simulationMarker]);
 
   const layout = useMemo<Record<string, unknown>>(() => {
     const [lo, hi] = range;
+    // Y-range driven by whichever curves are actually drawn — when T+0
+    // hasn't rendered, including its all-zero buffer would pull the axis
+    // toward zero and squash the expiry curve.
+    const ySamples = t0Available ? [...expiryY, ...t0Y] : expiryY;
     const yPad = (() => {
-      if (expiryY.length === 0) return 1;
-      const yMin = Math.min(...expiryY, ...t0Y);
-      const yMax = Math.max(...expiryY, ...t0Y);
+      if (ySamples.length === 0) return 1;
+      const yMin = Math.min(...ySamples);
+      const yMax = Math.max(...ySamples);
       return Math.max(Math.abs(yMin), Math.abs(yMax)) * 0.15 + 1;
     })();
-    const yMin =
-      expiryY.length === 0 ? -1 : Math.min(...expiryY, ...t0Y) - yPad;
-    const yMax =
-      expiryY.length === 0 ? 1 : Math.max(...expiryY, ...t0Y) + yPad;
+    const yMin = ySamples.length === 0 ? -1 : Math.min(...ySamples) - yPad;
+    const yMax = ySamples.length === 0 ? 1 : Math.max(...ySamples) + yPad;
 
     const shapes: unknown[] = [
       // Profit zone shading (above y=0)
@@ -582,24 +704,33 @@ export function PayoffChart({
     [],
   );
 
-  if (legs.length === 0) {
+  if (expiryLegs.length === 0) {
     return (
       <div className="flex h-[420px] flex-col items-center justify-center gap-1 text-center text-muted-foreground">
         <p className="text-sm">No payoff to draw yet.</p>
         <p className="text-xs">
-          Add legs and pick strikes — the payoff updates with the snapshot.
+          Add legs and pick strikes — the at-expiry curve appears as soon as
+          a strike is set.
         </p>
       </div>
     );
   }
 
   return (
-    <Plot
-      data={traces}
-      layout={layout}
-      config={config}
-      useResizeHandler
-      style={{ width: "100%", height: "480px" }}
-    />
+    <div className="space-y-1">
+      <Plot
+        data={traces}
+        layout={layout}
+        config={config}
+        useResizeHandler
+        style={{ width: "100%", height: "480px" }}
+      />
+      {!t0Available && (
+        <p className="px-2 text-[11px] text-muted-foreground">
+          T+0 curve waiting on IV — every leg needs a solved snapshot before
+          the dashed line appears.
+        </p>
+      )}
+    </div>
   );
 }

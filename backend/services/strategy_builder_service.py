@@ -36,6 +36,7 @@ from typing import Any
 from backend.services.option_greeks_service import (
     DEFAULT_INTEREST_RATES,
     calculate_greeks,
+    calculate_time_to_expiry,
     get_underlying_exchange,
     parse_option_symbol,
 )
@@ -219,16 +220,23 @@ def get_strategy_snapshot(
         }
 
         # Try to extract metadata from the symbol so we always have
-        # strike/option_type/expiry on the response, even if greeks fail.
+        # strike/option_type/expiry/days_to_expiry on the response — even
+        # if LTP or greeks fail. The frontend PayoffChart needs at minimum
+        # strike+option_type+entry_price to render the at-expiry curve, and
+        # days_to_expiry for the dashed T+0 curve. Skipping these on the
+        # error path leaves the chart blank for any leg with a temporary
+        # broker hiccup.
         try:
             base_symbol, expiry_dt, strike, opt_type = parse_option_symbol(
                 symbol, leg_exchange, expiry_time
             )
+            _, days_to_expiry = calculate_time_to_expiry(expiry_dt)
             leg_out.update({
                 "underlying": base_symbol,
                 "strike": round(strike, 2),
                 "option_type": opt_type,
                 "expiry_date": expiry_dt.strftime("%d-%b-%Y"),
+                "days_to_expiry": round(days_to_expiry, 4),
             })
         except ValueError as e:
             leg_out["error"] = str(e)
@@ -267,7 +275,12 @@ def get_strategy_snapshot(
         if ok:
             gks = gresp.get("greeks", {})
             leg_out["implied_volatility"] = gresp.get("implied_volatility", 0.0)
-            leg_out["days_to_expiry"] = gresp.get("days_to_expiry", 0.0)
+            # Prefer the days_to_expiry the greeks call recomputed (handles
+            # the 0.0001-year floor identically to the underlying math) but
+            # we already populated it above as a safety net.
+            leg_out["days_to_expiry"] = gresp.get(
+                "days_to_expiry", leg_out.get("days_to_expiry", 0.0)
+            )
             leg_out["greeks"] = gks
             if "note" in gresp:
                 leg_out["note"] = gresp["note"]
