@@ -39,6 +39,9 @@ const StraddleChart = lazy(() => import("@/pages/tools/StraddleChart"));
 const GEXDashboard = lazy(() => import("@/pages/tools/GEXDashboard"));
 const StrategyBuilder = lazy(() => import("@/pages/tools/StrategyBuilder"));
 const StrategyPortfolio = lazy(() => import("@/pages/tools/StrategyPortfolio"));
+const StraddlesStrangleChain = lazy(
+  () => import("@/pages/tools/StraddlesStrangleChain"),
+);
 
 function ToolFallback() {
   return (
@@ -264,6 +267,16 @@ function App() {
                     <ProtectedRoute requiresBroker>
                       <Suspense fallback={<ToolFallback />}>
                         <GEXDashboard />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tools/straddles-strangle-chain"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <StraddlesStrangleChain />
                       </Suspense>
                     </ProtectedRoute>
                   }

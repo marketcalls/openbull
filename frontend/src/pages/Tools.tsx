@@ -68,6 +68,13 @@ const TOOLS: ToolDef[] = [
     status: "available",
   },
   {
+    to: "/tools/straddles-strangle-chain",
+    title: "Straddles & Strangles Chain",
+    description:
+      "Scan ATM straddles and OTM strangles across expiries with live Greeks, IV, breakevens, and POP. Trade, monitor, add lots, close, or reopen — all on one page.",
+    status: "available",
+  },
+  {
     to: "/tools/strategybuilder",
     title: "Strategy Builder",
     description:
