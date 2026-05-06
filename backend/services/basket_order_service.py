@@ -76,11 +76,39 @@ def _place_single_order(order_data: dict, broker_module, auth_token: str) -> dic
         }
 
 
+def _place_single_order_sandbox(order_data: dict, user_id: int) -> dict:
+    """Sandbox counterpart of :func:`_place_single_order` — same result shape."""
+    from backend.services.sandbox_service import place_order as sbx_place
+
+    symbol = order_data.get("symbol", "Unknown")
+    try:
+        ok, resp, _status = sbx_place(user_id, order_data)
+        if ok:
+            return {
+                "symbol": symbol,
+                "status": "success",
+                "orderid": resp.get("orderid"),
+            }
+        return {
+            "symbol": symbol,
+            "status": "error",
+            "message": resp.get("message", "Sandbox rejected order"),
+        }
+    except Exception as e:
+        logger.exception("Error placing sandbox basket leg for %s: %s", symbol, e)
+        return {
+            "symbol": symbol,
+            "status": "error",
+            "message": "Failed to place sandbox order due to internal error",
+        }
+
+
 def place_basket_order(
     basket_data: dict[str, Any],
     auth_token: str,
     broker: str,
     config: dict | None = None,
+    user_id: int | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
     """Place a basket of orders concurrently. BUY orders are placed before SELL orders."""
     orders = basket_data.get("orders")
@@ -95,9 +123,19 @@ def place_basket_order(
         if not is_valid:
             return False, {"status": "error", "message": f"Order {idx}: {error_message}"}, 400
 
-    broker_module = _import_broker_order_module(broker)
-    if broker_module is None:
-        return False, {"status": "error", "message": "Broker-specific module not found"}, 404
+    # Sandbox dispatch: when the user is known and trading mode is sandbox,
+    # route every leg through the simulated engine instead of the broker.
+    # Mirrors the dispatch in backend.services.order_service.place_order_with_auth.
+    sandbox_mode = False
+    if user_id is not None:
+        try:
+            from backend.services.trading_mode_service import get_trading_mode_sync
+
+            sandbox_mode = get_trading_mode_sync() == "sandbox"
+        except Exception:
+            logger.exception(
+                "Trading-mode lookup failed for basket; defaulting to live"
+            )
 
     # Prioritize BUY before SELL to free up margin for opposing SELL legs
     buy_orders = [o for o in orders if o.get("action") == "BUY"]
@@ -105,6 +143,20 @@ def place_basket_order(
     sorted_orders = buy_orders + sell_orders
 
     orders_with_meta = [{**o, "strategy": strategy} for o in sorted_orders]
+
+    if sandbox_mode:
+        # Sandbox calls are local DB writes — fire sequentially (no rate limit
+        # to amortize, no per-batch sleep). Order is preserved so BUY legs
+        # land in the orderbook before SELL legs, same as live.
+        results = [
+            _place_single_order_sandbox(order, user_id)  # type: ignore[arg-type]
+            for order in orders_with_meta
+        ]
+        return True, {"status": "success", "results": results}, 200
+
+    broker_module = _import_broker_order_module(broker)
+    if broker_module is None:
+        return False, {"status": "error", "message": "Broker-specific module not found"}, 404
 
     results: list[dict] = []
     total = len(orders_with_meta)
