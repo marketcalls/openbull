@@ -41,6 +41,31 @@ import {
 import { cn } from "@/lib/utils";
 import type { Action, OptionType } from "@/types/strategy";
 
+/** Median strike spacing — robust to one-off gaps in the strike grid. */
+function chainStep(strikes: number[] | undefined): number {
+  if (!strikes || strikes.length < 2) return 0;
+  const sorted = [...strikes].sort((a, b) => a - b);
+  const diffs: number[] = [];
+  for (let i = 1; i < sorted.length; i++) diffs.push(sorted[i] - sorted[i - 1]);
+  diffs.sort((a, b) => a - b);
+  return diffs[Math.floor(diffs.length / 2)] || 0;
+}
+
+/** Compute "ATM" / "ITM<n>" / "OTM<n>" for a strike vs ATM. CE flips PE. */
+function strikeLabel(
+  strike: number,
+  atm: number,
+  step: number,
+  optType: OptionType,
+): string | null {
+  if (step <= 0 || !Number.isFinite(strike) || !Number.isFinite(atm)) return null;
+  const steps = Math.round((strike - atm) / step);
+  if (steps === 0) return "ATM";
+  const isCallITM = optType === "CE" && steps < 0;
+  const isPutITM = optType === "PE" && steps > 0;
+  return `${isCallITM || isPutITM ? "ITM" : "OTM"}${Math.abs(steps)}`;
+}
+
 /** Per-leg row state inside the dialog — editable strike + lots. */
 interface RowState {
   rowKey: string;
@@ -169,6 +194,23 @@ export function TemplateConfigDialog({
     }
     return { net, lotSize };
   }, [rows, chain?.lotSize, defaultLotSize]);
+
+  // Pre-compute moneyness labels for every strike, separately for CE and PE
+  // (the labels flip around ATM). Each row picks the map matching its leg's
+  // optionType.
+  const labelMaps = useMemo(() => {
+    const ce = new Map<number, string>();
+    const pe = new Map<number, string>();
+    if (!chain) return { ce, pe };
+    const step = chainStep(chain.strikes);
+    for (const s of chain.strikes) {
+      const ceLabel = strikeLabel(s, chain.atm, step, "CE");
+      const peLabel = strikeLabel(s, chain.atm, step, "PE");
+      if (ceLabel) ce.set(s, ceLabel);
+      if (peLabel) pe.set(s, peLabel);
+    }
+    return { ce, pe };
+  }, [chain]);
 
   const unresolvedCount = rows.filter((r) => r.strike === null).length;
   const canApply =
@@ -306,12 +348,18 @@ export function TemplateConfigDialog({
                     {r.strike !== null && !chain.strikes.includes(r.strike) && (
                       <option value={String(r.strike)}>{r.strike}</option>
                     )}
-                    {chain.strikes.map((s) => (
-                      <option key={s} value={String(s)}>
-                        {s}
-                        {chain.atm === s ? " · ATM" : ""}
-                      </option>
-                    ))}
+                    {chain.strikes.map((s) => {
+                      const label =
+                        r.optionType === "CE"
+                          ? labelMaps.ce.get(s)
+                          : labelMaps.pe.get(s);
+                      return (
+                        <option key={s} value={String(s)}>
+                          {s}
+                          {label ? ` · ${label}` : ""}
+                        </option>
+                      );
+                    })}
                   </select>
                 ) : (
                   <Input

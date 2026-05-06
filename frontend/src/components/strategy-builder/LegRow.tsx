@@ -121,6 +121,24 @@ export function LegRow({
     [leg.strike, leg.option_type, chainContext],
   );
 
+  // Pre-compute the per-strike moneyness label once per chain/optionType so
+  // each <option> row in the strike dropdown shows ATM / ITM<n> / OTM<n>
+  // alongside the price. CE and PE flip the ITM/OTM sides around ATM.
+  const labelByStrike = useMemo(() => {
+    const out = new Map<number, string>();
+    if (!chainContext) return out;
+    for (const s of chainContext.strikes) {
+      const m = strikeMoneyness(
+        s,
+        chainContext.atm,
+        chainContext.strikes,
+        leg.option_type,
+      );
+      if (m) out.set(s, m.label);
+    }
+    return out;
+  }, [chainContext, leg.option_type]);
+
   const set = <K extends keyof BuilderLeg>(key: K, value: BuilderLeg[K]) => {
     onChange({ ...leg, [key]: value });
   };
@@ -238,11 +256,15 @@ export function LegRow({
             {!Number.isFinite(leg.strike) && (
               <option value="">— pick —</option>
             )}
-            {chainContext!.strikes.map((s) => (
-              <option key={s} value={String(s)}>
-                {s} {chainContext!.atm === s ? "·ATM" : ""}
-              </option>
-            ))}
+            {chainContext!.strikes.map((s) => {
+              const label = labelByStrike.get(s);
+              return (
+                <option key={s} value={String(s)}>
+                  {s}
+                  {label ? ` ·${label}` : ""}
+                </option>
+              );
+            })}
           </select>
         ) : (
           <Input

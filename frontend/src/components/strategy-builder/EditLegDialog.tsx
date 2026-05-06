@@ -139,6 +139,19 @@ export function EditLegDialog({
     [strike, chain, optionType],
   );
 
+  // Pre-compute the per-strike moneyness label so the dropdown options show
+  // ATM / ITM<n> / OTM<n>. Keyed by optionType because CE and PE flip the
+  // ITM/OTM sides around ATM.
+  const labelByStrike = useMemo(() => {
+    const out = new Map<number, string>();
+    if (!chain) return out;
+    for (const s of chain.strikes) {
+      const m = classifyMoneyness(s, chain.atm, chain.strikes, optionType);
+      if (m) out.set(s, m.label);
+    }
+    return out;
+  }, [chain, optionType]);
+
   /** Auto-fill entry price from chain LTP when (strike, type) change. The
    *  helper is invoked from the field handlers themselves so the user's
    *  manual edit isn't clobbered when they explicitly typed a price. */
@@ -337,12 +350,15 @@ export function EditLegDialog({
                 {!chain.strikes.includes(strike) && (
                   <option value={String(strike)}>{strike}</option>
                 )}
-                {chain.strikes.map((s) => (
-                  <option key={s} value={String(s)}>
-                    {s}
-                    {chain.atm === s ? " · ATM" : ""}
-                  </option>
-                ))}
+                {chain.strikes.map((s) => {
+                  const label = labelByStrike.get(s);
+                  return (
+                    <option key={s} value={String(s)}>
+                      {s}
+                      {label ? ` · ${label}` : ""}
+                    </option>
+                  );
+                })}
               </select>
             ) : (
               <Input

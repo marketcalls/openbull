@@ -123,6 +123,19 @@ export function AddPositionCard({
     [strike, chain, optionType],
   );
 
+  // Pre-compute the moneyness label for every strike on the current chain so
+  // each <option> row shows ATM / ITM<n> / OTM<n> alongside the price. Keyed
+  // off optionType because CE and PE flip ITM/OTM around ATM.
+  const labelByStrike = useMemo(() => {
+    const out = new Map<number, string>();
+    if (!chain) return out;
+    for (const s of chain.strikes) {
+      const m = moneyness(s, chain.atm, chain.strikes, optionType);
+      if (m) out.set(s, m.label);
+    }
+    return out;
+  }, [chain, optionType]);
+
   const symbol = useMemo(() => {
     if (!expiry || strike === null) return "";
     return buildSymbol(underlying, expiry, strike, optionType);
@@ -247,12 +260,15 @@ export function AddPositionCard({
             className="h-9 w-32 rounded-lg border border-input bg-background px-2 text-xs font-medium tabular-nums outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
           >
             {!chain && <option value="">Load chain…</option>}
-            {chain?.strikes.map((s) => (
-              <option key={s} value={String(s)}>
-                {s}
-                {chain.atm === s ? " · ATM" : ""}
-              </option>
-            ))}
+            {chain?.strikes.map((s) => {
+              const label = labelByStrike.get(s);
+              return (
+                <option key={s} value={String(s)}>
+                  {s}
+                  {label ? ` · ${label}` : ""}
+                </option>
+              );
+            })}
           </select>
         </div>
 
