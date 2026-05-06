@@ -31,7 +31,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -50,10 +49,16 @@ import { useTradingMode } from "@/contexts/TradingModeContext";
 import { cn } from "@/lib/utils";
 import {
   buildScannerRow,
+  EXPIRY_BUCKETS,
   groupPositionsToStraddles,
+  MONEYNESS_LABELS,
+  pickBucketExpiry,
+  resolveExpiries,
   STRATEGIES,
   STRATEGY_KEYS,
+  WEEKLY_UNDERLYINGS,
   type ActiveGroup,
+  type ExpiryBucket,
   type ScannerRow,
   type StrategyKey,
 } from "@/lib/straddleScanner";
@@ -75,14 +80,12 @@ const INDEX_SCOPE: Array<{ exchange: FnoExchange; underlying: string }> = [
   { exchange: "BFO", underlying: "BANKEX" },
 ];
 
-/** How many expiries to scan per underlying. 3 = nearest weekly + next + monthly. */
-const EXPIRIES_PER_UNDERLYING = 3;
-/** How many strikes to fetch per chain call. 7 covers ATM ± 3 — enough for
- *  strangle offsets up to 3 with headroom. */
-const STRIKE_COUNT = 7;
-/** When stock-mode "All" is selected, scan this many top stocks × nearest 1 expiry. */
+/** Strikes per chain call. 11 covers ATM ± 5 — enough for moneyness up to
+ *  ITM4 / OTM4 with one strike of headroom for clamping at chain edges. */
+const STRIKE_COUNT = 11;
+/** Stock-mode "All" → scan this many top tickers (alphabetical from the
+ *  broker's NFO underlyings list). */
 const TOP_STOCKS_LIMIT = 20;
-const EXPIRIES_FOR_STOCK_ALL = 1;
 
 const INSTRUMENT_TABS: Array<{ value: "indices" | "stock"; label: string }> = [
   { value: "indices", label: "Indices" },
@@ -173,7 +176,8 @@ export default function StraddlesStrangleChain() {
   /** "ALL" or a specific underlying symbol. */
   const [scrip, setScrip] = useState<string>("ALL");
   const [perLot, setPerLot] = useState<boolean>(false);
-  const [strangleOffset, setStrangleOffset] = useState<number>(1);
+  const [expiryBucket, setExpiryBucket] =
+    useState<ExpiryBucket>("current_week");
 
   // ── Underlyings ──────────────────────────────────────────────────────
   /** NFO underlyings — used for the Stock combobox. */
@@ -238,25 +242,35 @@ export default function StraddlesStrangleChain() {
     })),
   });
 
-  // ── Build the (underlying, exchange, expiry) cartesian product ────────
+  // ── Resolve one expiry per underlying based on the bucket dropdown ───
+  // Underlyings without the selected bucket (e.g. monthly-only stocks for
+  // a "Current Week" filter) are silently skipped — the empty-state
+  // message below tells the user why.
   type ChainTarget = { exchange: FnoExchange; underlying: string; expiry: string };
   const chainTargets = useMemo<ChainTarget[]>(() => {
-    const expiriesPer =
-      instrumentType === "stock" && scrip === "ALL"
-        ? EXPIRIES_FOR_STOCK_ALL
-        : EXPIRIES_PER_UNDERLYING;
-
     const out: ChainTarget[] = [];
     scope.forEach((s, idx) => {
       const q = expiryQueries[idx];
       if (q?.data?.status !== "success") return;
-      const list = q.data.data.slice(0, expiriesPer);
-      for (const e of list) {
-        out.push({ exchange: s.exchange, underlying: s.underlying, expiry: e });
-      }
+      const hasWeekly = WEEKLY_UNDERLYINGS.has(s.underlying);
+      const resolved = resolveExpiries(q.data.data, s.exchange, hasWeekly);
+      const expiry = pickBucketExpiry(resolved, expiryBucket);
+      if (!expiry) return;
+      out.push({ exchange: s.exchange, underlying: s.underlying, expiry });
     });
     return out;
-  }, [scope, expiryQueries, instrumentType, scrip]);
+  }, [scope, expiryQueries, expiryBucket]);
+
+  /** Underlyings the bucket filter eliminated (so we can show a hint). */
+  const skippedForBucket = useMemo<string[]>(() => {
+    if (expiryBucket === "current_month" || expiryBucket === "next_month") {
+      return [];
+    }
+    // Week buckets eliminate non-weekly underlyings.
+    return scope
+      .filter((s) => !WEEKLY_UNDERLYINGS.has(s.underlying))
+      .map((s) => s.underlying);
+  }, [scope, expiryBucket]);
 
   // ── Chain queries (parallel, per target) ──────────────────────────────
   // The `/api/v1/optionchain` endpoint wants the expiry as DDMMMYYYY (no
@@ -284,26 +298,33 @@ export default function StraddlesStrangleChain() {
   });
 
   // ── Derive scanner rows ──────────────────────────────────────────────
+  // Per (underlying × resolved expiry) we emit one row per moneyness label
+  // — ITM4, ITM3, …, ATM, …, OTM4 — so the user sees the whole strike
+  // ladder for the chosen strategy at a glance. The chain endpoint
+  // returns ATM ± floor(STRIKE_COUNT/2) strikes, so STRIKE_COUNT=11 gives
+  // ATM ± 5 — comfortable headroom past the ITM4/OTM4 extremes.
   const rows = useMemo<ScannerRow[]>(() => {
     const out: ScannerRow[] = [];
     chainTargets.forEach((t, idx) => {
       const q = chainQueries[idx];
       const data = q?.data;
       if (!data || data.status !== "success") return;
-      const row = buildScannerRow({
-        underlying: t.underlying,
-        exchange: t.exchange,
-        expiry: t.expiry,
-        spot: data.underlying_ltp,
-        atmStrike: data.atm_strike,
-        chain: data.chain,
-        strategy,
-        strangleOffset,
-      });
-      if (row) out.push(row);
+      for (const m of MONEYNESS_LABELS) {
+        const row = buildScannerRow({
+          underlying: t.underlying,
+          exchange: t.exchange,
+          expiry: t.expiry,
+          spot: data.underlying_ltp,
+          atmStrike: data.atm_strike,
+          chain: data.chain,
+          strategy,
+          moneyness: m,
+        });
+        if (row) out.push(row);
+      }
     });
     return out;
-  }, [chainTargets, chainQueries, strategy, strangleOffset]);
+  }, [chainTargets, chainQueries, strategy]);
 
   const expiriesLoading = expiryQueries.some((q) => q.isFetching);
   const chainsLoading = chainQueries.some((q) => q.isFetching);
@@ -680,26 +701,23 @@ export default function StraddlesStrangleChain() {
             )}
           </div>
 
-          {/* Strangle offset (only relevant for strangle tabs) */}
-          {STRATEGIES[strategy].isStrangle && (
-            <div className="space-y-1">
-              <label className="block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                OTM offset (strikes)
-              </label>
-              <Input
-                type="number"
-                min={1}
-                step={1}
-                value={strangleOffset}
-                onChange={(e) =>
-                  setStrangleOffset(
-                    Math.max(1, Math.floor(Number(e.target.value) || 1)),
-                  )
-                }
-                className="h-8 w-20 text-right font-mono"
-              />
-            </div>
-          )}
+          {/* Expiry bucket */}
+          <div className="space-y-1">
+            <label className="block text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Expiry
+            </label>
+            <select
+              value={expiryBucket}
+              onChange={(e) => setExpiryBucket(e.target.value as ExpiryBucket)}
+              className="h-8 w-40 rounded-lg border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              {EXPIRY_BUCKETS.map((b) => (
+                <option key={b.value} value={b.value}>
+                  {b.label}
+                </option>
+              ))}
+            </select>
+          </div>
 
           {/* Per-Lot toggle */}
           <label className="flex h-8 cursor-pointer items-center gap-2 rounded-lg border bg-background px-3 text-sm">
@@ -723,6 +741,16 @@ export default function StraddlesStrangleChain() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Skipped-underlyings hint — shown only on week buckets when at
+          least one non-weekly underlying is in scope. */}
+      {skippedForBucket.length > 0 && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+          Only NIFTY and SENSEX have weekly expiries. Skipped:{" "}
+          <span className="font-mono">{skippedForBucket.join(", ")}</span>.
+          Switch to a Month bucket to include them.
+        </div>
+      )}
 
       {/* Scanner table */}
       <Card>
@@ -760,6 +788,7 @@ export default function StraddlesStrangleChain() {
                     <TableHead>Symbol</TableHead>
                     <TableHead className="text-right">Spot</TableHead>
                     <TableHead>Expiry</TableHead>
+                    <TableHead>Strike</TableHead>
                     <TableHead className="text-right">Call Strike</TableHead>
                     <TableHead className="text-right">Call Prem</TableHead>
                     <TableHead className="text-right">Call Δ</TableHead>
@@ -784,10 +813,14 @@ export default function StraddlesStrangleChain() {
                       r.maxProfit == null ? null : r.maxProfit * lotMul;
                     const callIsRed = cfg.callAction === "SELL";
                     const putIsRed = cfg.putAction === "SELL";
+                    const isAtm = r.moneyness === "ATM";
                     return (
                       <TableRow
                         key={r.id}
-                        className={i % 2 === 0 ? "bg-muted/30" : ""}
+                        className={cn(
+                          i % 2 === 0 ? "bg-muted/30" : "",
+                          isAtm && "ring-1 ring-primary/30",
+                        )}
                       >
                         <TableCell className="font-medium">
                           {r.underlying}
@@ -797,6 +830,22 @@ export default function StraddlesStrangleChain() {
                         </TableCell>
                         <TableCell className="font-mono text-xs">
                           {r.expiry}
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "font-mono text-[10px]",
+                              r.moneyness.startsWith("ITM") &&
+                                "border-amber-500/40 text-amber-700 dark:text-amber-300",
+                              r.moneyness === "ATM" &&
+                                "border-primary/50 text-primary",
+                              r.moneyness.startsWith("OTM") &&
+                                "border-cyan-500/40 text-cyan-700 dark:text-cyan-300",
+                            )}
+                          >
+                            {r.moneyness}
+                          </Badge>
                         </TableCell>
                         <TableCell className="text-right font-mono tabular-nums">
                           {r.callStrike}{" "}

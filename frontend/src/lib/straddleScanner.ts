@@ -80,6 +80,127 @@ export const STRATEGY_KEYS: StrategyKey[] = [
   "long_strangle",
 ];
 
+// ─── Moneyness model ────────────────────────────────────────────────────
+
+/** Strike position relative to ATM. ITMn = call's strike below spot by n
+ *  steps (call is in-the-money); OTMn = call's strike above spot by n
+ *  steps. For strangles, the put leg mirrors the call leg's offset
+ *  (OTM strangle = both OTM, ITM strangle = both ITM / "guts"). */
+export type MoneynessLabel =
+  | "ITM4" | "ITM3" | "ITM2" | "ITM1"
+  | "ATM"
+  | "OTM1" | "OTM2" | "OTM3" | "OTM4";
+
+export const MONEYNESS_LABELS: MoneynessLabel[] = [
+  "ITM4", "ITM3", "ITM2", "ITM1",
+  "ATM",
+  "OTM1", "OTM2", "OTM3", "OTM4",
+];
+
+/** Returns [callOffset, putOffset] in strike-grid steps from ATM.
+ *  Straddle = same strike both legs; Strangle = symmetric outward
+ *  (OTM) or inward (ITM, "guts") split. */
+export function moneynessToOffsets(
+  label: MoneynessLabel,
+  isStrangle: boolean,
+): [number, number] {
+  if (label === "ATM") return [0, 0];
+  const n = parseInt(label.slice(3), 10) || 0;
+  const isOtm = label.startsWith("OTM");
+  if (isStrangle) {
+    return isOtm ? [+n, -n] : [-n, +n];
+  }
+  // Straddle: both legs share the same strike — same signed offset.
+  return isOtm ? [+n, +n] : [-n, -n];
+}
+
+// ─── Underlyings with weekly expiries (the only ones SEBI still allows) ─
+
+export const WEEKLY_UNDERLYINGS = new Set<string>(["NIFTY", "SENSEX"]);
+
+// ─── Expiry bucketing ───────────────────────────────────────────────────
+
+export type ExpiryBucket =
+  | "current_week"
+  | "next_week"
+  | "current_month"
+  | "next_month";
+
+export const EXPIRY_BUCKETS: Array<{ value: ExpiryBucket; label: string }> = [
+  { value: "current_week", label: "Current Week" },
+  { value: "next_week", label: "Next Week" },
+  { value: "current_month", label: "Current Month" },
+  { value: "next_month", label: "Next Month" },
+];
+
+export interface ResolvedExpiries {
+  /** First weekly expiry. Null for monthly-only underlyings. */
+  currentWeek: string | null;
+  /** Second weekly expiry. */
+  nextWeek: string | null;
+  /** First monthly expiry (last expiry in its calendar month). */
+  currentMonth: string | null;
+  /** Second monthly expiry. */
+  nextMonth: string | null;
+}
+
+/**
+ * Bucket the broker's expiry list into week/month rolls.
+ *
+ * Definition of "monthly": the latest expiry in each calendar month
+ * (works whether the underlying has weeklies or only monthlies).
+ *
+ * For monthly-only underlyings we leave currentWeek / nextWeek null —
+ * the page treats null as "skip this underlying for the week buckets",
+ * which is the correct UX given only NIFTY and SENSEX expire weekly.
+ */
+export function resolveExpiries(
+  expiries: string[],
+  exchange: string,
+  hasWeekly: boolean,
+): ResolvedExpiries {
+  const parsed: Array<{ display: string; date: Date }> = [];
+  for (const e of expiries) {
+    const d = parseExpiryDisplay(e, exchange);
+    if (d) parsed.push({ display: e, date: d });
+  }
+  parsed.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+  // Monthlies: last expiry in each (year, month).
+  const byMonth = new Map<string, { display: string; date: Date }>();
+  for (const p of parsed) {
+    const key = `${p.date.getFullYear()}-${p.date.getMonth()}`;
+    const cur = byMonth.get(key);
+    if (!cur || p.date.getTime() > cur.date.getTime()) byMonth.set(key, p);
+  }
+  const monthlies = [...byMonth.values()].sort(
+    (a, b) => a.date.getTime() - b.date.getTime(),
+  );
+
+  return {
+    currentWeek: hasWeekly ? (parsed[0]?.display ?? null) : null,
+    nextWeek: hasWeekly ? (parsed[1]?.display ?? null) : null,
+    currentMonth: monthlies[0]?.display ?? null,
+    nextMonth: monthlies[1]?.display ?? null,
+  };
+}
+
+export function pickBucketExpiry(
+  resolved: ResolvedExpiries,
+  bucket: ExpiryBucket,
+): string | null {
+  switch (bucket) {
+    case "current_week":
+      return resolved.currentWeek;
+    case "next_week":
+      return resolved.nextWeek;
+    case "current_month":
+      return resolved.currentMonth;
+    case "next_month":
+      return resolved.nextMonth;
+  }
+}
+
 // ─── Expiry parsing ─────────────────────────────────────────────────────
 
 const MONTH_MAP: Record<string, number> = {
@@ -124,6 +245,8 @@ export interface ScannerRow {
   exchange: string;
   /** Display "DD-MMM-YYYY". */
   expiry: string;
+  /** Strike position label (ITM4..ATM..OTM4) — drives the "Strike" column. */
+  moneyness: MoneynessLabel;
   spot: number;
   /** ATM strike from the chain — surfaced for the Active Strikes column even
    *  when the chosen strategy uses OTM strikes (strangle). */
@@ -161,8 +284,8 @@ interface BuildRowParams {
   atmStrike: number;
   chain: OptionStrike[];
   strategy: StrategyKey;
-  /** Number of strike steps OTM for strangle legs; ignored for straddles. */
-  strangleOffset: number;
+  /** Strike position relative to ATM for the call/put legs. */
+  moneyness: MoneynessLabel;
 }
 
 export function buildScannerRow(p: BuildRowParams): ScannerRow | null {
@@ -175,11 +298,11 @@ export function buildScannerRow(p: BuildRowParams): ScannerRow | null {
   const atmIdx = sorted.findIndex((s) => s.strike === p.atmStrike);
   if (atmIdx < 0) return null;
 
-  // For strangles, step OTM on each side; clamp at chain edges so we
-  // always return *some* row even if the chain is narrow.
-  const offset = cfg.isStrangle ? Math.max(1, Math.floor(p.strangleOffset)) : 0;
-  const callIdx = Math.min(atmIdx + offset, sorted.length - 1);
-  const putIdx = Math.max(atmIdx - offset, 0);
+  // Moneyness → signed offsets for call/put. Clamp at chain edges so
+  // narrow chains still emit something rather than null.
+  const [callDelta, putDelta] = moneynessToOffsets(p.moneyness, cfg.isStrangle);
+  const callIdx = Math.max(0, Math.min(sorted.length - 1, atmIdx + callDelta));
+  const putIdx = Math.max(0, Math.min(sorted.length - 1, atmIdx + putDelta));
 
   const callRow = sorted[callIdx];
   const putRow = sorted[putIdx];
@@ -276,10 +399,11 @@ export function buildScannerRow(p: BuildRowParams): ScannerRow | null {
         : 1;
 
   return {
-    id: `${p.underlying}|${p.exchange}|${p.expiry}|${p.strategy}|${offset}`,
+    id: `${p.underlying}|${p.exchange}|${p.expiry}|${p.strategy}|${p.moneyness}`,
     underlying: p.underlying,
     exchange: p.exchange,
     expiry: p.expiry,
+    moneyness: p.moneyness,
     spot: p.spot,
     atmStrike: p.atmStrike,
     callStrike: callRow.strike,
