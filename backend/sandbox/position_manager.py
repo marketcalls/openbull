@@ -27,14 +27,25 @@ duration of fill processing — see :mod:`backend.sandbox.execution_engine`.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from backend.models.sandbox import SandboxPosition
+from backend.models.sandbox import SandboxPosition, SandboxTrade
 from backend.sandbox._db import session_scope
 
 logger = logging.getLogger(__name__)
+
+# IST is fixed UTC+05:30 — same convention as catch_up.py / scheduler.py.
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _last_session_boundary() -> datetime:
+    """Return the most recent session boundary (00:00 IST today, or yesterday
+    if it's still before midnight IST)."""
+    now = datetime.now(tz=_IST)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def _get_or_create(
@@ -223,13 +234,28 @@ def mark_to_market(
 def get_positions(user_id: int) -> list[dict]:
     """Broker-compatible position payload — shape matches the transform layer.
 
-    Auto-settles expired F&O contracts before returning. This mirrors
-    openalgo's ``get_open_positions`` behavior — it's the safety net that
-    fires whenever the user opens the positions page, in addition to the
-    startup catch-up and the 00:00 IST scheduler hook. Without it, an app
-    that stays up across an expiry boundary would keep the position open
-    until midnight (and the MTM updater would noisily poll the dead
-    symbol every cycle).
+    Auto-settles expired F&O contracts before returning, then applies a
+    session-aware filter so closed positions from previous sessions don't
+    linger on the page (mirrors openalgo's ``get_open_positions``):
+
+      * ``net_quantity != 0``                              → show open position
+      * ``net_quantity == 0`` and a SandboxTrade exists for
+        (symbol, exchange, product) since the session boundary
+                                                           → show today's flatten
+      * ``net_quantity != 0`` and product == "NRML" and
+        updated last session                                → carry-forward
+      * everything else                                     → hide
+
+    Source of truth for "traded today" is the SandboxTrade table — not
+    ``today_realized_pnl`` or ``updated_at`` on SandboxPosition. Those two
+    are easy to corrupt: ``daily_reset.reset_today_pnl()`` issues a Core
+    UPDATE which fires the ``onupdate=func.now()`` column default, bumping
+    ``updated_at`` to today even though no real activity happened. Trading
+    history doesn't have that problem — a trade row is permanent.
+
+    Read-side heal: any qty=0 position with non-zero ``today_realized_pnl``
+    that didn't trade this session has the bucket zeroed via raw SQL (so
+    ``updated_at`` stays put for diagnostics).
     """
     try:
         from backend.sandbox.catch_up import _close_expired_fno_positions
@@ -237,10 +263,72 @@ def get_positions(user_id: int) -> list[dict]:
     except Exception:
         logger.exception("get_positions: expired-FnO sweep raised; continuing")
 
+    boundary = _last_session_boundary()
+
     with session_scope() as db:
+        # 1. The set of (symbol, exchange, product) tuples that actually
+        #    fired a fill since the session boundary. SandboxTrade rows are
+        #    immutable — perfect ground truth.
+        traded_rows = db.execute(
+            select(
+                SandboxTrade.symbol,
+                SandboxTrade.exchange,
+                SandboxTrade.product,
+            )
+            .where(SandboxTrade.user_id == user_id)
+            .where(SandboxTrade.timestamp >= boundary)
+            .distinct()
+        ).all()
+        traded_today: set[tuple[str, str, str]] = {
+            (sym, exch, prod) for sym, exch, prod in traded_rows
+        }
+
         rows = db.execute(
             select(SandboxPosition).where(SandboxPosition.user_id == user_id)
         ).scalars().all()
+
+        # 2. Heal stale today_realized_pnl on qty=0 rows that didn't trade
+        #    this session. Raw SQL so the heal itself doesn't bump
+        #    updated_at and confuse downstream tooling.
+        ids_to_heal = [
+            r.id
+            for r in rows
+            if r.net_quantity == 0
+            and float(r.today_realized_pnl or 0.0) != 0.0
+            and (r.symbol, r.exchange, r.product) not in traded_today
+        ]
+        if ids_to_heal:
+            from sqlalchemy import bindparam
+
+            db.execute(
+                text(
+                    "UPDATE sandbox_positions SET today_realized_pnl = 0 "
+                    "WHERE id IN :ids"
+                ).bindparams(bindparam("ids", expanding=True)),
+                {"ids": ids_to_heal},
+            )
+            heal_set = set(ids_to_heal)
+            for r in rows:
+                if r.id in heal_set:
+                    r.today_realized_pnl = 0.0
+            logger.info(
+                "get_positions: zeroed stale today_realized_pnl on %d row(s)",
+                len(ids_to_heal),
+            )
+
+        # 3. Filter rows by trade activity (qty=0 only shows when traded
+        #    today) plus NRML carry-forward.
+        visible: list[SandboxPosition] = []
+        for r in rows:
+            if r.net_quantity != 0:
+                # Open position — always show. NRML carry-forward also
+                # lands here (qty != 0, updated_at < boundary).
+                visible.append(r)
+                continue
+            # qty == 0 — only show if there was a real trade this session.
+            if (r.symbol, r.exchange, r.product) in traded_today:
+                visible.append(r)
+
         return [
             {
                 "symbol": r.symbol,
@@ -250,14 +338,26 @@ def get_positions(user_id: int) -> list[dict]:
                 "netqty": r.net_quantity,
                 "buyqty": r.day_buy_quantity,
                 "sellqty": r.day_sell_quantity,
-                "average_price": round(r.average_price, 2),
-                "averageprice": round(r.average_price, 2),
+                # Closed positions (qty=0) display avg=0 / pnlpercent=0 the
+                # way Zerodha + openalgo do — the cumulative realized_pnl
+                # field still carries the historical number for callers
+                # that care.
+                "average_price": (
+                    round(r.average_price, 2) if r.net_quantity != 0 else 0.0
+                ),
+                "averageprice": (
+                    round(r.average_price, 2) if r.net_quantity != 0 else 0.0
+                ),
                 "ltp": round(r.ltp, 2),
-                "pnl": round(r.pnl, 2),
+                "pnl": round(
+                    r.pnl if r.net_quantity != 0
+                    else float(r.today_realized_pnl or 0.0),
+                    2,
+                ),
                 "unrealized_pnl": round(r.unrealized_pnl, 2),
                 "realized_pnl": round(r.realized_pnl, 2),
                 "today_realized_pnl": round(float(r.today_realized_pnl or 0.0), 2),
                 "margin_blocked": round(float(r.margin_blocked or 0.0), 2),
             }
-            for r in rows
+            for r in visible
         ]
