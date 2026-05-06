@@ -83,9 +83,6 @@ const INDEX_SCOPE: Array<{ exchange: FnoExchange; underlying: string }> = [
 /** Strikes per chain call. 11 covers ATM ± 5 — enough for moneyness up to
  *  ITM4 / OTM4 with one strike of headroom for clamping at chain edges. */
 const STRIKE_COUNT = 11;
-/** Stock-mode "All" → scan this many top tickers (alphabetical from the
- *  broker's NFO underlyings list). */
-const TOP_STOCKS_LIMIT = 20;
 
 const INSTRUMENT_TABS: Array<{ value: "indices" | "stock"; label: string }> = [
   { value: "indices", label: "Indices" },
@@ -217,15 +214,11 @@ export default function StraddlesStrangleChain() {
       const found = INDEX_SCOPE.find((s) => s.underlying === scrip);
       return found ? [found] : [];
     }
-    // stock
-    if (scrip === "ALL") {
-      return stockOptions
-        .slice(0, TOP_STOCKS_LIMIT)
-        .map((o) => ({ exchange: "NFO" as FnoExchange, underlying: o.symbol }));
-    }
-    if (scrip) return [{ exchange: "NFO", underlying: scrip }];
+    // Stock mode requires a specific underlying — bulk-scanning the
+    // entire NFO stock universe would saturate the broker rate budget.
+    if (scrip && scrip !== "ALL") return [{ exchange: "NFO", underlying: scrip }];
     return [];
-  }, [instrumentType, scrip, stockOptions]);
+  }, [instrumentType, scrip]);
 
   // ── Expiries per underlying (parallel fetch) ─────────────────────────
   const expiryQueries = useQueries({
@@ -260,17 +253,6 @@ export default function StraddlesStrangleChain() {
     });
     return out;
   }, [scope, expiryQueries, expiryBucket]);
-
-  /** Underlyings the bucket filter eliminated (so we can show a hint). */
-  const skippedForBucket = useMemo<string[]>(() => {
-    if (expiryBucket === "current_month" || expiryBucket === "next_month") {
-      return [];
-    }
-    // Week buckets eliminate non-weekly underlyings.
-    return scope
-      .filter((s) => !WEEKLY_UNDERLYINGS.has(s.underlying))
-      .map((s) => s.underlying);
-  }, [scope, expiryBucket]);
 
   // ── Chain queries (parallel, per target) ──────────────────────────────
   // The `/api/v1/optionchain` endpoint wants the expiry as DDMMMYYYY (no
@@ -676,28 +658,14 @@ export default function StraddlesStrangleChain() {
                 ))}
               </select>
             ) : (
-              <div className="flex items-center gap-2">
-                <select
-                  value={scrip === "ALL" ? "ALL" : "ONE"}
-                  onChange={(e) => {
-                    if (e.target.value === "ALL") setScrip("ALL");
-                    else setScrip(stockOptions[0]?.symbol ?? "");
-                  }}
-                  className="h-8 w-28 rounded-lg border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                >
-                  <option value="ALL">Top {TOP_STOCKS_LIMIT}</option>
-                  <option value="ONE">Pick one</option>
-                </select>
-                {scrip !== "ALL" && (
-                  <UnderlyingCombobox
-                    value={scrip}
-                    options={stockOptions}
-                    onChange={setScrip}
-                    loading={nfoUnderlyings.isLoading}
-                    className="w-48"
-                  />
-                )}
-              </div>
+              <UnderlyingCombobox
+                value={scrip === "ALL" ? "" : scrip}
+                options={stockOptions}
+                onChange={setScrip}
+                loading={nfoUnderlyings.isLoading}
+                placeholder="Pick a stock…"
+                className="w-56"
+              />
             )}
           </div>
 
@@ -741,16 +709,6 @@ export default function StraddlesStrangleChain() {
           </div>
         </CardContent>
       </Card>
-
-      {/* Skipped-underlyings hint — shown only on week buckets when at
-          least one non-weekly underlying is in scope. */}
-      {skippedForBucket.length > 0 && (
-        <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
-          Only NIFTY and SENSEX have weekly expiries. Skipped:{" "}
-          <span className="font-mono">{skippedForBucket.join(", ")}</span>.
-          Switch to a Month bucket to include them.
-        </div>
-      )}
 
       {/* Scanner table */}
       <Card>
