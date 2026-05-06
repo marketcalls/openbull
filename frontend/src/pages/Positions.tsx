@@ -53,10 +53,15 @@ export default function Positions() {
     refetchInterval: 15000,
   });
 
-  const openCount = useMemo(
-    () => (positions ?? []).filter(isCloseable).length,
+  /** Only show positions with non-zero quantity (matches openalgo /positions
+   *  behavior). Zero-qty rows are closed-today fills that brokers keep
+   *  visible until the next session boundary — we hide them from the UI. */
+  const openPositions = useMemo(
+    () => (positions ?? []).filter(isCloseable),
     [positions],
   );
+
+  const openCount = openPositions.length;
 
   /** Per-row close — reverses the position's direction at MARKET for
    *  abs(qty). Long → SELL, short → BUY. The backend's placeorder
@@ -173,11 +178,11 @@ export default function Positions() {
         <CardHeader>
           <CardTitle>Open Positions</CardTitle>
           <CardDescription>
-            {positions?.length ?? 0} position{(positions?.length ?? 0) !== 1 ? "s" : ""} found
+            {openPositions.length} position{openPositions.length !== 1 ? "s" : ""} found
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {positions && positions.length > 0 ? (
+          {openPositions.length > 0 ? (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -192,7 +197,7 @@ export default function Positions() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {positions.map((pos, i) => {
+                {openPositions.map((pos, i) => {
                   const closeable = isCloseable(pos);
                   const closingThis =
                     closeOneMutation.isPending &&
