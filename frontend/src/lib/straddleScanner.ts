@@ -187,19 +187,37 @@ export function buildScannerRow(p: BuildRowParams): ScannerRow | null {
   const putLeg = putRow?.pe;
   if (!callLeg || !putLeg) return null;
 
-  const callPrem = Number(callLeg.ltp) || 0;
-  const putPrem = Number(putLeg.ltp) || 0;
-  if (callPrem <= 0 || putPrem <= 0) return null;
+  // Prefer LTP; fall back to bid/ask mid when LTP is zero (common after
+  // hours and for newly-listed strikes that haven't traded yet). Don't
+  // bail on zero — a row with strikes but no IV is still useful for
+  // chain inspection.
+  const midOrZero = (bid: number, ask: number): number => {
+    const b = Number(bid) || 0;
+    const a = Number(ask) || 0;
+    if (b > 0 && a > 0) return (b + a) / 2;
+    return Math.max(b, a, 0);
+  };
+  const callPrem =
+    Number(callLeg.ltp) > 0
+      ? Number(callLeg.ltp)
+      : midOrZero(callLeg.bid, callLeg.ask);
+  const putPrem =
+    Number(putLeg.ltp) > 0
+      ? Number(putLeg.ltp)
+      : midOrZero(putLeg.bid, putLeg.ask);
 
   const expiryDate = parseExpiryDisplay(p.expiry, p.exchange);
   if (!expiryDate) return null;
   const T = timeToExpiryYears(expiryDate);
 
-  // IV via Black-76 inversion. r=0 (INR index convention). Uses spot as
-  // forward — for index options with negligible carry this is the same
-  // assumption the backend snapshot makes.
-  const callIv = impliedVol(callPrem, p.spot, callRow.strike, T, 0, "c");
-  const putIv = impliedVol(putPrem, p.spot, putRow.strike, T, 0, "p");
+  // IV via Black-76 inversion — only attempt when we have positive prices.
+  // r=0 (INR index convention). Uses spot as forward; for INR index options
+  // with negligible carry that's the same assumption the backend snapshot
+  // makes.
+  const callIv =
+    callPrem > 0 ? impliedVol(callPrem, p.spot, callRow.strike, T, 0, "c") : null;
+  const putIv =
+    putPrem > 0 ? impliedVol(putPrem, p.spot, putRow.strike, T, 0, "p") : null;
   const sigCall = callIv ?? 0.0001;
   const sigPut = putIv ?? 0.0001;
 

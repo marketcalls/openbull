@@ -259,6 +259,8 @@ export default function StraddlesStrangleChain() {
   }, [scope, expiryQueries, instrumentType, scrip]);
 
   // ── Chain queries (parallel, per target) ──────────────────────────────
+  // The `/api/v1/optionchain` endpoint wants the expiry as DDMMMYYYY (no
+  // dashes), not the picker's display "DD-MMM-YYYY".
   const chainQueries = useQueries({
     queries: chainTargets.map((t) => ({
       queryKey: [
@@ -272,7 +274,7 @@ export default function StraddlesStrangleChain() {
         fetchOptionChain({
           underlying: t.underlying,
           exchange: t.exchange,
-          expiry_date: t.expiry,
+          expiry_date: t.expiry.replace(/-/g, "").toUpperCase(),
           strike_count: STRIKE_COUNT,
         }),
       staleTime: 25_000,
@@ -303,7 +305,28 @@ export default function StraddlesStrangleChain() {
     return out;
   }, [chainTargets, chainQueries, strategy, strangleOffset]);
 
-  const isFetching = chainQueries.some((q) => q.isFetching);
+  const expiriesLoading = expiryQueries.some((q) => q.isFetching);
+  const chainsLoading = chainQueries.some((q) => q.isFetching);
+  const isFetching = expiriesLoading || chainsLoading;
+
+  // Surface chain errors so a misconfigured broker / unsupported underlying
+  // doesn't silently produce an empty table.
+  const chainErrors = useMemo(
+    () =>
+      chainQueries
+        .map((q, i) => {
+          const t = chainTargets[i];
+          if (!t) return null;
+          if (q.error) return `${t.underlying} ${t.expiry}: ${(q.error as Error).message}`;
+          if (q.data?.status === "error") {
+            return `${t.underlying} ${t.expiry}: ${q.data.message ?? "chain error"}`;
+          }
+          return null;
+        })
+        .filter((s): s is string => s !== null),
+    [chainQueries, chainTargets],
+  );
+
   const hasRows = rows.length > 0;
 
   const refreshAll = useCallback(() => {
@@ -709,10 +732,22 @@ export default function StraddlesStrangleChain() {
               {isFetching ? (
                 <>
                   <Loader2 className="h-5 w-5 animate-spin" />
-                  Scanning chains…
+                  {expiriesLoading ? "Loading expiries…" : "Scanning chains…"}
                 </>
               ) : scope.length === 0 ? (
                 <p>Pick a scrip to scan.</p>
+              ) : chainErrors.length > 0 ? (
+                <div className="max-w-2xl space-y-1 px-6 text-center text-xs text-rose-600 dark:text-rose-400">
+                  <p className="font-semibold">Chain queries failed:</p>
+                  {chainErrors.slice(0, 5).map((m) => (
+                    <p key={m} className="font-mono">
+                      {m}
+                    </p>
+                  ))}
+                  {chainErrors.length > 5 && (
+                    <p>+ {chainErrors.length - 5} more</p>
+                  )}
+                </div>
               ) : (
                 <p>No tradeable rows in the current scope.</p>
               )}
