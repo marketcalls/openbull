@@ -179,11 +179,14 @@ Every timestamp on every tab renders in IST with the `IST` suffix. Frontend neve
 | lock_profit | jsonb | nullable: `{mode, if_profit_reaches, lock_profit, trail_step}` |
 | trail_sl_to_entry | bool | default false |
 | scheduler | jsonb | `{enabled, days, start_time, auto_stop_time, default_mode}` — `default_mode` ∈ `live`/`sandbox` is what the scheduler-triggered run starts in |
-| webhook_secret | text unique | random 32-byte hex; user-rotatable |
+| live_enabled | bool | default false; explicit per-strategy opt-in for `mode=live` runs (Section 14.3). Flipping requires re-auth |
+| webhook_token_hash | text unique indexed | **SHA-256** of the webhook token (token = the per-strategy secret slug embedded in the webhook URL). Plaintext shown **once** on create/rotate; never readable thereafter. SHA-256 (not argon2) because the token has 256+ bits of entropy by construction — slow KDFs only matter for low-entropy secrets like passwords |
+| webhook_ip_allowlist | jsonb | nullable; CIDR list. Empty/null = any IP (Section 14.4) |
+| daily_loss_limit_inr | numeric | nullable; per-strategy cap. User-level cap lives on the user table (out of scope here) |
 | status | text | `stopped` / `running` / `paused` / `errored` |
 | current_run_id | uuid | nullable; set when running |
-| created_at | timestamptz | |
-| updated_at | timestamptz | |
+| created_at | timestamptz | UTC stored; rendered IST |
+| updated_at | timestamptz | UTC stored; rendered IST |
 
 ##### 4.1.1 Leg jsonb schema
 
@@ -214,7 +217,7 @@ Every timestamp on every tab renders in IST with the `IST` suffix. Frontend neve
 | broker | text | snapshotted at start time |
 | started_at | timestamptz | |
 | stopped_at | timestamptz | nullable |
-| stop_reason | text | `manual` / `scheduler` / `overall_sl` / `overall_target` / `lock_profit` / `eod` / `expiry` / `tick_stale` / `recovery_failed` / `error` |
+| stop_reason | text | `manual` / `scheduler` / `overall_sl` / `overall_target` / `lock_profit` / `eod` / `expiry` / `daily_loss_limit` / `tick_stale` / `recovery_failed` / `error` |
 | pnl_realized | numeric | **final** realized P&L for the run (set on stop). All legs closed by then so unrealized is always 0; only the realized total is persisted. Live `pnl_realized` and `pnl_unrealized` while running come from Redis state and `strategy_run_checkpoint`, not this column. |
 | pnl_peak | numeric | session high of `mtm_total` |
 | pnl_trough | numeric | session low of `mtm_total` |
@@ -227,7 +230,7 @@ Every timestamp on every tab renders in IST with the `IST` suffix. Frontend neve
 | id | uuid PK | |
 | run_id | uuid FK | |
 | leg_id | int | which leg in the strategy this order belongs to |
-| kind | text | `entry` / `exit_sl` / `exit_target` / `exit_trail` / `exit_overall_sl` / `exit_overall_target` / `exit_lock_profit` / `exit_eod` / `exit_expiry` / `exit_close_all` / `exit_leg_manual` / `exit_recovery` |
+| kind | text | `entry` / `exit_sl` / `exit_target` / `exit_trail` / `exit_overall_sl` / `exit_overall_target` / `exit_lock_profit` / `exit_eod` / `exit_expiry` / `exit_daily_loss_limit` / `exit_close_all` / `exit_leg_manual` / `exit_recovery` |
 | broker_order_id | text | broker reference; sandbox uses a synthetic id |
 | symbol | text | OpenAlgo standard symbol |
 | exchange | text | |
@@ -264,15 +267,14 @@ Lightweight snapshot for crash recovery; written every ~30s while running.
 | Column | Type | Notes |
 |---|---|---|
 | id | uuid PK | |
-| strategy_id | uuid FK | nullable if path-id was wrong |
-| secret_match | bool | |
+| strategy_id | uuid FK | nullable if the URL token didn't match any strategy |
 | action | text | `start` / `stop` / `unknown` |
 | mode | text | nullable; provided for `start` |
-| payload | jsonb | full body |
+| payload | jsonb | request body — token never appears here (token is in URL, redacted before save) |
 | ip | inet | |
 | user_agent | text | |
 | received_at | timestamptz | UTC stored; rendered in IST at API |
-| result | text | `ok` / `rejected_secret` / `rejected_dedupe` / `rejected_invalid_action` / `rejected_engine_error` / `rejected_unknown_strategy` |
+| result | text | `ok` / `rejected_token` / `rejected_ip` / `rate_limited` / `rejected_dedupe` / `rejected_cooling_off` / `rejected_invalid_action` / `rejected_live_disabled` / `rejected_engine_error` |
 | error | text | nullable |
 
 #### `strategy_event` — risk-event audit trail
@@ -284,6 +286,7 @@ Every state-changing event the engine produces is persisted here AND broadcast o
 | id | uuid PK | |
 | run_id | uuid FK | |
 | strategy_id | uuid FK | denormalized for query convenience |
+| user_id | int | denormalized for forensic queries that don't join `strategy` (Section 14.6) |
 | ts | timestamptz | UTC stored; **always rendered in IST at API/WS layer** |
 | kind | text | enum, see below |
 | severity | text | `info` / `warn` / `critical` |
@@ -953,44 +956,67 @@ Jobs are recreated from DB on FastAPI startup (in `recovery.py`). Source of trut
 
 ## 11. TradingView webhook
 
+**Design choice:** the webhook URL itself contains a per-strategy secret token (Slack / GitHub / Stripe pattern). The strategy is identified BY the token; there's no separate `strategy_id` in the URL and no `secret` field in the body. This keeps the TV alert config minimal and removes one round of validation.
+
 ### 11.1 URL format shown to user
 
 ```
-https://your-host/webhook/strategy/{strategy_id}
+https://your-host/webhook/strategy/{webhook_token}
 ```
+
+`webhook_token` is a high-entropy random string generated server-side at strategy creation:
+- Format: `obwh_` prefix + 43 chars URL-safe base64 (32 bytes of entropy)
+- Example: `obwh_R8tK3xZ-7vN2mQpL9wY4eA1bF5cH6gI0jK2lM3nO4pQ`
+- Stored in DB as `SHA-256(token)` in `strategy.webhook_token_hash` (unique index for O(1) lookup)
+- Plaintext is **shown once** in the API response on create/rotate; never readable from the DB thereafter
+- Rotating issues a fresh token and invalidates the old one immediately
 
 ### 11.2 Recommended TV alert message body
 
 ```json
 {
-  "secret": "abc123...",
   "action": "start",
   "mode": "sandbox"
 }
 ```
 
+That's it. No secret in the body — the URL already carries it. `mode` is required when `action="start"`.
+
 ### 11.3 Curl example (shown in UI)
 
 ```
-curl -X POST 'https://your-host/webhook/strategy/<id>' \
+curl -X POST 'https://your-host/webhook/strategy/obwh_R8tK3xZ-7vN2mQpL9wY4eA1bF5cH6gI0jK2lM3nO4pQ' \
   -H 'Content-Type: application/json' \
-  -d '{"secret":"<secret>","action":"start","mode":"sandbox"}'
+  -d '{"action":"start","mode":"sandbox"}'
 ```
 
 ### 11.4 Validation pipeline
 
 ```
-parse_json(body) →
-  if path strategy_id not found → 404 (rejected_unknown_strategy)
-  if body.secret ≠ strategy.webhook_secret → 401 (rejected_secret)
-  if body.action ∉ {start, stop} → 400 (rejected_invalid_action)
-  if action=start and body.mode ∉ {live, sandbox} → 400
-  if dedupe_key seen in last 60s → 200 OK (rejected_dedupe in event log only)
+incoming POST /webhook/strategy/{token} with body B:
+  hash = sha256(token)
+  strategy = SELECT * FROM strategy WHERE webhook_token_hash = hash    # O(1) indexed
+  if not strategy → 401 (rejected_token; payload logged with strategy_id=null)
+  if request_ip not in strategy.webhook_ip_allowlist (when set) → 401 (rejected_ip)
+  if rate_limit(strategy.id) exceeded → 429 (rate_limited)
+  parse_json(B); if too large → 413; if invalid → 400
+  if B.action ∉ {start, stop} → 400 (rejected_invalid_action)
+  if B.action = start and B.mode ∉ {live, sandbox} → 400
+  if B.action = start and B.mode = live and not strategy.live_enabled → 403 (rejected_live_disabled)
+  if dedupe(strategy.id, action, mode) seen in last 60s → 200 OK (rejected_dedupe in event log only)
+  if cooling_off active (last stop < 30s ago) → 200 OK (rejected_cooling_off in event log only)
   call engine.start_run / engine.stop_run with trigger_source='webhook', webhook_event_id=this
   return 200 OK
 ```
 
-Every request — including rejections — is logged to `webhook_event`. UI surface for these logs lives under `/strategy/:id` → Webhook tab.
+Every request — including rejections — is logged to `webhook_event`. UI surface for these logs lives under `/strategy/:id` → Webhook tab. The token plaintext is **never** logged; only `webhook_event.result` and the action/mode fields make it into the audit row.
+
+### 11.5 Why this design works for TradingView only
+
+- TV's free plan supports webhook URL but not custom headers — URL-embedded token works on every plan.
+- TV stores the URL server-side, so it doesn't end up in user browser history.
+- For server-side access logs, configure the reverse proxy to redact `/webhook/strategy/*` paths (deployment guide note).
+- For the threat model in Section 14.1, this gives equivalent security to body-secret + constant-time comparison while halving the validation surface.
 
 ---
 
@@ -1029,7 +1055,174 @@ Sandbox fills happen at the next-tick LTP plus a configurable slippage (existing
 
 ---
 
-## 14. Build order
+## 14. Security
+
+Security is woven through every phase below, not bolted on at the end. The strategy module places real orders with real money and accepts unauthenticated public webhooks — both surfaces demand strict controls. This section defines the policies; each build phase implements its share.
+
+### 14.1 Threat model
+
+| # | Threat | Vector |
+|---|---|---|
+| T1 | Unauthorized order placement | Compromised user session / API key abused via REST |
+| T2 | Webhook abuse | Public `/webhook/strategy/{id}` endpoint hit with guessed/leaked secret |
+| T3 | Cross-tenant data leak | User A reads/edits user B's strategy via path-id manipulation |
+| T4 | Fat-finger / runaway orders | Misconfigured strategy or bug fires excessive lots; webhook loop |
+| T5 | Mode confusion | Operator believes they're in sandbox, places live orders |
+| T6 | Data tampering | SQL injection, mass-assignment via PATCH |
+| T7 | Audit gap | An action happens but isn't recorded — incident response can't reconstruct |
+| T8 | DoS / resource exhaustion | Many strategies × many ticks × many WS subscribers crash the box |
+| T9 | Secret exposure | Webhook secret leaks via logs, error messages, response bodies, or DB dump |
+| T10 | Replay attack | Captured webhook request replayed to trigger unintended state changes |
+
+### 14.2 Authentication & authorization
+
+**REST API (`/api/v1/strategy/*`)**: every endpoint behind the existing `get_api_user` dependency. No anonymous access.
+
+**WebSocket (`/ws/strategy/{id}`)**: same auth flow as `/websocket/test` — first message after socket open must be `{"action": "authenticate", "api_key": "..."}`. No unauthenticated subscriptions. Reject with 4401 close code on bad/missing key. Inactivity timeout: 60s without an authenticate frame → close.
+
+**Webhook (`/webhook/strategy/{id}`)**: deliberately public; auth is shared-secret-in-body (Section 11). Detailed controls in Section 14.4.
+
+**Per-resource ownership** — every endpoint that accepts `strategy_id`, `run_id`, or `leg_id` enforces `record.user_id == current_user.id` at the repository layer.
+
+> Cross-tenant access returns **404, not 403** — never reveal that someone else's resource exists. (Mitigates T3 enumeration.)
+
+The repository wrapper for any read is shaped:
+```python
+def get_strategy(self, strategy_id: UUID, user_id: int) -> Strategy:
+    row = session.execute(
+        select(Strategy).where(Strategy.id == strategy_id, Strategy.user_id == user_id)
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return row
+```
+Engine code never sees a strategy_id without the user_id filter; this is enforced by repository-layer signatures, not engine convention.
+
+### 14.3 Live-mode guardrails (T1, T4, T5)
+
+- **Per-strategy live opt-in** — every new strategy is born `live_enabled=false`. Going live requires an explicit user action via `POST /api/v1/strategy/{id}/enable_live` which requires re-authentication (password re-entry within last 5 minutes, or 2FA where configured). This is recorded in `strategy_event` with `kind=live_enabled`.
+- **Mode mismatch protection** — `start_run` with `mode=live` returns 403 if `live_enabled=false`. Webhooks with `mode=live` likewise.
+- **Visual mode indicators** — UI shows a red `LIVE` badge on every page and a yellow `SANDBOX` badge in sandbox; confirmation modals display the active mode in bold before executing destructive actions (Start, Close All, single-leg Close).
+- **Order sanity caps** — enforced server-side at order-build time, not just UI:
+  - `lots ≤ MAX_LOTS_PER_LEG` (env, default 50)
+  - `legs.length ≤ MAX_LEGS_PER_STRATEGY` (env, default 10)
+  - Notional check: `sum(lots × lotsize × ltp)` ≤ `MAX_NOTIONAL_PER_STRATEGY` (env, default ₹50,00,000) — refused with `reject_reason='notional_exceeded'`
+  - Per-user concurrent running cap: `MAX_RUNNING_STRATEGIES_PER_USER` (env, default 10)
+- **Daily loss limit** — per-user setting (defaults to none). When active and `today's realized P&L across all live runs ≤ -limit`, all running live strategies are stopped with `stop_reason='daily_loss_limit'`, and new starts in live mode are refused for the rest of the day.
+- **Cooling-off period** — after a `stop` for any reason, the same strategy cannot start again within `STRATEGY_COOLING_OFF_SEC` (default 30s). Mitigates webhook loops where a misconfigured TV alert oscillates start/stop/start.
+
+### 14.4 Webhook security (T2, T9, T10)
+
+#### Token storage & lookup
+
+- **URL-embedded token** (Section 11): high-entropy `obwh_<43char>` slug per strategy.
+- **Stored as SHA-256(token)** in `strategy.webhook_token_hash`, **uniquely indexed** for O(1) lookup. SHA-256 is the right hash here — the input has 256+ bits of entropy, so the slow-by-design property of argon2/bcrypt that prevents password brute-force isn't relevant. SHA-256 is deterministic (no salt) which is what enables the indexed query.
+- **Plaintext shown once** at create/rotate in the API response, never readable thereafter. Rotating regenerates and invalidates the old token immediately.
+- **Plaintext never logged** — log redaction filter scrubs the token from any structured log payload, and the URL path itself is redacted by the reverse proxy in production (deployment guide).
+- **Constant-time miss handling** — when the lookup returns no row, 401 is returned with the same body and timing characteristics as a successful auth. Never reveal "no such strategy" vs "wrong token".
+
+#### Replay protection
+
+- **Idempotency window** (Section 11.4): same `(strategy_id, action, mode)` within 60s → 200 OK, no engine action. Stored in Redis `strategy:webhook:dedupe:*`.
+- Optional **timestamp/nonce** field for stricter clients: if body includes `ts`, reject if `|now − ts| > 5 min`. (Documented; not required because TV's alert engine doesn't natively send timestamps.)
+
+#### Rate limiting
+
+- Per-strategy: `WEBHOOK_RATE_PER_STRATEGY_PER_MIN` (default 60). Token bucket in Redis.
+- Per-IP: `WEBHOOK_RATE_PER_IP_PER_MIN` (default 600 across all strategies). Catches scrapers/scanners.
+- Burst over the cap → 429 with `Retry-After`; logged to `webhook_event` with `result='rate_limited'`.
+
+#### Optional IP allow-list
+
+`strategy.webhook_ip_allowlist` (jsonb, nullable) — when populated, requests from outside the CIDR list are rejected with `result='rejected_ip'`. Defaults empty (any IP). UI surfaces TradingView's published IP ranges as a one-click preset.
+
+#### HTTPS enforcement
+
+`/webhook/strategy/*` only available over HTTPS in production. Reverse proxy enforces TLS; FastAPI middleware additionally rejects `X-Forwarded-Proto: http` for these paths.
+
+#### Payload size cap
+
+Body limited to 8 KB (FastAPI middleware). Anything larger → 413.
+
+#### HMAC headers — not in v1
+
+Considered and dropped. TradingView's free plan does not support custom webhook headers, and the v1 trigger source is TV alerts only. With argon2id-hashed body-secret + constant-time comparison + HTTPS + rate limiting + idempotency + optional IP allow-list, HMAC adds complexity without a meaningful security delta for this threat model. Revisit if a non-TV signal source is added.
+
+### 14.5 Input validation (T6)
+
+- **Pydantic strict mode** for every request schema (`extra = 'forbid'`). Unknown fields → 400. No silent drops.
+- **Numeric bounds**: `lots > 0`, `lots ≤ MAX_LOTS_PER_LEG`, `sl_pts ≥ 0`, `target_pts ≥ 0`, `trail.x ≥ 0`, `trail.y ≥ 0`, `overall_sl_mtm ≥ 0` (entered as positive, applied as negative threshold).
+- **Enum strictness**: every enum field validated against the documented enum; unknown values rejected. (`segment`, `position`, `option_type`, `strike_mode`, `expiry`, `mode`, `kind`, …)
+- **Symbol/exchange validation**: `exchange` must be in `VALID_EXCHANGES` for entry orders; symbols must resolve in `symtoken` before run-start.
+- **String length caps**: `name ≤ 100`, free-form text fields capped to prevent DB bloat / XSS surface.
+- **Schedule sanity**: `entry_time < exit_time` for intraday; `start_time` parsed strictly as `HH:MM` (24h, no seconds).
+- **PATCH allowlist**: `PATCH /api/v1/strategy/{id}` accepts a curated set of fields only. Mass-assignment of `webhook_secret_hash`, `user_id`, `current_run_id`, etc. is **never** possible.
+- **All DB queries are parameterized** via SQLAlchemy `text(:param)` or ORM. No string concatenation. (Already the codebase convention; explicit reminder.)
+
+### 14.6 Audit & forensics (T7)
+
+- Every state-changing action produces a `strategy_event` row (Section 4.1). Every webhook hit produces a `webhook_event` row.
+- `strategy_event` denormalizes `user_id` for forensic queries that span tables without joining.
+- `webhook_event` records `result`, `ip`, `user_agent`, but **never** the raw secret or any header that contains one.
+- Audit rows are append-only; no UPDATE or DELETE statements anywhere in the strategy module touch them.
+- Logs include a structured `[strategy_id, run_id, leg_id, user_id]` context block on every risk-event line so `grep` works for incident response.
+
+### 14.7 Resource limits / DoS (T8)
+
+- **Engine subscription cap**: `MAX_TICK_SUBSCRIPTIONS_PER_PROCESS` (env, default 2000).
+- **WS connections per user**: `MAX_WS_CONNECTIONS_PER_USER` (default 5). Existing `MAX_WS_CONNECTIONS=10` global cap (in `websocket_proxy/server.py`) stays.
+- **Scheduler job cap**: `MAX_SCHEDULED_JOBS_PER_USER` (default 20).
+- **REST rate limits**: `/start`, `/close_all`, `/legs/*/close` are limited per user (default 30/min); list endpoints 120/min. Backed by the same Redis token bucket as webhook rate limiting.
+- **Tick processing back-pressure**: if engine queue depth exceeds 10× normal for 30s, log warning and slow new run starts.
+
+### 14.8 Secret & credential handling (T9)
+
+- **Webhook secret**: stored hashed (argon2id), shown once on create / rotate; never readable thereafter.
+- **API keys**: existing platform handling — never logged, redacted in error traces.
+- **Broker auth tokens**: held in encrypted user session storage (existing); never written to `strategy_*` tables. Engine pulls them from session at run-start.
+- **Log redaction filter**: a logging filter in `backend/strategy/__init__.py` scrubs `secret`, `api_key`, `auth_token`, `password`, `Authorization` keys from any log payload. Tested with synthetic payloads in CI.
+- **Error responses** never echo back submitted secrets. A request body with a wrong secret returns `{"status":"error","message":"Authentication failed"}` — the message is identical regardless of why.
+
+### 14.9 Mode-specific UI guardrails (T5)
+
+- Live-mode badge: persistent `LIVE` chip in the header of every strategy page when `live_enabled=true`.
+- Confirmation modal copy explicitly names the mode: "Place LIVE order on broker XYZ?" — not generic "Are you sure?".
+- Sandbox-only banner on the wizard when no live strategies exist for the user, suggesting paper-test first.
+
+### 14.10 Security work mapped to build phases
+
+Security isn't a separate phase — each build step (Section 15) lands its share:
+
+| Phase | Security work |
+|---|---|
+| 1 (schema/CRUD) | Repository-layer `user_id` filtering on every read/write; Pydantic strict mode; PATCH allowlist; `webhook_secret_hash` (not plaintext) column |
+| 2 (frontend shell) | Mode badges; live-enable opt-in flow; confirmation modals |
+| 3 (resolver) | Symbol whitelist enforcement; numeric bounds on strike picker queries |
+| 4 (engine sandbox) | Concurrency caps; cooling-off period; mode mismatch refusals |
+| 5 (recovery) | Recovery never elevates a sandbox run to live; broker reconciliation refuses to reconcile a run whose mode differs from observed broker state |
+| 6 (per-leg risk + WS) | WS auth flow; per-user WS cap; log redaction filter live; audit rows for every event |
+| 7 (strategy-level risk) | Notional caps enforced at order-build; daily-loss-limit applied across all live runs |
+| 8 (scheduler) | Per-user scheduled-job cap; scheduler refuses to start live runs if `live_enabled=false` (defense in depth) |
+| 9 (webhook) | Argon2 secret comparison; rate limiting; idempotency; payload size cap; HTTPS enforcement; optional HMAC header; optional IP allow-list |
+| 10 (live wiring) | **Final hardening pass**: dependency audit (npm/pip), `bandit`/`safety` scan, manual penetration test against webhook + REST surfaces, log-redactor regression suite |
+
+### 14.11 Open security decisions (need your call)
+
+| # | Decision | Default | Alternative |
+|---|---|---|---|
+| S1 | Live-mode opt-in granularity | Per strategy | Per user (single toggle gates everything) — simpler but coarser |
+| S2 | Daily loss limit default | Off (user opts in) | On with sane default like ₹50,000 — paternalistic but safer |
+| S3 | Webhook IP allow-list | Optional, off by default | Required, populated with TV ranges by default — stricter but breaks user testing from local curl |
+| S4 | Re-auth window for live-enable | 5 minutes | Session-fresh-only (within last 60s) for highest assurance, or none (just confirm dialog) for lowest friction |
+
+**Resolved by user input on 2026-05-08:**
+- Webhook auth: URL-embedded token (Slack-style), SHA-256-hashed in DB, no body secret, no HMAC. (Was S1, S5.)
+- Token format and rotation flow: per Section 11.1.
+- TV-only assumption baked in: no header-based auth needed.
+
+---
+
+## 15. Build order
 
 Every step is its own PR, independently testable, revertible without breaking earlier steps.
 
@@ -1054,7 +1247,7 @@ Each PR includes:
 
 ---
 
-## 15. Open questions / risks
+## 16. Open questions / risks
 
 | Topic | Open question | Default if unresolved |
 |---|---|---|
@@ -1068,7 +1261,7 @@ Each PR includes:
 
 ---
 
-## 16. Glossary
+## 17. Glossary
 
 - **MTM** — mark-to-market profit or loss
 - **ATM** — at-the-money strike (closest strike to underlying spot)
