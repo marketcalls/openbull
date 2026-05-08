@@ -35,7 +35,7 @@ from backend.schemas.strategy_module import (
     StrategyOut,
     StrategyUpdate,
 )
-from backend.strategy import repository as repo
+from backend.strategy import repository as repo, symbol_resolver
 from backend.strategy.time_utils import format_ist
 
 logger = logging.getLogger(__name__)
@@ -231,3 +231,93 @@ async def rotate_webhook_token(
         strategy=_strategy_out(row, webhook_url=webhook_url),
         webhook_token=plaintext_token,
     ).model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 helper endpoints — power the wizard's underlying / expiry / strike
+# pickers. All session-cookie authed; thin wrappers over symbol_resolver.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/underlyings")
+async def list_underlyings(
+    universe_tab: str = Query(..., description="weekly_monthly | monthly_only | stocks_fno | mcx | delta"),
+    user: User = Depends(get_current_user),
+):
+    ok, data, status_code = symbol_resolver.list_underlyings_for_tab(universe_tab)
+    if not ok:
+        raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
+    return data
+
+
+@router.get("/expiries")
+async def list_expiries(
+    underlying: str = Query(..., min_length=1, max_length=50),
+    underlying_exchange: str = Query(..., min_length=1, max_length=20),
+    instrument: str = Query("options", pattern="^(options|futures)$"),
+    user: User = Depends(get_current_user),
+):
+    """Sorted expiry dates for an underlying (DD-MMM-YY).
+
+    Thin wrapper over the platform-wide get_expiry_dates so the wizard can
+    use session-cookie auth instead of the API-keyed ``/api/v1/expiry``.
+    """
+    ok, data, status_code = symbol_resolver.list_expiries(
+        underlying, underlying_exchange, instrument,
+    )
+    if not ok:
+        raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
+    return data
+
+
+@router.get("/strikes")
+async def list_strikes(
+    underlying: str = Query(..., min_length=1, max_length=50),
+    underlying_exchange: str = Query(..., min_length=1, max_length=20),
+    expiry: Optional[str] = Query(
+        None,
+        description="Concrete expiry like 28-MAY-26 or 28MAY26. If omitted, expiry_rank is required.",
+    ),
+    expiry_rank: Optional[str] = Query(
+        None,
+        pattern="^(weekly|monthly|current|next)$",
+        description="Resolves to a date via symbol_resolver.resolve_expiry_rank.",
+    ),
+    option_type: str = Query(..., pattern="^(CE|PE)$"),
+    user: User = Depends(get_current_user),
+):
+    """Sorted strikes for an option chain.
+
+    Caller can pass either a concrete ``expiry`` or an ``expiry_rank``; one
+    of the two is required. Resolved expiry is included in the response so
+    the wizard knows which date the strikes belong to.
+    """
+    if not expiry and not expiry_rank:
+        raise HTTPException(status_code=400, detail="Either expiry or expiry_rank is required")
+
+    if not expiry:
+        # Resolve rank to a real date first.
+        ok_e, expiries, sc_e = symbol_resolver.list_expiries(
+            underlying, underlying_exchange, "options",
+        )
+        if not ok_e:
+            raise HTTPException(status_code=sc_e, detail=expiries.get("message", "Expiries unavailable"))
+        resolved, _ = symbol_resolver.resolve_expiry_rank(
+            expiry_rank or "weekly", expiries.get("data", []),
+        )
+        if not resolved:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No expiry found for rank '{expiry_rank}' on {underlying}",
+            )
+        expiry = resolved
+
+    ok, data, status_code = symbol_resolver.list_strikes(
+        underlying=underlying,
+        underlying_exchange=underlying_exchange,
+        expiry_date=expiry,
+        option_type=option_type,
+    )
+    if not ok:
+        raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
+    return data

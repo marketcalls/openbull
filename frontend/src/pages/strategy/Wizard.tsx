@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Card,
   CardContent,
@@ -21,7 +21,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { createStrategy } from "@/api/strategy_module";
+import {
+  createStrategy,
+  listStrikes,
+  listUnderlyings,
+  type UnderlyingChoice,
+} from "@/api/strategy_module";
 import {
   ATM_OFFSETS,
   TAB_DEFAULT_UNDERLYINGS,
@@ -71,12 +76,25 @@ interface LegCardProps {
   leg: Leg;
   tab: UniverseTab;
   index: number;
+  underlying: string;
+  underlyingExchange: string;
   onChange: (next: Leg) => void;
   onRemove: () => void;
+  onOpenStrikePicker: () => void;
   removable: boolean;
 }
 
-function LegCard({ leg, tab, index, onChange, onRemove, removable }: LegCardProps) {
+function LegCard({
+  leg,
+  tab,
+  index,
+  underlying: _underlying,
+  underlyingExchange: _underlyingExchange,
+  onChange,
+  onRemove,
+  onOpenStrikePicker,
+  removable,
+}: LegCardProps) {
   const segments = TAB_SEGMENTS[tab];
   const expiries = TAB_EXPIRIES[tab];
 
@@ -246,22 +264,26 @@ function LegCard({ leg, tab, index, onChange, onRemove, removable }: LegCardProp
             ) : (
               <div className="space-y-1.5 sm:col-span-2">
                 <Label className="text-xs uppercase">Strike value</Label>
-                <Input
-                  type="number"
-                  step={0.01}
-                  value={leg.strike_value ?? ""}
-                  placeholder="e.g. 24000"
-                  onChange={(e) =>
-                    update(
-                      "strike_value",
-                      e.target.value === "" ? null : Number(e.target.value),
-                    )
-                  }
-                  className="h-9"
-                />
+                <div className="flex gap-2">
+                  <Input
+                    type="number"
+                    step={0.01}
+                    value={leg.strike_value ?? ""}
+                    placeholder="Pick from list →"
+                    readOnly
+                    className="h-9 font-mono"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={onOpenStrikePicker}
+                  >
+                    Pick strike
+                  </Button>
+                </div>
                 <p className="text-xs text-muted-foreground">
-                  Phase 3 will replace this with a strike picker that filters by
-                  underlying + expiry.
+                  Filtered by underlying + resolved expiry rank ({leg.expiry}).
                 </p>
               </div>
             )}
@@ -331,6 +353,110 @@ function LegCard({ leg, tab, index, onChange, onRemove, removable }: LegCardProp
   );
 }
 
+interface StrikePickerProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  underlying: string;
+  underlyingExchange: string;
+  expiryRank: ExpiryRank;
+  optionType: "CE" | "PE";
+  selectedStrike: number | null;
+  onPick: (strike: number) => void;
+}
+
+function StrikePickerDialog({
+  open,
+  onOpenChange,
+  underlying,
+  underlyingExchange,
+  expiryRank,
+  optionType,
+  selectedStrike,
+  onPick,
+}: StrikePickerProps) {
+  const [filter, setFilter] = useState("");
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["strikes", underlying, underlyingExchange, expiryRank, optionType],
+    queryFn: () =>
+      listStrikes({
+        underlying,
+        underlying_exchange: underlyingExchange,
+        expiry_rank: expiryRank,
+        option_type: optionType,
+      }),
+    enabled: open && !!underlying,
+    staleTime: 60_000,
+  });
+
+  const strikes = data?.strikes ?? [];
+  const filtered = filter
+    ? strikes.filter((s) => String(s).includes(filter))
+    : strikes;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>
+            Pick strike — {underlying} {expiryRank} {optionType}
+          </DialogTitle>
+          {data && (
+            <p className="text-xs text-muted-foreground">
+              {strikes.length} strikes available · resolved expiry:{" "}
+              <span className="font-mono">{data.expiry}</span> on {data.exchange}
+            </p>
+          )}
+        </DialogHeader>
+        <div className="space-y-3">
+          <Input
+            placeholder="Filter (e.g. 24000)…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            autoFocus
+          />
+          <div className="max-h-72 overflow-y-auto rounded-md border">
+            {isLoading ? (
+              <p className="p-3 text-center text-sm text-muted-foreground">Loading…</p>
+            ) : error ? (
+              <p className="p-3 text-center text-sm text-destructive">
+                Failed to load strikes. Master contract may not be downloaded.
+              </p>
+            ) : filtered.length === 0 ? (
+              <p className="p-3 text-center text-sm text-muted-foreground">No matches</p>
+            ) : (
+              <ul className="divide-y">
+                {filtered.map((strike) => (
+                  <li key={strike}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onPick(strike);
+                        onOpenChange(false);
+                      }}
+                      className={cn(
+                        "flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-muted",
+                        selectedStrike === strike && "bg-primary/10 font-semibold",
+                      )}
+                    >
+                      <span className="font-mono">{strike}</span>
+                      {selectedStrike === strike && (
+                        <Badge variant="secondary" className="text-[10px]">
+                          selected
+                        </Badge>
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function StrategyWizard() {
   const navigate = useNavigate();
 
@@ -345,14 +471,31 @@ export default function StrategyWizard() {
   const [exitTime, setExitTime] = useState("15:15");
   const [product, setProduct] = useState<Product>("NRML");
 
-  const underlyings = TAB_DEFAULT_UNDERLYINGS[tab];
+  // Underlyings come from the API now (dynamic for stocks_fno and mcx).
+  // The hardcoded TAB_DEFAULT_UNDERLYINGS is the seed shown until the
+  // first fetch returns — keeps the wizard responsive on slow connections.
+  const { data: underlyingsData } = useQuery({
+    queryKey: ["strategy-underlyings", tab],
+    queryFn: () => listUnderlyings(tab),
+    staleTime: 60_000,
+  });
+  const underlyings: UnderlyingChoice[] =
+    underlyingsData && underlyingsData.length > 0
+      ? underlyingsData
+      : TAB_DEFAULT_UNDERLYINGS[tab];
+
   const underlyingExchange = useMemo(
-    () => underlyings.find((u) => u.symbol === underlying)?.exchange ?? underlyings[0].exchange,
+    () => underlyings.find((u) => u.symbol === underlying)?.exchange ?? underlyings[0]?.exchange ?? "NSE",
     [underlying, underlyings],
   );
 
   // ---- Section B: legs ----
   const [legs, setLegs] = useState<Leg[]>([freshLeg(1, "weekly_monthly")]);
+
+  // ---- Strike picker state (open one at a time, scoped to a leg index) ----
+  const [strikePickerLegIndex, setStrikePickerLegIndex] = useState<number | null>(
+    null,
+  );
 
   // ---- Section C: overall risk ----
   const [overallSl, setOverallSl] = useState<string>("");
@@ -371,8 +514,9 @@ export default function StrategyWizard() {
 
   const onTabChange = (next: UniverseTab) => {
     setTab(next);
-    const list = TAB_DEFAULT_UNDERLYINGS[next];
-    setUnderlying(list[0].symbol);
+    // Seed-pick a sensible default; the API fetch will overwrite shortly.
+    const seed = TAB_DEFAULT_UNDERLYINGS[next];
+    if (seed.length > 0) setUnderlying(seed[0].symbol);
     // Reset legs to one fresh leg with valid expiry/segment for the new tab
     setLegs([freshLeg(1, next)]);
   };
@@ -649,8 +793,11 @@ export default function StrategyWizard() {
               leg={leg}
               tab={tab}
               index={i}
+              underlying={underlying}
+              underlyingExchange={underlyingExchange}
               onChange={(next) => updateLeg(i, next)}
               onRemove={() => removeLeg(i)}
+              onOpenStrikePicker={() => setStrikePickerLegIndex(i)}
               removable={legs.length > 1}
             />
           ))}
@@ -836,6 +983,24 @@ export default function StrategyWizard() {
           {createMutation.isPending ? "Saving…" : "Save and Continue"}
         </Button>
       </div>
+
+      {/* Searchable strike picker — opens for a single leg at a time */}
+      {strikePickerLegIndex !== null && legs[strikePickerLegIndex] && (
+        <StrikePickerDialog
+          open={strikePickerLegIndex !== null}
+          onOpenChange={(o) => !o && setStrikePickerLegIndex(null)}
+          underlying={underlying}
+          underlyingExchange={underlyingExchange}
+          expiryRank={legs[strikePickerLegIndex].expiry}
+          optionType={legs[strikePickerLegIndex].option_type ?? "CE"}
+          selectedStrike={legs[strikePickerLegIndex].strike_value ?? null}
+          onPick={(strike) => {
+            const i = strikePickerLegIndex;
+            if (i === null) return;
+            updateLeg(i, { ...legs[i], strike_value: strike });
+          }}
+        />
+      )}
 
       {/* One-time webhook-token reveal */}
       <Dialog

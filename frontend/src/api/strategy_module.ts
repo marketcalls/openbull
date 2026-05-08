@@ -76,3 +76,68 @@ export async function rotateWebhookToken(
   );
   return response.data;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 helper endpoints — wizard pickers
+// ---------------------------------------------------------------------------
+
+import type { ExpiryRank, OptionType, UniverseTab } from "@/types/strategy_module";
+
+export interface UnderlyingChoice {
+  symbol: string;
+  name: string;
+  exchange: string;
+}
+
+interface UnderlyingsResponse {
+  status: "success";
+  underlyings: UnderlyingChoice[];
+}
+
+export async function listUnderlyings(
+  universe_tab: UniverseTab,
+): Promise<UnderlyingChoice[]> {
+  const response = await api.get<UnderlyingsResponse>(
+    "/web/strategy/underlyings",
+    { params: { universe_tab } },
+  );
+  return response.data.underlyings;
+}
+
+interface ExpiriesResponse {
+  status: "success";
+  data: string[]; // DD-MMM-YY
+}
+
+export async function listExpiries(
+  underlying: string,
+  underlying_exchange: string,
+  instrument: "options" | "futures" = "options",
+): Promise<string[]> {
+  const response = await api.get<ExpiriesResponse>("/web/strategy/expiries", {
+    params: { underlying, underlying_exchange, instrument },
+  });
+  return response.data.data;
+}
+
+interface StrikesResponse {
+  status: "success";
+  strikes: number[];
+  underlying: string;
+  exchange: string;
+  expiry: string;
+  option_type: string;
+}
+
+export async function listStrikes(params: {
+  underlying: string;
+  underlying_exchange: string;
+  option_type: OptionType;
+  expiry_rank?: ExpiryRank;
+  expiry?: string;
+}): Promise<StrikesResponse> {
+  const response = await api.get<StrikesResponse>("/web/strategy/strikes", {
+    params,
+  });
+  return response.data;
+}
