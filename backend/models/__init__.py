@@ -6,6 +6,14 @@ from backend.models.symbol import SymToken
 from backend.models.settings import AppSettings
 from backend.models.audit import LoginAttempt, ActiveSession
 from backend.models.strategies import Strategy
+from backend.models.strategy_module import (
+    SmStrategy,
+    SmStrategyRun,
+    SmStrategyOrder,
+    SmStrategyCheckpoint,
+    SmWebhookEvent,
+    SmStrategyEvent,
+)
 
 __all__ = [
     "Base",
@@ -18,4 +26,10 @@ __all__ = [
     "LoginAttempt",
     "ActiveSession",
     "Strategy",
+    "SmStrategy",
+    "SmStrategyRun",
+    "SmStrategyOrder",
+    "SmStrategyCheckpoint",
+    "SmWebhookEvent",
+    "SmStrategyEvent",
 ]

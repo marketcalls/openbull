@@ -74,6 +74,16 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Failed to start sandbox engine/scheduler/MTM")
 
+    # Wire all event-bus subscribers (strategy audit, future: telegram, etc.).
+    # Done after tables exist so audit subscribers can write rows on any
+    # publish that happens during plugin load or symbol-cache hydration.
+    try:
+        from backend.subscribers import register_all as register_event_subscribers
+
+        register_event_subscribers()
+    except Exception:
+        logger.exception("Failed to register event-bus subscribers")
+
     # Load broker plugins
     plugins = load_all_plugins()
     logger.info("Loaded %d broker plugins: %s", len(plugins), list(plugins.keys()))
@@ -244,6 +254,12 @@ from backend.routers.strategybuilder import router as strategybuilder_router
 
 app.include_router(strategies_router)
 app.include_router(strategybuilder_router)
+
+# Strategy module — multi-leg options strategies with risk management
+# (separate from the legacy Strategy Builder above)
+from backend.routers.strategy_module import router as strategy_module_router
+
+app.include_router(strategy_module_router)
 
 
 # Health check

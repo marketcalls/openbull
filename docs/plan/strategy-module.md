@@ -443,11 +443,53 @@ Recovery flow on FastAPI startup (`backend/strategy/recovery.py`):
 
 **Worst-case data loss:** up to 30s of trail-floor advancement (between the last checkpoint and crash). The actual SL behavior is still safe because per-leg SL evaluation re-runs from the LTP on the next tick; we may briefly use a stale floor for Lock+Trail, but it's clamped by `peak − trail_step` which is recomputed from broker MTM, so it self-heals within a few ticks.
 
-### 5.5 Engine ownership / multi-worker safety
+### 5.5 Event bus — decoupled side-effects (architecture principle)
+
+The strategy module is **event-driven, never polling**. Every state change is published as a typed event; subscribers handle side-effects independently. The publisher doesn't know who's listening; new subscribers can be added without touching producers.
+
+The bus implementation is ported from OpenAlgo's `utils/event_bus.py` — ~70 lines of stdlib (`threading.Lock` + `ThreadPoolExecutor`). Zero new dependencies. Non-blocking publish. Per-subscriber error isolation.
+
+**Files (Phase 1 lands the foundation):**
+
+```
+backend/utils/event_bus.py         # EventBus class, singleton `bus`, base Event dataclass
+backend/events/__init__.py         # public re-exports
+backend/events/strategy_events.py  # typed events: StrategyCreated, LegSlHit, …
+backend/subscribers/__init__.py    # register_all() — wires subscribers to topics
+backend/subscribers/strategy_audit_subscriber.py
+                                    # writes every event to sm_strategy_event
+                                    # uses sync engine (sync_database_url),
+                                    # same pattern as api_log_writer
+```
+
+**Topic naming:** `strategy.<kind>` where `<kind>` matches `sm_strategy_event.kind`. The audit subscriber derives the DB column from the topic, so a typo in a topic string can't silently drop events.
+
+**Publish points (Phase 1 — config-layer):**
+- `repository.create_strategy` → `StrategyCreatedEvent`
+- `repository.update_strategy` → `StrategyUpdatedEvent`
+- `repository.rotate_webhook_token` → `WebhookTokenRotatedEvent` (severity=warn)
+- `StrategyDeletedEvent` is intentionally not persisted to `sm_strategy_event` because the FK cascade deletes the audit rows when the strategy is dropped — deletion is logged to app logs instead. Future enhancement: change the strategy_id FK to `ON DELETE SET NULL` and denormalize `strategy_name` into the event row to preserve deletion history.
+
+**Publish points (Phase 4+):** every risk-event topic listed in Section 4.1 `sm_strategy_event.kind` enum is published from the engine when its rule fires.
+
+**Future subscribers** (Phase 2 onwards) can be added without touching publishers:
+- WebSocket fan-out (push to UI Live tab on every event)
+- Telegram alerts (severity=critical events only)
+- External webhook out (mirror events to user-configured URLs)
+- Metrics / Prometheus
+
+**No polling rule:**
+- The engine does not poll broker for fills — it consumes broker WS / order-update events.
+- The engine does not poll Redis for state changes — its tick subscriber is push-driven via the existing `MarketDataCache` priority pub-sub (Section 5.6).
+- The frontend Live tab does not poll REST — it consumes the strategy WS push (Section 7).
+- The audit subscriber writes synchronously on each published event — there's no background sweeper that scans for "new events" on a timer.
+- REST polling exists exactly once: as the **fallback** in the tick feed when broker WS is unavailable. It's not the primary path.
+
+### 5.6 Engine ownership / multi-worker safety
 
 If multiple FastAPI workers run, only one should own a given run's tick loop. Implemented via Redis SETNX-based lock with a 30s TTL renewed each tick. If a worker dies mid-run, the lock expires and another worker picks it up on its next recovery sweep (run every 60s, or on demand).
 
-### 5.6 Tick source — LTP-first, WebSocket-primary, REST-fallback
+### 5.7 Tick source — LTP-first, WebSocket-primary, REST-fallback
 
 **Design principle**: LTP is sufficient for SL, target, trail, lock-profit, and overall MTM checks. Quotes (bid/ask) and depth are NOT on the risk-evaluation hot path. They're fetched on-demand only when a specific feature needs them (e.g. depth-aware exit pricing in v2). The resilience layer below is therefore LTP-only.
 
@@ -1228,7 +1270,7 @@ Every step is its own PR, independently testable, revertible without breaking ea
 
 | Step | Scope | Verifies |
 |---|---|---|
-| 1 | DB migrations: `strategy`, `strategy_run`, `strategy_order`, `strategy_run_checkpoint`, `webhook_event`, `strategy_event` + ORM + Pydantic schemas + repository CRUD + REST router (CRUD only) | Strategies can be created/listed/edited/deleted via REST. Every timestamp in API output is IST ISO 8601. |
+| 1 | **Foundation** — DB schema (`sm_strategy`, `sm_strategy_run`, `sm_strategy_order`, `sm_strategy_checkpoint`, `sm_webhook_event`, `sm_strategy_event`, all `sm_` prefixed, Integer PKs to match the rest of OpenBull); ORM + Pydantic schemas (strict mode) + repository (user_id ownership filter, `NotFound`/`Conflict` exceptions); CRUD router at `/web/strategy/*` (session-cookie auth); webhook URL-token generation (SHA-256-hashed, one-time view, indexed lookup); IST timestamp helper; **event bus** (ported from OpenAlgo `utils/event_bus.py`, ~70 lines stdlib) wired into the lifespan; **strategy_audit_subscriber** persists every published event into `sm_strategy_event` using a sync engine (matching `api_log_writer` pattern). | Strategies can be created/listed/edited/deleted via REST. Webhook tokens generate, hash, and resolve correctly. Audit trail captures every CRUD action automatically — no manual logging from the router. Cross-tenant access returns 404. Updates blocked when status≠stopped (409). Every API timestamp is IST ISO 8601. |
 | 2 | Frontend: list page (with Realized/Unrealized/Total P&L columns), wizard (mirrors AlgoTest, including MCX dynamic universe), detail page shell with all tabs (config-only; no live runtime yet) | UI parity with screenshots, no runtime |
 | 3 | Symbol resolver (ATM delegation + direct strike) + helper endpoints (`/strikes`, `/underlyings`); reuse existing `/api/v1/expiry` for expiry list | Strike picker works end-to-end on NSE / BSE / MCX |
 | 4 | Engine skeleton: tick subscriber via existing ZMQ, sandbox order path, manual start/stop/close_all + per-leg `/legs/{leg_id}/close` + run lifecycle (no risk logic yet) | Sandbox runs work; manual entries and exits flow through `strategy_order` audit trail |
