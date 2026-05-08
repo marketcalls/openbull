@@ -42,6 +42,9 @@ const StrategyPortfolio = lazy(() => import("@/pages/tools/StrategyPortfolio"));
 const StraddlesStrangleChain = lazy(
   () => import("@/pages/tools/StraddlesStrangleChain"),
 );
+const StrategyList = lazy(() => import("@/pages/strategy/List"));
+const StrategyWizard = lazy(() => import("@/pages/strategy/Wizard"));
+const StrategyDetail = lazy(() => import("@/pages/strategy/Detail"));
 
 function ToolFallback() {
   return (
@@ -297,6 +300,36 @@ function App() {
                     <ProtectedRoute requiresBroker>
                       <Suspense fallback={<ToolFallback />}>
                         <StrategyPortfolio />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/strategy"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <StrategyList />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/strategy/new"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <StrategyWizard />
+                      </Suspense>
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/strategy/:id"
+                  element={
+                    <ProtectedRoute requiresBroker>
+                      <Suspense fallback={<ToolFallback />}>
+                        <StrategyDetail />
                       </Suspense>
                     </ProtectedRoute>
                   }

@@ -43,6 +43,7 @@ const navItems: NavItem[] = [
       { label: "My P&L", to: "/sandbox/mypnl" },
     ],
   },
+  { label: "Strategies", to: "/strategy" },
   {
     label: "Tools",
     to: "/tools",
