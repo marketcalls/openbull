@@ -71,9 +71,6 @@ def _process_json(path: str) -> pd.DataFrame:
     logger.info("Processing Upstox master contract data")
     df = pd.read_json(path)
 
-    # Filter out commodity segment
-    df = df[df["segment"] != "NSE_COM"]
-
     exchange_map = {
         "NSE_EQ": "NSE",
         "NSE_FO": "NFO",
@@ -84,7 +81,10 @@ def _process_json(path: str) -> pd.DataFrame:
         "BSE_FO": "BFO",
         "BCD_FO": "BCD",
         "MCX_FO": "MCX",
+        "GLOBAL_INDEX": "GLOBAL_INDEX",
     }
+    # Drop unsupported segments (NSE_COM, GLOBAL_INDICATOR, etc.) — exchange is NOT NULL
+    df = df[df["segment"].isin(exchange_map)]
     segment_copy = df["segment"].copy()
     df["segment"] = df["segment"].map(exchange_map)
     df["expiry"] = pd.to_datetime(df["expiry"], unit="ms").dt.strftime("%d-%b-%y").str.upper()
@@ -181,6 +181,21 @@ def _process_json(path: str) -> pd.DataFrame:
         "NIFTY50 TR 1X INV": "NIFTY50TR1XINV",
         "NIFTY50 TR 2X LEV": "NIFTY50TR2XLEV",
         "HANGSENG BEES NAV": "HANGSENGBEESNAV",
+    })
+
+    # Global Index symbol mapping (only GLOBAL_INDEX rows)
+    gbl_idx_mask = df["exchange"] == "GLOBAL_INDEX"
+    df.loc[gbl_idx_mask, "symbol"] = df.loc[gbl_idx_mask, "symbol"].replace({
+        "^HSI": "HANGSENG",
+        "^DJI": "DOWJONES",
+        "^FTSE": "FTSE100",
+        "^GSPC": "SP500",
+        "GIFT NIFTY": "GIFTNIFTY",
+        "^GDAXI": "DAX",
+        "IXIX": "USTECH100",
+        "^FCHI": "CAC40",
+        "DOW FUTURES": "DOWFUTURES",
+        "^N225": "NIKKEI225",
     })
 
     # BSE Index symbol mapping (only BSE_INDEX rows)
