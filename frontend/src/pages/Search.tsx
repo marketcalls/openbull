@@ -74,6 +74,12 @@ export default function Search() {
     if (exchange === "NSE_INDEX" || exchange === "BSE_INDEX") {
       return "Try NIFTY, BANKNIFTY, SENSEX, BANKEX.";
     }
+    if (exchange === "GLOBAL_INDEX") {
+      return "Try DOWJONES, NIKKEI225, FTSE100, HANGSENG, SP500, GIFTNIFTY.";
+    }
+    if (exchange === "GLOBAL_INDICATOR") {
+      return "Try USDINR, BZUSD (Brent), CLUSD (WTI).";
+    }
     return "Try INFY, TCS, or part of a company name.";
   }, [exchange]);
 

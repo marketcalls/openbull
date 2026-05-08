@@ -22,4 +22,6 @@ export const EXCHANGES: ReadonlyArray<{ value: string; label: string }> = [
   { value: "BCD", label: "BCD — BSE Currency" },
   { value: "NSE_INDEX", label: "NSE_INDEX — NSE Indices" },
   { value: "BSE_INDEX", label: "BSE_INDEX — BSE Indices" },
+  { value: "GLOBAL_INDEX", label: "GLOBAL_INDEX — World Indices" },
+  { value: "GLOBAL_INDICATOR", label: "GLOBAL_INDICATOR — FX & Commodity Refs" },
 ];

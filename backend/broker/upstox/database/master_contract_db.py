@@ -82,8 +82,9 @@ def _process_json(path: str) -> pd.DataFrame:
         "BCD_FO": "BCD",
         "MCX_FO": "MCX",
         "GLOBAL_INDEX": "GLOBAL_INDEX",
+        "GLOBAL_INDICATOR": "GLOBAL_INDICATOR",
     }
-    # Drop unsupported segments (NSE_COM, GLOBAL_INDICATOR, etc.) — exchange is NOT NULL
+    # Drop unsupported segments (NSE_COM, etc.) — exchange is NOT NULL
     df = df[df["segment"].isin(exchange_map)]
     segment_copy = df["segment"].copy()
     df["segment"] = df["segment"].map(exchange_map)
