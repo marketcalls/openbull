@@ -45,6 +45,7 @@ const StraddlesStrangleChain = lazy(
 const StrategyList = lazy(() => import("@/pages/strategy/List"));
 const StrategyWizard = lazy(() => import("@/pages/strategy/Wizard"));
 const StrategyDetail = lazy(() => import("@/pages/strategy/Detail"));
+const Playground = lazy(() => import("@/pages/Playground"));
 
 function ToolFallback() {
   return (
@@ -92,6 +93,18 @@ function App() {
                 element={
                   <ProtectedRoute>
                     <BrokerAngelLogin />
+                  </ProtectedRoute>
+                }
+              />
+
+              {/* Playground — full-screen, no AppLayout. Owns its own header. */}
+              <Route
+                path="/playground"
+                element={
+                  <ProtectedRoute requiresBroker>
+                    <Suspense fallback={<ToolFallback />}>
+                      <Playground />
+                    </Suspense>
                   </ProtectedRoute>
                 }
               />

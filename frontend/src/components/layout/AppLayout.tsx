@@ -61,6 +61,7 @@ const navItems: NavItem[] = [
       { label: "Strategy Portfolio", to: "/tools/strategyportfolio" },
     ],
   },
+  { label: "Playground", to: "/playground" },
   {
     label: "Settings",
     to: "/broker/config",
