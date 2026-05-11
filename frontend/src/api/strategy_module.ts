@@ -5,6 +5,8 @@
 
 import api from "@/config/api";
 import type {
+  ExpiryRank,
+  OptionType,
   Strategy,
   StrategyCreate,
   StrategyCreateResponse,
@@ -81,8 +83,6 @@ export async function rotateWebhookToken(
 // ---------------------------------------------------------------------------
 // Phase 3 helper endpoints — wizard pickers
 // ---------------------------------------------------------------------------
-
-import type { ExpiryRank, OptionType, UniverseTab } from "@/types/strategy_module";
 
 export interface UnderlyingChoice {
   symbol: string;

@@ -1,8 +1,8 @@
 # Strategy Module — Implementation Plan
 
-**Status:** Draft v1 — pending build kickoff
+**Status:** v1 shipped — all 10 build-order phases on `main`
 **Owner:** rajandran
-**Last updated:** 2026-05-08
+**Last updated:** 2026-05-11
 
 ---
 
@@ -1266,40 +1266,41 @@ Security isn't a separate phase — each build step (Section 15) lands its share
 
 ## 15. Build order
 
-Every step is its own PR, independently testable, revertible without breaking earlier steps.
+Every step shipped as its own commit on `main`, independently testable.
 
-| Step | Scope | Verifies |
-|---|---|---|
-| 1 | **Foundation** — DB schema (`sm_strategy`, `sm_strategy_run`, `sm_strategy_order`, `sm_strategy_checkpoint`, `sm_webhook_event`, `sm_strategy_event`, all `sm_` prefixed, Integer PKs to match the rest of OpenBull); ORM + Pydantic schemas (strict mode) + repository (user_id ownership filter, `NotFound`/`Conflict` exceptions); CRUD router at `/web/strategy/*` (session-cookie auth); webhook URL-token generation (SHA-256-hashed, one-time view, indexed lookup); IST timestamp helper; **event bus** (ported from OpenAlgo `utils/event_bus.py`, ~70 lines stdlib) wired into the lifespan; **strategy_audit_subscriber** persists every published event into `sm_strategy_event` using a sync engine (matching `api_log_writer` pattern). | Strategies can be created/listed/edited/deleted via REST. Webhook tokens generate, hash, and resolve correctly. Audit trail captures every CRUD action automatically — no manual logging from the router. Cross-tenant access returns 404. Updates blocked when status≠stopped (409). Every API timestamp is IST ISO 8601. |
-| 2 | Frontend: list page (with Realized/Unrealized/Total P&L columns), wizard (mirrors AlgoTest, including MCX dynamic universe), detail page shell with all tabs (config-only; no live runtime yet) | UI parity with screenshots, no runtime |
-| 3 | Symbol resolver (ATM delegation + direct strike) + helper endpoints (`/strikes`, `/underlyings`); reuse existing `/api/v1/expiry` for expiry list | Strike picker works end-to-end on NSE / BSE / MCX |
-| 4 | Engine skeleton: tick subscriber via existing ZMQ, sandbox order path, manual start/stop/close_all + per-leg `/legs/{leg_id}/close` + run lifecycle (no risk logic yet) | Sandbox runs work; manual entries and exits flow through `strategy_order` audit trail |
-| 5 | Crash-safe recovery + checkpoint loop + Redis lock + broker reconciliation | kill -9 + restart restores running runs; recovered run resumes ticks |
-| 6 | RiskTickFeed (WS-primary + REST-fallback) + Per-leg risk (SL, Target, Trail SL) + WebSocket streaming with realized/unrealized/total split + IST timestamps + `strategy_event` writer + Events tab wired to live WS feed | Live P&L (3-number split) in UI, exits trigger in sandbox, every event audited |
-| 7 | Strategy-level risk: Overall SL/Target, Lock-profit (Lock + Lock+Trail), Trail-to-entry | All strategy-level paths exit correctly with the right `stop_reason` and `event.kind` |
-| 8 | Scheduler (APScheduler with `Asia/Kolkata` tz, `default_mode` field) | Cron-triggered starts fire at 09:15 IST; jobs persisted and rebuilt on restart |
-| 9 | TradingView webhook + dedupe + secret rotate + Webhook tab UI | Webhook starts/stops a strategy from curl; every request logged in `webhook_event` |
-| 10 | Live mode wiring (last for safety) — sandbox still default | Single live trade end-to-end with one-rupee exposure validates the live path |
+| # | Scope | Commit | Status |
+|---|---|---|---|
+| 1 | **Foundation** — DB schema (`sm_strategy`, `sm_strategy_run`, `sm_strategy_order`, `sm_strategy_checkpoint`, `sm_webhook_event`, `sm_strategy_event`, all `sm_` prefixed, Integer PKs); ORM + strict-mode Pydantic schemas + repository (user_id ownership filter); CRUD router at `/web/strategy/*` (session-cookie auth); webhook URL-token (SHA-256-hashed, one-time view, indexed lookup); IST timestamp helper; **event bus** (ported from OpenAlgo `utils/event_bus.py`); **strategy_audit_subscriber** persists every published event into `sm_strategy_event` via a sync engine. | `aef3a4c` | ✓ |
+| 2 | Frontend: list page (Realized/Unrealized/Total P&L cols), wizard (5 universe tabs incl. MCX dynamic), detail page shell with all tabs (config-only, no live runtime) | `ffaceef` | ✓ |
+| 3 | Symbol resolver (ATM delegation + direct strike) + helper endpoints (`/strikes`, `/underlyings`); strike picker dialog | `a318d88` | ✓ |
+| 4 | Engine skeleton: sandbox order path, manual start/stop/close_all + per-leg `/legs/{leg_id}/close` + run lifecycle (no risk logic yet); Phase-4 duplicate-exit guard | `c13f191` | ✓ |
+| 5 | Crash-safe recovery + checkpoint loop + Redis ownership lock; broker reconciliation wired (live exercised in Phase 10) | `8cf87d0` | ✓ |
+| 6 | Tick feed via existing `MarketDataCache` priority pub/sub + Per-leg risk (SL, Target, Trail SL) + WebSocket streaming with realized/unrealized/total split + Events tab wired to live WS feed | `29dfd36` | ✓ |
+| 7 | Strategy-level risk: Overall SL/Target, Lock-profit (Lock + Lock+Trail), Trail-SL-to-entry. Audit-hygiene fix: single `lock_profit_armed` event on the Lock+Trail arming tick (trail-adjusted floor written directly into the armed event). | `c4fdf39`, `6ceee71` | ✓ |
+| 8 | Scheduler (APScheduler `AsyncIOScheduler` with `Asia/Kolkata` tz, `default_mode` field); cron jobs persisted by re-syncing from `strategy.scheduler` jsonb on every boot — no jobstore dependency | `19f9e7e` | ✓ |
+| 9 | TradingView webhook receiver at `POST /webhook/strategy/{token}`; URL-embedded SHA-256-hashed token; full 11-stage validation pipeline; every accepted/rejected request audited to `sm_webhook_event`; `GET /web/strategy/{id}/webhook_events` for the UI | `4beb51c` | ✓ |
+| 10 | **Live mode wiring** — `POST /web/strategy/{id}/enable_live` (password re-auth) + `disable_live`; `backend.strategy.live_auth.resolve_live_auth` fetches the user's BrokerAuth token fresh on every auto-exit; scheduler / webhook / tick processor all thread real broker auth through for live runs; UI "Enable LIVE" / "Disable LIVE" buttons with password-prompt dialog | `7e9735c` | ✓ |
 
-Each PR includes:
-- Backend tests (pytest async + fixture-based)
-- Manual test plan in PR description
-- Migration up + down
-- Documentation updates if user-facing
+Each commit includes the integration test that verifies the phase, with results captured in the commit message. Lot sizes are dynamically read from `symtoken.lotsize` at runtime — never hardcoded anywhere in the engine path.
 
 ---
 
 ## 16. Open questions / risks
 
-| Topic | Open question | Default if unresolved |
+**Resolved in v1:**
+- **Time zone**: UTC stored in PG `timestamptz`, IST rendered everywhere on the wire and in the UI; APScheduler runs with `tz='Asia/Kolkata'` (Section 4.4, Phase 8).
+- **Concurrent webhook + scheduler start**: idempotency lands at two layers — `engine.start_run` refuses when `strategy.status='running'`, and the webhook handler's 60s dedupe window catches repeats within the same minute (Phase 9 verified).
+- **Live broker token expiry mid-run**: `resolve_live_auth` runs on every auto-exit, so a token refresh during the trading day is transparent. When the session is expired/revoked, auto-exits are refused and logged at WARN — operator must square-off manually via the UI (Phase 10).
+
+**Still open / accepted v1 limitations:**
+
+| Topic | Note | Default in v1 |
 |---|---|---|
-| Multi-broker | Strategy bound to user's active broker at start. What if user changes broker mid-run? | Run continues on original broker; new starts use new broker |
-| Partial fills | Engine assumes all-or-nothing leg fills. Real markets can fill 50/75 lots. | Reject leg if fill ratio < 100% in v1; document as known limitation |
-| Slippage in sandbox | What slippage model? | Reuse existing sandbox_service default; expose user-tunable in v2 |
-| Concurrent webhook + scheduler start | Scheduler fires at 09:15, webhook fires at 09:14:58 — both try to start | Idempotency by `strategy.status=running` plus 60s dedupe window handles this |
-| WS scaling | Many concurrent strategies × many subscribers per strategy | v1: single backend process. If becomes issue, add Redis pub/sub fan-out |
-| Time zone | All times stored as IST? Or UTC with display conversion? | UTC in DB, display in IST; cron jobs use IST tz explicitly |
-| Holiday calendar | Scheduler firing on NSE holidays | v1: rely on user-defined days only; v2: integrate market calendar |
+| Multi-broker | Strategy bound to user's active broker at start. What if user changes broker mid-run? | Run continues on original broker; new starts pick the user's current active broker |
+| Partial fills | Engine assumes all-or-nothing leg fills. Real markets can fill 50/75 lots. | Behaviour observed but not enforced; broker reconciliation reflects whatever filled. Hard rejection on partial is a v2 concern. |
+| Slippage in sandbox | What slippage model? | Reuses existing `sandbox_service` default; user-tunable in v2 |
+| WS scaling | Many concurrent strategies × many subscribers per strategy | v1 ships single-process. Redis pub/sub fan-out is a deployment concern, not a code change to the engine. |
+| Holiday calendar | Scheduler firing on NSE holidays | Rely on user-defined weekday subset; NSE market calendar integration is v2 |
 
 ---
 
