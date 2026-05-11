@@ -29,4 +29,5 @@ dependencies = [
     "tornado>=6.5.5",
     "redis>=5.0",
     "limits[redis]>=3.0",
+    "apscheduler>=3.10",
 ]

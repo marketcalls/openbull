@@ -113,6 +113,7 @@ async def create_strategy(
         message=f"Strategy '{row.name}' created",
         payload={"underlying": row.underlying, "legs": len(row.legs)},
     ))
+    await _sync_scheduler_jobs(row.id)
     return row, plaintext
 
 
@@ -183,6 +184,8 @@ async def update_strategy(
         message=f"Strategy '{row.name}' updated",
         payload={"fields": list(patch.keys())},
     ))
+    if "scheduler" in patch:
+        await _sync_scheduler_jobs(row.id)
     return row
 
 
@@ -201,6 +204,7 @@ async def delete_strategy(
     # delete event below cannot be persisted (FK now invalid) — that's
     # intentional. The deletion itself is recorded in app logs.
     logger.info("user=%d deleted strategy id=%d name=%r", user_id, strategy_id, name)
+    _remove_scheduler_jobs(strategy_id)
 
 
 async def rotate_webhook_token(
@@ -225,6 +229,42 @@ async def rotate_webhook_token(
         "user=%d rotated webhook token for strategy id=%d", user_id, strategy_id
     )
     return row, plaintext
+
+
+# ---------------------------------------------------------------------------
+# Scheduler hooks — keep CRUD ↔ APScheduler in lockstep without a circular
+# import. Lazy-import so the scheduler module can sit above the repository
+# in the dependency graph (it imports from `repo` for diagnostics later).
+# ---------------------------------------------------------------------------
+
+
+async def _sync_scheduler_jobs(strategy_id: int) -> None:
+    """Re-install this strategy's cron jobs from the DB row. Safe no-op
+    when the scheduler hasn't started yet (e.g. during test fixtures)."""
+    try:
+        from backend.strategy import scheduler as strategy_scheduler
+
+        if strategy_scheduler.get_scheduler() is None:
+            return
+        await strategy_scheduler.sync_jobs_for_strategy(strategy_id)
+    except Exception:
+        logger.exception(
+            "Failed to sync scheduler jobs for strategy %d", strategy_id,
+        )
+
+
+def _remove_scheduler_jobs(strategy_id: int) -> None:
+    """Drop this strategy's cron jobs. Used on delete."""
+    try:
+        from backend.strategy import scheduler as strategy_scheduler
+
+        if strategy_scheduler.get_scheduler() is None:
+            return
+        strategy_scheduler.remove_jobs_for_strategy(strategy_id)
+    except Exception:
+        logger.exception(
+            "Failed to remove scheduler jobs for strategy %d", strategy_id,
+        )
 
 
 # Helper used by future webhook handler (Phase 9). Lives here so all

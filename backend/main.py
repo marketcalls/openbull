@@ -86,12 +86,15 @@ async def lifespan(app: FastAPI):
         logger.exception("Failed to register event-bus subscribers")
 
     # Strategy module: recovery, then tick processor + tick feed, then
-    # periodic checkpoints. Order matters — the processor must be alive
-    # before the feed starts dispatching, and recovery should run before
-    # the first checkpoint pass.
+    # periodic checkpoints, then scheduler. Order matters — the processor
+    # must be alive before the feed starts dispatching, and recovery
+    # should run before the first checkpoint pass. Scheduler comes last so
+    # any cron firing immediately can already start runs through a fully
+    # initialized engine.
     try:
         from backend.strategy import (
             checkpoint as strategy_checkpoint,
+            scheduler as strategy_scheduler,
             tick_feed as strategy_tick_feed,
             tick_processor as strategy_tick_processor,
         )
@@ -101,6 +104,7 @@ async def lifespan(app: FastAPI):
         queue = strategy_tick_processor.start()
         strategy_tick_feed.init(asyncio.get_running_loop(), queue)
         strategy_checkpoint.start()
+        await strategy_scheduler.start()
     except Exception:
         logger.exception("Strategy engine startup failed")
 
@@ -153,10 +157,12 @@ async def lifespan(app: FastAPI):
     try:
         from backend.strategy import (
             checkpoint as strategy_checkpoint,
+            scheduler as strategy_scheduler,
             tick_feed as strategy_tick_feed,
             tick_processor as strategy_tick_processor,
         )
 
+        strategy_scheduler.stop()
         strategy_tick_feed.shutdown()
         await strategy_tick_processor.stop()
         await strategy_checkpoint.stop()
