@@ -30,7 +30,7 @@ from backend.models.strategy_module import (
     SmStrategyOrder,
     SmStrategyRun,
 )
-from backend.strategy import repository as repo, symbol_resolver
+from backend.strategy import repository as repo, state as state_module, symbol_resolver
 from backend.strategy.order_dispatch import dispatch_order
 
 logger = logging.getLogger(__name__)
@@ -304,6 +304,7 @@ async def start_run(
         )
         leg_summaries.append({
             **r,
+            "qty": qty,
             "order_id": order_row.id,
             "broker_order_id": broker_order_id,
             "status": order_row.status,
@@ -330,6 +331,18 @@ async def start_run(
             "strategy %d run %d: partial entry failure — %s",
             strategy.id, run.id, "; ".join(placement_errors),
         )
+
+    # Seed Redis state so the checkpoint loop and Phase 6 tick loop have
+    # something to read. Failure is non-fatal — recovery rebuilds from DB.
+    try:
+        entry_by_leg = {ls["leg_id"]: ls for ls in leg_summaries}
+        await state_module.init_run_state(
+            run_id=run.id,
+            strategy_legs=strategy.legs or [],
+            entry_orders_by_leg=entry_by_leg,
+        )
+    except Exception:
+        logger.exception("Failed to init Redis state for run %d", run.id)
 
     return run, leg_summaries
 
@@ -447,6 +460,15 @@ async def _exit_legs(
             kind=exit_kind,
             broker_order_id=broker_order_id,
         )
+        try:
+            await state_module.mark_leg_closed(
+                run.id, leg_id,
+                exit_order_id=order_row.id,
+                exit_kind=exit_kind,
+                exit_status=order_row.status,
+            )
+        except Exception:
+            logger.exception("Failed to mark leg %d closed in Redis state", leg_id)
         summaries.append({
             "leg_id": leg_id,
             "order_id": order_row.id,
@@ -486,6 +508,10 @@ async def stop_run(
     await repo.finalize_run(
         db, run=run, strategy=strategy, stop_reason=stop_reason,
     )
+    try:
+        await state_module.clear_run_state(run.id)
+    except Exception:
+        logger.exception("Failed to clear Redis state for run %d", run.id)
     return {"run_id": run.id, "stop_reason": stop_reason, "legs": summaries}
 
 

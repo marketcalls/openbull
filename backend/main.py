@@ -84,6 +84,18 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Failed to register event-bus subscribers")
 
+    # Strategy module: crash-safe recovery + periodic checkpoint loop.
+    # Recovery must happen before checkpoint starts so any newly-hydrated
+    # state is populated when the first checkpoint pass runs.
+    try:
+        from backend.strategy import checkpoint as strategy_checkpoint
+        from backend.strategy.recovery import recover_all as strategy_recover_all
+
+        await strategy_recover_all()
+        strategy_checkpoint.start()
+    except Exception:
+        logger.exception("Strategy recovery / checkpoint loop failed to start")
+
     # Load broker plugins
     plugins = load_all_plugins()
     logger.info("Loaded %d broker plugins: %s", len(plugins), list(plugins.keys()))
@@ -130,6 +142,12 @@ async def lifespan(app: FastAPI):
         stop_sandbox_engine()
     except Exception:
         logger.exception("Error stopping sandbox engine/scheduler/MTM")
+    try:
+        from backend.strategy import checkpoint as strategy_checkpoint
+
+        await strategy_checkpoint.stop()
+    except Exception:
+        logger.exception("Error stopping strategy checkpoint loop")
     await engine.dispose()
     logger.info("OpenBull shut down")
     # Flush DB error sink before the process exits so in-flight queued
