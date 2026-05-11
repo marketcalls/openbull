@@ -574,3 +574,45 @@ async def get_strategy_events(
         db, user_id=user.id, strategy_id=strategy_id, run_id=run_id, limit=limit,
     )
     return {"status": "success", "events": [_format_event(e) for e in events]}
+
+
+@router.get("/{strategy_id}/webhook_events")
+async def get_strategy_webhook_events(
+    strategy_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recent webhook deliveries for this strategy — the Webhook tab UI
+    reads this to show the audit log of TradingView hits.
+    """
+    from sqlalchemy import desc, select
+    from backend.models.strategy_module import SmWebhookEvent
+
+    try:
+        await repo.get_strategy(db, user_id=user.id, strategy_id=strategy_id)
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    rows = (await db.execute(
+        select(SmWebhookEvent)
+        .where(SmWebhookEvent.strategy_id == strategy_id)
+        .order_by(desc(SmWebhookEvent.received_at))
+        .limit(limit)
+    )).scalars().all()
+    return {
+        "status": "success",
+        "webhook_events": [
+            {
+                "id": r.id,
+                "received_at": format_ist(r.received_at),
+                "action": r.action,
+                "mode": r.mode,
+                "result": r.result,
+                "ip": str(r.ip) if r.ip else None,
+                "user_agent": r.user_agent,
+                "error": r.error,
+                "payload": r.payload,
+            }
+            for r in rows
+        ],
+    }

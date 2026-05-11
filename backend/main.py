@@ -296,9 +296,11 @@ app.include_router(strategybuilder_router)
 # Strategy module — multi-leg options strategies with risk management
 # (separate from the legacy Strategy Builder above)
 from backend.routers.strategy_module import router as strategy_module_router
+from backend.routers.strategy_webhook import router as strategy_webhook_router
 from backend.strategy.ws import router as strategy_ws_router
 
 app.include_router(strategy_module_router)
+app.include_router(strategy_webhook_router)
 app.include_router(strategy_ws_router)
 
 # Playground — REST + WebSocket tester surfaced at /playground in the SPA.
