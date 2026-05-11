@@ -24,8 +24,10 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from backend.config import get_settings
-from backend.dependencies import get_current_user, get_db
+from backend.dependencies import get_broker_context, get_current_user, get_db, BrokerContext
 from backend.models.strategy_module import SmStrategy
 from backend.models.user import User
 from backend.schemas.strategy_module import (
@@ -35,7 +37,7 @@ from backend.schemas.strategy_module import (
     StrategyOut,
     StrategyUpdate,
 )
-from backend.strategy import repository as repo, symbol_resolver
+from backend.strategy import engine, repository as repo, symbol_resolver
 from backend.strategy.time_utils import format_ist
 
 logger = logging.getLogger(__name__)
@@ -321,3 +323,254 @@ async def list_strikes(
     if not ok:
         raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
     return data
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — lifecycle (start / stop / close_all / per-leg close) + scoped views
+# ---------------------------------------------------------------------------
+
+
+class StartRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: str = Field(..., pattern="^(live|sandbox)$")
+
+
+def _format_order(o) -> dict:
+    return {
+        "id": o.id,
+        "leg_id": o.leg_id,
+        "kind": o.kind,
+        "broker_order_id": o.broker_order_id,
+        "symbol": o.symbol,
+        "exchange": o.exchange,
+        "action": o.action,
+        "qty": o.qty,
+        "pricetype": o.pricetype,
+        "price": float(o.price) if o.price is not None else 0.0,
+        "trigger_price": float(o.trigger_price) if o.trigger_price is not None else 0.0,
+        "status": o.status,
+        "placed_at": format_ist(o.placed_at),
+        "filled_at": format_ist(o.filled_at),
+        "avg_fill_price": float(o.avg_fill_price) if o.avg_fill_price is not None else None,
+        "filled_qty": o.filled_qty,
+        "reject_reason": o.reject_reason,
+    }
+
+
+def _format_run(r) -> dict:
+    return {
+        "id": r.id,
+        "strategy_id": r.strategy_id,
+        "mode": r.mode,
+        "broker": r.broker,
+        "started_at": format_ist(r.started_at),
+        "stopped_at": format_ist(r.stopped_at),
+        "stop_reason": r.stop_reason,
+        "pnl_realized": float(r.pnl_realized) if r.pnl_realized is not None else 0.0,
+        "pnl_peak": float(r.pnl_peak) if r.pnl_peak is not None else 0.0,
+        "pnl_trough": float(r.pnl_trough) if r.pnl_trough is not None else 0.0,
+        "trigger_source": r.trigger_source,
+    }
+
+
+def _format_event(e) -> dict:
+    return {
+        "id": e.id,
+        "run_id": e.run_id,
+        "ts": format_ist(e.ts),
+        "kind": e.kind,
+        "severity": e.severity,
+        "leg_id": e.leg_id,
+        "message": e.message,
+        "payload": e.payload,
+    }
+
+
+@router.post("/{strategy_id}/start")
+async def start_run(
+    strategy_id: int,
+    payload: StartRunRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    broker_ctx: BrokerContext = Depends(get_broker_context),
+):
+    try:
+        strategy = await repo.get_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    if payload.mode == "live" and not strategy.live_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Live mode is not enabled on this strategy. Enable it from "
+                "the detail page after re-authenticating."
+            ),
+        )
+
+    try:
+        run, legs = await engine.start_run(
+            db,
+            strategy=strategy,
+            mode=payload.mode,
+            broker=broker_ctx.broker_name,
+            auth_token=broker_ctx.auth_token,
+            config=broker_ctx.broker_config,
+            trigger_source="manual",
+        )
+    except engine.EngineError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("strategy %d: start_run failed", strategy_id)
+        raise HTTPException(status_code=500, detail="Failed to start run")
+
+    return {
+        "status": "success",
+        "run": _format_run(run),
+        "legs": legs,
+    }
+
+
+@router.post("/{strategy_id}/stop")
+async def stop_run_endpoint(
+    strategy_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    broker_ctx: BrokerContext = Depends(get_broker_context),
+):
+    try:
+        strategy = await repo.get_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    try:
+        result = await engine.stop_run(
+            db,
+            strategy=strategy,
+            stop_reason="manual",
+            auth_token=broker_ctx.auth_token,
+            broker=broker_ctx.broker_name,
+            config=broker_ctx.broker_config,
+        )
+    except engine.EngineError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", **result}
+
+
+@router.post("/{strategy_id}/close_all")
+async def close_all_endpoint(
+    strategy_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    broker_ctx: BrokerContext = Depends(get_broker_context),
+):
+    """Strategy-level Close All — same effect as /stop, but the audit trail
+    differentiates the two (close_all_manual event vs run_stopped event)
+    via the differentiated UI button."""
+    try:
+        strategy = await repo.get_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    try:
+        result = await engine.stop_run(
+            db,
+            strategy=strategy,
+            stop_reason="manual",
+            auth_token=broker_ctx.auth_token,
+            broker=broker_ctx.broker_name,
+            config=broker_ctx.broker_config,
+        )
+    except engine.EngineError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", **result}
+
+
+@router.post("/{strategy_id}/legs/{leg_id}/close")
+async def close_leg_endpoint(
+    strategy_id: int,
+    leg_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    broker_ctx: BrokerContext = Depends(get_broker_context),
+):
+    try:
+        strategy = await repo.get_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    try:
+        result = await engine.close_leg(
+            db,
+            strategy=strategy,
+            leg_id=leg_id,
+            auth_token=broker_ctx.auth_token,
+            broker=broker_ctx.broker_name,
+            config=broker_ctx.broker_config,
+        )
+    except engine.EngineError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", **result}
+
+
+@router.get("/{strategy_id}/orders")
+async def get_strategy_orders(
+    strategy_id: int,
+    run_id: Optional[int] = Query(None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        await repo.get_strategy(db, user_id=user.id, strategy_id=strategy_id)
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    if run_id is not None:
+        orders = await repo.list_orders_for_run(
+            db, user_id=user.id, run_id=run_id,
+        )
+    else:
+        orders = await repo.list_orders_for_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    return {
+        "status": "success",
+        "orders": [_format_order(o) for o in orders],
+    }
+
+
+@router.get("/{strategy_id}/runs")
+async def get_strategy_runs(
+    strategy_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        await repo.get_strategy(db, user_id=user.id, strategy_id=strategy_id)
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    runs = await repo.list_runs(db, user_id=user.id, strategy_id=strategy_id)
+    return {"status": "success", "runs": [_format_run(r) for r in runs]}
+
+
+@router.get("/{strategy_id}/events")
+async def get_strategy_events(
+    strategy_id: int,
+    run_id: Optional[int] = Query(None),
+    limit: int = Query(200, ge=1, le=2000),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        await repo.get_strategy(db, user_id=user.id, strategy_id=strategy_id)
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    events = await repo.list_events_for_strategy(
+        db, user_id=user.id, strategy_id=strategy_id, run_id=run_id, limit=limit,
+    )
+    return {"status": "success", "events": [_format_event(e) for e in events]}
