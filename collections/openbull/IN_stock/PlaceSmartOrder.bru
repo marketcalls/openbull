@@ -1,0 +1,25 @@
+meta {
+  name: PlaceSmartOrder
+  type: http
+  seq: 4
+}
+
+post {
+  url: http://127.0.0.1:8000/api/v1/placesmartorder
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+      "apikey": "",
+      "strategy": "Python",
+      "symbol": "TATAMOTORS",
+      "exchange": "NSE",
+      "action": "SELL",
+      "product": "MIS",
+      "pricetype": "MARKET",
+      "quantity": "1",
+      "position_size": "5"
+  }
+}

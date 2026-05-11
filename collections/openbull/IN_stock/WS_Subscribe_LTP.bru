@@ -1,0 +1,29 @@
+meta {
+  name: Subscribe LTP
+  type: websocket
+  seq: 41
+}
+
+websocket {
+  url: ws://127.0.0.1:8765
+  description: Subscribe to Last Traded Price stream (Mode LTP) — 50ms per-symbol throttle
+}
+
+message:json {
+  {
+    "action": "subscribe",
+    "symbols": [
+      {"symbol": "RELIANCE", "exchange": "NSE"}
+    ],
+    "mode": "LTP"
+  }
+}
+
+docs {
+  LTP mode payload (per tick):
+  - ltp, ltt (Unix seconds), ltq
+  - cp (previous-day close), change, change_percent
+
+  Mode is case-insensitive on the wire. The response ``data`` envelope uses
+  lowercase mode (``"ltp"``). Throttle is per (symbol, exchange) — 50ms.
+}

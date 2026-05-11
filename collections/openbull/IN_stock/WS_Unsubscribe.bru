@@ -1,0 +1,29 @@
+meta {
+  name: Unsubscribe
+  type: websocket
+  seq: 44
+}
+
+websocket {
+  url: ws://127.0.0.1:8765
+  description: Stop streaming the listed symbols at the given mode
+}
+
+message:json {
+  {
+    "action": "unsubscribe",
+    "symbols": [
+      {"symbol": "RELIANCE", "exchange": "NSE"}
+    ],
+    "mode": "QUOTE"
+  }
+}
+
+docs {
+  The proxy only forwards an unsubscribe to the broker once the last client
+  for that (symbol, exchange, mode) tuple has dropped — other clients keep
+  receiving ticks.
+
+  Use the same ``mode`` value you originally subscribed with. To stop a DEPTH
+  subscription, unsubscribe with ``"mode": "DEPTH"``.
+}

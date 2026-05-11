@@ -1,0 +1,22 @@
+meta {
+  name: IVChart
+  type: http
+  seq: 33
+}
+
+post {
+  url: http://127.0.0.1:8000/api/v1/ivchart
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+      "apikey": "",
+      "underlying": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "expiry_date": "28APR26",
+      "interval": "5m",
+      "days": 1
+  }
+}

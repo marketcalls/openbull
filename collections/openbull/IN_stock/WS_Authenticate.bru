@@ -1,0 +1,27 @@
+meta {
+  name: WebSocket Authenticate
+  type: websocket
+  seq: 40
+}
+
+websocket {
+  url: ws://127.0.0.1:8765
+  description: Authenticate with the OpenBull WebSocket proxy using your API key
+}
+
+message:json {
+  {
+    "action": "authenticate",
+    "api_key": ""
+  }
+}
+
+docs {
+  Server responds with:
+  - Success: {"type": "auth", "status": "success", "broker": "upstox"}
+  - Failure: {"type": "auth", "status": "error", "message": "..."}
+
+  Authentication is required before any subscribe / unsubscribe call. The
+  ``broker`` field in the success response is one of upstox / zerodha /
+  angel / dhan / fyers.
+}

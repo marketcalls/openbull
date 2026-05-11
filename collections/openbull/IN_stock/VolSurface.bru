@@ -1,0 +1,21 @@
+meta {
+  name: VolSurface
+  type: http
+  seq: 35
+}
+
+post {
+  url: http://127.0.0.1:8000/api/v1/volsurface
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+      "apikey": "",
+      "underlying": "NIFTY",
+      "exchange": "NSE_INDEX",
+      "expiry_dates": ["28APR26", "05MAY26"],
+      "strike_count": 10
+  }
+}

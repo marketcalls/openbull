@@ -1,0 +1,29 @@
+meta {
+  name: Subscribe Quote
+  type: websocket
+  seq: 42
+}
+
+websocket {
+  url: ws://127.0.0.1:8765
+  description: Subscribe to Quote stream — LTP + OHLC + volume + OI + total buy/sell qty
+}
+
+message:json {
+  {
+    "action": "subscribe",
+    "symbols": [
+      {"symbol": "RELIANCE", "exchange": "NSE"}
+    ],
+    "mode": "QUOTE"
+  }
+}
+
+docs {
+  Quote mode payload adds to LTP:
+  - open / high / low / close (close = prev-day close)
+  - volume, oi (non-zero for F&O), average_price
+  - total_buy_quantity, total_sell_quantity
+
+  Mode hierarchy: subscribing to QUOTE also delivers matching LTP messages.
+}

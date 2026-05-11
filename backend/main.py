@@ -295,6 +295,11 @@ from backend.strategy.ws import router as strategy_ws_router
 app.include_router(strategy_module_router)
 app.include_router(strategy_ws_router)
 
+# Playground — REST + WebSocket tester surfaced at /playground in the SPA.
+from backend.routers.playground import router as playground_router
+
+app.include_router(playground_router)
+
 
 # Health check
 @app.get("/health")
