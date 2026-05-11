@@ -57,7 +57,7 @@ PlaceSmartOrder analyzes the current open position and automatically calculates 
 |-----------|-------------|-------------------|---------------|
 | apikey | Your OpenBull API key | Mandatory | - |
 | strategy | Strategy name | Mandatory | - |
-| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX | Mandatory | - |
+| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX, NCDEX | Mandatory | - |
 | symbol | Trading symbol | Mandatory | - |
 | action | Order action: BUY or SELL | Mandatory | - |
 | product | Product type: MIS, CNC, NRML | Optional | MIS |

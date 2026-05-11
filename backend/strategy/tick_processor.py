@@ -27,8 +27,20 @@ from backend.events.strategy_events import (
     LegTargetHitEvent,
     LegTrailAdvancedEvent,
     LegTrailArmedEvent,
+    LockProfitArmedEvent,
+    LockProfitFloorAdvancedEvent,
+    LockProfitTriggeredEvent,
+    OverallSlHitEvent,
+    OverallTargetHitEvent,
+    TrailToEntryActivatedEvent,
 )
-from backend.strategy import broadcast, repository as repo, risk_evaluator, state as state_module
+from backend.strategy import (
+    broadcast,
+    repository as repo,
+    risk_evaluator,
+    state as state_module,
+    strategy_risk,
+)
 from backend.strategy.time_utils import format_ist, now_utc
 from backend.utils.event_bus import bus
 
@@ -138,20 +150,25 @@ async def _process_tick_for_run(
     if not matched_legs:
         return
 
+    # Load the strategy row once (overall_sl_mtm / overall_target_mtm /
+    # lock_profit / trail_sl_to_entry + per-leg configs) so the tick path
+    # is one DB read instead of N.
+    strategy_row = await _load_strategy_for_run(run_id)
+    if strategy_row is None:
+        return
+
     state_changed = False
     triggered_exits: list[tuple[int, str]] = []  # (leg_id, exit_kind)
+    sl_leg_ids_this_tick: list[int] = []
 
     for lid, leg in matched_legs:
         entry_avg = leg.get("entry_avg")
         if entry_avg is None:
-            # Entry hasn't filled yet — we know the symbol but not the cost
-            # basis. Skip risk eval; just record the LTP.
             leg["ltp"] = ltp
             state_changed = True
             continue
 
-        # Reach into the strategy config for SL/Target/Trail values.
-        leg_config = await _load_leg_config(state["run_id"], int(lid))
+        leg_config = _find_leg_config(strategy_row.legs or [], int(lid))
         outcome = risk_evaluator.evaluate_leg(
             position=leg.get("position"),
             qty=int(leg.get("qty") or 0),
@@ -181,28 +198,85 @@ async def _process_tick_for_run(
             )
             if outcome.triggered == "sl":
                 triggered_exits.append((int(lid), "exit_sl"))
+                sl_leg_ids_this_tick.append(int(lid))
             elif outcome.triggered == "target":
                 triggered_exits.append((int(lid), "exit_target"))
-            # trail_armed / trail_advanced don't exit — they only update the
-            # effective SL. The exit fires when the SL is breached on a later tick.
+
+    # ---- Cross-cutting: Trail-SL-to-entry ----
+    # When a leg's SL fires AND the strategy has trail_sl_to_entry enabled,
+    # snap every other open leg's effective SL to its entry price. Overall
+    # SL is bypassed for the rest of the run.
+    if (
+        sl_leg_ids_this_tick
+        and strategy_row.trail_sl_to_entry
+        and not state.get("trail_to_entry_active")
+    ):
+        moved_total = 0
+        for sl_leg_id in sl_leg_ids_this_tick:
+            moved_total += strategy_risk.apply_trail_to_entry(
+                state.get("legs") or {}, sl_leg_id,
+            )
+        if moved_total > 0:
+            state["trail_to_entry_active"] = True
+            triggering = sl_leg_ids_this_tick[0]
+            bus.publish(TrailToEntryActivatedEvent(
+                user_id=strategy_row.user_id,
+                strategy_id=strategy_row.id,
+                run_id=run_id,
+                leg_id=triggering,
+                severity="warn",
+                message=(
+                    f"Trail-SL-to-entry activated by leg {triggering} SL hit; "
+                    f"moved {moved_total} leg(s) to entry. Overall SL bypassed."
+                ),
+                payload={"trigger_leg_id": triggering, "moved_legs": moved_total},
+            ))
 
     # Re-aggregate strategy-level P&L now that legs updated.
     realized, unrealized, total = risk_evaluator.compute_strategy_mtm(state["legs"])
     state["pnl_realized"] = realized
     state["pnl_unrealized"] = unrealized
     state["pnl_total"] = total
-    if total > state.get("pnl_peak", 0.0):
-        state["pnl_peak"] = total
-    if total < state.get("pnl_trough", 0.0):
-        state["pnl_trough"] = total
 
-    if state_changed:
+    # ---- Strategy-level rule layer (lock-profit + overall SL/target) ----
+    outcome = strategy_risk.evaluate_strategy(
+        pnl_realized=realized,
+        pnl_unrealized=unrealized,
+        prior_pnl_peak=float(state.get("pnl_peak") or 0.0),
+        prior_pnl_trough=float(state.get("pnl_trough") or 0.0),
+        lock_armed=bool(state.get("lock_armed") or False),
+        lock_floor=state.get("lock_floor"),
+        trail_to_entry_active=bool(state.get("trail_to_entry_active") or False),
+        overall_sl_mtm=float(strategy_row.overall_sl_mtm) if strategy_row.overall_sl_mtm is not None else None,
+        overall_target_mtm=float(strategy_row.overall_target_mtm) if strategy_row.overall_target_mtm is not None else None,
+        lock_profit_cfg=strategy_row.lock_profit,
+    )
+    state["pnl_peak"] = outcome.pnl_peak
+    state["pnl_trough"] = outcome.pnl_trough
+    state["lock_armed"] = outcome.lock_armed
+    state["lock_floor"] = outcome.lock_floor
+
+    for ev in outcome.events:
+        _publish_strategy_event(
+            user_id=strategy_row.user_id,
+            strategy_id=strategy_row.id,
+            run_id=run_id,
+            event=ev,
+        )
+
+    if state_changed or outcome.events:
         await state_module.hydrate_run_state(run_id, state)
         _broadcast_delta(run_id, state, exchange, symbol, ltp)
 
-    # Place exits AFTER state is flushed so the audit trail is in order.
+    # ---- Dispatch exits ----
+    # Per-leg first (preserves audit ordering — leg event before run stop).
     for leg_id, exit_kind in triggered_exits:
         await _trigger_exit(run_id, leg_id, exit_kind)
+
+    # If a strategy-level rule triggered, close every still-open leg via
+    # engine.stop_run and finalize the run with the right stop_reason.
+    if outcome.stop_reason:
+        await _trigger_run_stop(run_id, outcome.stop_reason)
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +284,11 @@ async def _process_tick_for_run(
 # ---------------------------------------------------------------------------
 
 
-async def _load_leg_config(run_id: int, leg_id: int) -> dict[str, Any]:
-    """Fetch the leg's risk-rule config from the strategy row.
+async def _load_strategy_for_run(run_id: int):
+    """One DB read per tick — returns the full SmStrategy row.
 
-    Cached lookup would be a Phase 7 optimization; for Phase 6 the DB hit
-    per tick per matched leg is acceptable (multi-leg strategies have a
-    handful of legs per symbol).
+    Replaces the per-leg lookup in Phase 6. Phase 7+ may cache this in
+    Redis with a short TTL if the per-tick cost surfaces in profiling.
     """
     from sqlalchemy import select
     from backend.models.strategy_module import SmStrategy, SmStrategyRun
@@ -226,13 +299,42 @@ async def _load_leg_config(run_id: int, leg_id: int) -> dict[str, Any]:
             .join(SmStrategyRun, SmStrategyRun.strategy_id == SmStrategy.id)
             .where(SmStrategyRun.id == run_id)
         )
-        strategy = (await db.execute(stmt)).scalar_one_or_none()
-        if strategy is None:
-            return {}
-        for leg in strategy.legs or []:
-            if int(leg.get("id", -1)) == leg_id:
-                return leg
-        return {}
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+
+def _find_leg_config(legs: list[dict[str, Any]], leg_id: int) -> dict[str, Any]:
+    """Find one leg's config in the strategy.legs jsonb array."""
+    for leg in legs:
+        if int(leg.get("id", -1)) == leg_id:
+            return leg
+    return {}
+
+
+def _publish_strategy_event(
+    *, user_id: int, strategy_id: int, run_id: int, event: dict[str, Any],
+) -> None:
+    """Translate a strategy_risk outcome event to a typed bus event."""
+    kind = event["kind"]
+    common = {
+        "user_id": user_id,
+        "strategy_id": strategy_id,
+        "run_id": run_id,
+        "severity": event.get("severity") or "info",
+        "message": event.get("message") or "",
+        "payload": event.get("payload") or {},
+    }
+    if kind == "lock_profit_armed":
+        bus.publish(LockProfitArmedEvent(**common))
+    elif kind == "lock_profit_floor_advanced":
+        bus.publish(LockProfitFloorAdvancedEvent(**common))
+    elif kind == "lock_profit_triggered":
+        bus.publish(LockProfitTriggeredEvent(**common))
+    elif kind == "overall_sl_hit":
+        bus.publish(OverallSlHitEvent(**common))
+    elif kind == "overall_target_hit":
+        bus.publish(OverallTargetHitEvent(**common))
+    else:
+        logger.warning("Unknown strategy-risk event kind: %s", kind)
 
 
 async def _publish_risk_event(
@@ -326,7 +428,6 @@ async def _trigger_exit(run_id: int, leg_id: int, exit_kind: str) -> None:
     """Engine fires an exit when a leg's rule hits."""
     from backend.strategy import engine
 
-    from sqlalchemy import select
     from backend.models.strategy_module import SmStrategy, SmStrategyRun
 
     async with async_session() as db:
@@ -347,3 +448,39 @@ async def _trigger_exit(run_id: int, leg_id: int, exit_kind: str) -> None:
             )
         except Exception:
             logger.exception("Auto-exit failed for run %d leg %d", run_id, leg_id)
+
+
+async def _trigger_run_stop(run_id: int, stop_reason: str) -> None:
+    """Strategy-level rule fired — square off remaining legs and finalize.
+
+    Routes through ``engine.stop_run`` so the lifecycle bookkeeping (state
+    cleanup, tick-feed unsubscribe, finalize_run event) is identical to a
+    manual /stop. Already-closed legs are skipped by the Phase 4
+    'already closed' guard in ``engine._exit_legs``.
+    """
+    from backend.strategy import engine
+
+    from backend.models.strategy_module import SmStrategy
+
+    async with async_session() as db:
+        # Resolve strategy via the run row (mirrors stop_run's own lookup).
+        from backend.models.strategy_module import SmStrategyRun
+        run = await db.get(SmStrategyRun, run_id)
+        if run is None or run.stopped_at is not None:
+            return
+        strategy = await db.get(SmStrategy, run.strategy_id)
+        if strategy is None or strategy.status != "running":
+            return
+        try:
+            await engine.stop_run(
+                db,
+                strategy=strategy,
+                stop_reason=stop_reason,
+                auth_token=None,
+                broker=run.broker,
+                config=None,
+            )
+        except Exception:
+            logger.exception(
+                "Auto-stop_run failed for run %d (reason=%s)", run_id, stop_reason,
+            )

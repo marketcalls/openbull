@@ -61,7 +61,7 @@ POST http://127.0.0.1:8000/api/v1/history
 |-----------|-------------|-------------------|---------------|
 | apikey | Your OpenBull API key | Mandatory | - |
 | symbol | Trading symbol | Mandatory | - |
-| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX | Mandatory | - |
+| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX, NCDEX, NSE_INDEX, BSE_INDEX, MCX_INDEX | Mandatory | - |
 | interval | Time interval (see below) | Mandatory | - |
 | start_date | Start date (YYYY-MM-DD) | Mandatory | - |
 | end_date | End date (YYYY-MM-DD) | Mandatory | - |

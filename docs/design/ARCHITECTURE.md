@@ -1,5 +1,13 @@
 # OpenBull Architecture
 
+| Field | Value |
+|---|---|
+| **Last updated** | 2026-05-11 |
+| **Owner** | Platform team |
+| **Status** | Stable — describes shipped behaviour. In-flight Strategy Module is called out in its own section. |
+| **Source of truth** | `backend/main.py` (lifespan + middleware order); per-module file paths listed in each section |
+| **Change history** | [docs/CHANGELOG.md](../CHANGELOG.md) |
+
 ## System Overview
 
 ```
@@ -87,7 +95,8 @@ openbull/
 │   │   ├── settings.py              # app_settings (trading_mode, sandbox_config)
 │   │   ├── symbol.py                # symtoken master contract
 │   │   ├── sandbox.py               # sandbox_orders/trades/positions/funds/holdings
-│   │   └── strategies.py            # saved multi-leg option strategies (JSONB legs)
+│   │   ├── strategies.py            # saved multi-leg option strategies (JSONB legs)
+│   │   └── strategy_module.py       # strategy-module schema (in-flight feature)
 │   ├── schemas/                     # Pydantic request/response
 │   ├── routers/                     # Web routes (JWT cookie auth)
 │   │   ├── auth.py, broker_config.py, broker_oauth.py
@@ -99,7 +108,8 @@ openbull/
 │   │   ├── trading_mode.py          # GET/PUT live|sandbox toggle
 │   │   ├── sandbox.py               # /sandbox config + reset
 │   │   ├── strategies.py            # /web/strategies CRUD
-│   │   └── strategybuilder.py       # /web/strategybuilder/{snapshot,chart}
+│   │   ├── strategybuilder.py       # /web/strategybuilder/{snapshot,chart,multi-strike-oi}
+│   │   └── strategy_module.py       # /web/strategy/* (in-flight feature)
 │   ├── api/                         # External API (/api/v1, API key auth)
 │   │   ├── place_order.py, basket_order.py, split_order.py
 │   │   ├── orderbook.py, tradebook.py, positions.py, holdings.py
@@ -147,14 +157,27 @@ openbull/
 │   │   ├── scheduler.py             # IST-aware single daemon
 │   │   ├── quote_helper.py          # Pulls LTP from MarketDataCache
 │   │   └── symbol_info.py
-│   ├── broker/                      # Plug-and-play broker plugins
-│   │   ├── upstox/{api,mapping,streaming,database}/  + plugin.json
-│   │   └── zerodha/{api,mapping,streaming,database}/ + plugin.json
+│   ├── broker/                      # Plug-and-play broker plugins (5 today)
+│   │   ├── upstox/{api,mapping,streaming,database}/   + plugin.json
+│   │   ├── zerodha/{api,mapping,streaming,database}/  + plugin.json
+│   │   ├── angel/{api,mapping,streaming,database}/    + plugin.json
+│   │   ├── dhan/{api,mapping,streaming,database}/     + plugin.json
+│   │   └── fyers/{api,mapping,streaming,database}/    + plugin.json
 │   ├── websocket_proxy/             # Unified WS proxy server
 │   │   ├── server.py                # Client handling, ZMQ listener,
-│   │   │                            #   forwards every tick to MarketDataCache
+│   │   │                            #   forwards every tick to MarketDataCache,
+│   │   │                            #   _create_adapter() per-broker factory
 │   │   ├── base_adapter.py          # Abstract broker adapter
 │   │   └── auth.py                  # Standalone API-key verification
+│   ├── strategy/                    # Strategy-module foundation (in-flight)
+│   │   ├── repository.py            # CRUD over multi-leg strategies
+│   │   ├── symbol_resolver.py       # Strike picker / leg-symbol resolution
+│   │   ├── security.py              # Per-strategy webhook-token verification
+│   │   └── time_utils.py            # IST-aware schedule helpers
+│   ├── events/                      # In-process pub/sub event bus
+│   │   └── strategy_events.py
+│   ├── subscribers/                 # Event-bus consumers
+│   │   └── strategy_audit_subscriber.py  # Writes to audit table on publish
 │   ├── utils/
 │   │   ├── plugin_loader.py
 │   │   ├── constants.py
@@ -202,7 +225,7 @@ openbull/
 │   │       ├── utils.ts
 │   │       ├── black76.ts                       # Pure-TS Black-76 + payoff math
 │   │       ├── probabilityOfProfit.ts           # Lognormal POP integrator
-│   │       └── strategyTemplates.ts             # 14-template registry
+│   │       └── strategyTemplates.ts             # 30-template registry
 ├── collections/                     # Bruno API collection
 ├── docs/
 ├── logs/                            # Runtime: openbull.log, openbull-error.log
@@ -306,7 +329,7 @@ Two fill triggers, one fill function:
 
 A separate IST-aware scheduler thread fires:
 
-- per-bucket auto squareoff (NSE/NFO/BSE/BFO 15:15, CDS 17:00, MCX 23:30 by default),
+- per-bucket auto squareoff (NSE/NFO/BSE/BFO 15:15, CDS 16:45, MCX 23:30 by default),
 - T+1 CNC->holdings settlement and EOD P&L snapshot at 23:55,
 - daily `today_realized_pnl` zeroing at 00:00 and an expired-F&O-position close,
 - optional weekly reset of the simulated book.
@@ -602,3 +625,17 @@ Saved strategies hit `POST /web/strategies`; basket execute fires `POST /api/v1/
 **Multi-Strike OI service** — `backend/services/multi_strike_oi_service.py` mirrors the `strategy_chart_service` pattern but extracts the broker-reported `oi` field instead of `close`. Per-leg history is fetched in parallel (deduped by symbol+exchange), trading window cap matches the chart endpoint. `has_oi` flag set when any candle has nonzero OI.
 
 `ErrorBoundary` wraps each chart panel so a render error doesn't unmount the whole page — local Retry button instead.
+
+## Event Bus & Audit Trail
+
+`backend/events/` is a tiny in-process pub/sub layer used for cross-cutting concerns that should not couple service-to-service. Today it carries strategy-module events (`strategy.created`, `strategy.activated`, `strategy.paused`, `strategy.deleted`, etc.); future telemetry sinks (telegram, slack, analytics export) hook the same channel.
+
+`backend/subscribers/` registers consumers at startup via `register_all()`. The shipped consumer is `strategy_audit_subscriber`, which writes a row to the `audit` table on every publish — immutable change history per strategy with `user_id`, `event`, `payload`, and `created_at`.
+
+Registration runs *after* the tables are created but *before* plugin load and the symbol cache hydrate (`main.py` lifespan), so any publish during startup persists.
+
+## Strategy Module (in-flight)
+
+A separate workstream under `backend/strategy/` and `backend/routers/strategy_module.py` is building server-side multi-leg strategies with risk management, scheduled entry/exit, and webhook triggers. Distinct from the existing Strategy Builder + Portfolio pair (which is client-side authoring + manual basket execution).
+
+Currently merged: schema, CRUD, symbol resolver, helper endpoints, strike picker (phases 1–3 in [`docs/plan/strategy-module.md`](../plan/strategy-module.md)). The execution engine and order-dispatch layers are work in progress and not yet wired through the API; the router is mounted but exposes only the read/write surface. Treat the runtime side as not-yet-shipped.

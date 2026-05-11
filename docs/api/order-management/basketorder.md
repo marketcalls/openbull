@@ -68,7 +68,7 @@ POST http://127.0.0.1:8000/api/v1/basketorder
 | Parameter | Description | Mandatory/Optional | Default Value |
 |-----------|-------------|-------------------|---------------|
 | symbol | Trading symbol | Mandatory | - |
-| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX | Mandatory | - |
+| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX, NCDEX | Mandatory | - |
 | action | Order action: BUY or SELL | Mandatory | - |
 | quantity | Order quantity | Mandatory | - |
 | pricetype | Price type: MARKET, LIMIT, SL, SL-M | Mandatory | - |
@@ -94,14 +94,15 @@ POST http://127.0.0.1:8000/api/v1/basketorder
 
 ## Notes
 
-- Orders are executed **concurrently** using a thread pool for faster execution
-- If some orders fail, others still execute (partial success possible)
-- Each order in the basket is independent
-- Maximum orders per basket depends on broker limits
+- **BUY-before-SELL ordering is enforced server-side.** All BUY legs are placed first (concurrently via a thread pool), then all SELL legs — this frees up margin from the BUY purchases before the SELLs hit, important for credit spreads and multi-leg option strategies that would otherwise be margin-blocked.
+- Within each BUY / SELL batch, orders fire **concurrently** via `ThreadPoolExecutor` — the basket completes in roughly the time of one slow broker call, not N × that.
+- Each order is independent — if some fail, others still complete. The response always carries `status: "success"` at the envelope level; per-order outcomes are in `results[]`.
+- **Sandbox mode** — when the global trading mode is `sandbox`, every leg is dispatched to the simulator sequentially (no concurrency — sandbox is a local DB write, not a network call) but in the same BUY-then-SELL order.
+- Maximum orders per basket depends on broker limits.
 - Use for:
-  - **Portfolio rebalancing**: Buy/sell multiple stocks together
-  - **Pair trading**: Simultaneous long/short positions
-  - **Index tracking**: Replicating index constituents
+  - **Portfolio rebalancing**: Buy/sell multiple stocks together.
+  - **Pair trading**: Simultaneous long/short positions.
+  - **Multi-leg option strategies**: Execute Iron Condor / Butterfly / Strangle as a single call. (The Strategy Builder's "Execute Basket" button uses this endpoint.)
 
 ## Example Use Cases
 

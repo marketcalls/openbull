@@ -242,7 +242,7 @@ Tick payload schema (every adapter must produce this):
 
 For QUOTE add `open / high / low / close / volume / oi / atp / total_buy_qty / total_sell_qty`. For DEPTH add `bids` / `asks` arrays of 5 levels each.
 
-The streaming adapter is registered with the WS proxy in `backend/websocket_proxy/proxy_server.py` — add the new broker name to the `_BROKER_ADAPTERS` map.
+The streaming adapter is registered with the WS proxy in `backend/websocket_proxy/server.py` — add the new broker name to the `_create_adapter()` factory function (one `elif` branch per broker).
 
 ### 9. Register the broker
 

@@ -44,7 +44,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 372.15,
         "volume": 1456200,
         "oi": 987650,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       },
       "pe": {
@@ -59,7 +59,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 218.90,
         "volume": 1890400,
         "oi": 1123400,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       }
     },
@@ -77,7 +77,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 342.70,
         "volume": 1678900,
         "oi": 876500,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       },
       "pe": {
@@ -92,7 +92,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 235.60,
         "volume": 2012300,
         "oi": 1245600,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       }
     },
@@ -110,7 +110,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 315.40,
         "volume": 2345600,
         "oi": 1098700,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       },
       "pe": {
@@ -125,7 +125,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 260.50,
         "volume": 2567800,
         "oi": 1456300,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       }
     },
@@ -143,7 +143,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 297.40,
         "volume": 3254650,
         "oi": 1245800,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       },
       "pe": {
@@ -158,7 +158,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 305.80,
         "volume": 2876400,
         "oi": 1123500,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       }
     },
@@ -176,7 +176,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 272.80,
         "volume": 2890100,
         "oi": 1345600,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       },
       "pe": {
@@ -191,7 +191,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 328.50,
         "volume": 2123400,
         "oi": 1098700,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       }
     },
@@ -209,7 +209,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 245.60,
         "volume": 2456700,
         "oi": 1567800,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       },
       "pe": {
@@ -224,7 +224,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 355.20,
         "volume": 1876500,
         "oi": 987600,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       }
     },
@@ -242,7 +242,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 220.40,
         "volume": 2123400,
         "oi": 1678900,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       },
       "pe": {
@@ -257,7 +257,7 @@ POST http://127.0.0.1:8000/api/v1/optionchain
         "prev_close": 382.80,
         "volume": 1567800,
         "oi": 876500,
-        "lotsize": 65,
+        "lotsize": 75,
         "tick_size": 0.05
       }
     }
@@ -270,10 +270,10 @@ POST http://127.0.0.1:8000/api/v1/optionchain
 | Parameter | Description | Mandatory/Optional | Default Value |
 |-----------|-------------|-------------------|---------------|
 | apikey | Your OpenBull API key | Mandatory | - |
-| underlying | Underlying symbol (NIFTY, BANKNIFTY, SENSEX) | Mandatory | - |
-| exchange | Exchange: NSE_INDEX, BSE_INDEX | Mandatory | - |
-| expiry_date | Expiry date in DDMMMYY format | Mandatory | - |
-| strike_count | Number of strikes above and below ATM | Optional | All strikes |
+| underlying | Underlying symbol (`NIFTY`, `BANKNIFTY`, `SENSEX`, `CRUDEOIL`, …) | Mandatory | - |
+| exchange | Underlying exchange: `NSE_INDEX`, `BSE_INDEX`, `MCX_INDEX`, or `NFO`/`BFO`/`MCX` for stock-option underlyings | Mandatory | - |
+| expiry_date | Expiry in `DDMMMYY` format (`28APR26`). Optional — defaults to the nearest expiry for the underlying. | Optional | nearest expiry |
+| strike_count | Number of strikes either side of ATM. Pass an integer or the string `"all"` to request every strike. Invalid values return HTTP 400. | Optional | `10` |
 
 ## Response Fields
 
@@ -314,12 +314,12 @@ POST http://127.0.0.1:8000/api/v1/optionchain
 
 ## Notes
 
-- With **strike_count** of 3, returns 7 strikes (3 below ATM + ATM + 3 above ATM)
-- Without **strike_count**, returns the **entire option chain** for the expiry
-- The **label** field indicates whether the option is ATM, ITM, or OTM
-- For CE options: strikes below ATM are ITM, above are OTM
-- For PE options: strikes above ATM are ITM, below are OTM
-- Use this for **options analysis** and **strategy selection**
+- With `strike_count` of `3`, returns 7 strikes (3 below ATM + ATM + 3 above ATM).
+- Without `strike_count`, returns **10 strikes either side of ATM** (the default). Pass `"strike_count": "all"` to return the entire chain for the expiry.
+- The `label` field indicates whether the option is ATM, ITM, or OTM.
+- For CE options: strikes below ATM are ITM, above are OTM.
+- For PE options: strikes above ATM are ITM, below are OTM.
+- The page at `/tools/optionchain` consumes this endpoint and overlays live LTP via WebSocket on top of the snapshot.
 
 ## Use Cases
 

@@ -75,7 +75,7 @@ POST http://127.0.0.1:8000/api/v1/placeorder
 | strategy | Strategy identifier for tracking | Mandatory | - |
 | symbol | Trading symbol (e.g., RELIANCE, NIFTY28APR26FUT) | Mandatory | - |
 | action | Order action: BUY or SELL | Mandatory | - |
-| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX | Mandatory | - |
+| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX, NCDEX | Mandatory | - |
 | pricetype | Price type: MARKET, LIMIT, SL, SL-M | Mandatory | - |
 | product | Product type: MIS, CNC, NRML | Mandatory | - |
 | quantity | Order quantity | Mandatory | - |

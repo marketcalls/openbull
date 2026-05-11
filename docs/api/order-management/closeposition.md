@@ -1,6 +1,6 @@
 # ClosePosition
 
-Close all open positions. Optionally filter by strategy to close only positions belonging to a specific strategy.
+Square off every open position across the account with broker-side MARKET orders.
 
 ## Endpoint URL
 
@@ -19,10 +19,20 @@ POST http://127.0.0.1:8000/api/v1/closeposition
 
 ## Sample API Response
 
+When at least one position was closed:
+
 ```json
 {
   "status": "success",
-  "message": "All positions closed"
+  "message": "All Open Positions SquaredOff"
+}
+```
+
+When the account had no open positions:
+
+```json
+{
+  "message": "No Open Positions Found"
 }
 ```
 
@@ -31,23 +41,29 @@ POST http://127.0.0.1:8000/api/v1/closeposition
 | Parameter | Description | Mandatory/Optional | Default Value |
 |-----------|-------------|-------------------|---------------|
 | apikey | Your OpenBull API key | Mandatory | - |
-| strategy | Strategy identifier (filters positions to close) | Optional | - |
+| strategy | Strategy identifier — accepted for OpenAlgo SDK parity, currently **ignored** by the close-positions logic | Optional | - |
 
 ## Response Fields
 
+The exact shape comes from the broker plugin's `close_all_positions(api_key, auth_token)` and varies slightly per broker. The common fields are:
+
 | Field | Type | Description |
 |-------|------|-------------|
-| status | string | "success" or "error" |
-| message | string | Confirmation or error message |
+| status | string | `"success"` when at least one position was squared off; omitted when no positions were found. |
+| message | string | Human-readable status — `"All Open Positions SquaredOff"`, `"No Open Positions Found"`, or an error description. |
+
+## Behavior
+
+- Closes **every** open position regardless of the `strategy` tag — the field is accepted in the request body for client-SDK compatibility but is not used as a filter in `backend/services/order_service.py::close_all_positions_service`.
+- Each open position is closed with a MARKET order tagged `strategy="Squareoff"`. Long positions get a SELL, shorts get a BUY, both at the current open quantity.
+- The product code on each squareoff order matches the original position (`MIS`/`CNC`/`NRML` preserved).
+- Individual broker failures on a per-position close don't stop the loop — other positions continue closing. The aggregate success/failure is summarised in the response message.
+- **Sandbox mode** — when the global trading mode is `sandbox`, the call is dispatched to the simulator (`backend/sandbox`) and only flattens simulated positions; the live broker is not contacted.
 
 ## Notes
 
-- If **strategy** is provided, only positions opened with that strategy tag are closed
-- If **strategy** is omitted, **all** open positions are closed
-- Positions are closed using **MARKET** orders for immediate execution
-- Long positions are closed with SELL orders, short positions with BUY orders
-- The quantity is automatically set to the current open position size
-- Use with caution as this can close positions across all strategies if no filter is applied
+- Closing uses **MARKET** orders for immediate execution — be aware of slippage on illiquid contracts.
+- For a single-symbol close, place an opposite-direction order via [PlaceOrder](./placeorder.md) instead.
 
 ---
 

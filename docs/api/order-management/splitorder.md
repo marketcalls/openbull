@@ -79,7 +79,7 @@ POST http://127.0.0.1:8000/api/v1/splitorder
 | apikey | Your OpenBull API key | Mandatory | - |
 | strategy | Strategy identifier | Optional | - |
 | symbol | Trading symbol | Mandatory | - |
-| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX | Mandatory | - |
+| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX, NCDEX | Mandatory | - |
 | action | Order action: BUY or SELL | Mandatory | - |
 | quantity | Total quantity to split | Mandatory | - |
 | splitsize | Size of each split order | Mandatory | - |

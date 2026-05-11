@@ -1,5 +1,14 @@
 # Services Layer Documentation
 
+| Field | Value |
+|---|---|
+| **Last updated** | 2026-05-11 |
+| **Owner** | Platform team |
+| **Status** | Stable — line numbers verified against `backend/services/` |
+| **Source of truth** | `backend/services/*.py` |
+| **Change history** | [docs/CHANGELOG.md](../CHANGELOG.md) |
+| **Line-number drift policy** | Line numbers in this doc are advisory. File paths are canonical. If you find a drift, update both the doc and `CHANGELOG.md`. |
+
 ## Overview
 
 The services layer (`backend/services/`) contains all of OpenBull's business logic. FastAPI endpoints are thin handlers that resolve auth (via the `get_api_user(request, db)` dependency), parse the request body, call a service function, and return its response. Services are broker-agnostic — they use `importlib.import_module(f"backend.broker.{broker_name}.api.{module}")` to dynamically load the correct broker plugin.
@@ -64,8 +73,11 @@ Unlike the OpenAlgo SDK, OpenBull services do **not** accept an `api_key` parame
     - [SaveStrategy / List / Get / Update / Delete](#savestrategy--list--get--update--delete)
     - [StrategySnapshot](#strategysnapshot)
     - [StrategyChart](#strategychart)
+    - [MultiStrikeOI](#multistrikeoi)
 11. [Market Data Cache](#market-data-cache)
 12. [Common Patterns](#common-patterns)
+
+> **Out of scope here:** the in-flight **Strategy Module** (`backend/strategy/*`, `backend/routers/strategy_module.py`) — phases 1–3 are merged (schema, CRUD, symbol resolver, helper endpoints, strike picker) but the execution engine and order-dispatch layers are work in progress. The runtime service surface will be documented in this file once that lands. See [`docs/plan/strategy-module.md`](../plan/strategy-module.md) for the design plan and [Strategy Builder & Portfolio](#strategy-builder--portfolio) below for the separate, currently-shipped multi-leg surface.
 
 ---
 
@@ -377,7 +389,7 @@ Place multiple orders concurrently. BUY legs are dispatched before SELL legs so 
 
 **Function:** `place_basket_order(basket_data, auth_token, broker, config=None)`
 
-**Location:** `backend/services/basket_order_service.py:79`
+**Location:** `backend/services/basket_order_service.py:106`
 
 **Basket Data Fields:**
 
@@ -1410,8 +1422,8 @@ The two public entry points mirror OpenAlgo's surface:
 
 **Locations:**
 
-- `backend/services/option_greeks_service.py:260` (`calculate_greeks`)
-- `backend/services/option_greeks_service.py:338` (`get_option_greeks`)
+- `backend/services/option_greeks_service.py:272` (`calculate_greeks`)
+- `backend/services/option_greeks_service.py:350` (`get_option_greeks`)
 
 **Parameters (`get_option_greeks`):**
 
@@ -1641,7 +1653,7 @@ The candidate with smallest `total_pain` is the Max Pain strike.
 
 **Function:** `get_max_pain_data(underlying, exchange, expiry_date, auth_token, broker, config=None)`
 
-**Location:** `backend/services/max_pain_service.py:63`
+**Location:** `backend/services/max_pain_service.py:66`
 
 **Example:**
 
@@ -2156,7 +2168,7 @@ Single-shot live pricing for a leg set: spot + per-leg LTP + IV + Greeks + posit
 
 **Function:** `get_strategy_snapshot(legs, underlying, exchange, auth_token, broker, config=None, options_exchange=None, interest_rate=None, expiry_time=None)`
 
-**Location:** `backend/services/strategy_builder_service.py:97`
+**Location:** `backend/services/strategy_builder_service.py:100`
 
 **Endpoint:** `POST /web/strategybuilder/snapshot`
 
@@ -2182,7 +2194,7 @@ Single-shot live pricing for a leg set: spot + per-leg LTP + IV + Greeks + posit
 | `exchange` | str | No | Per-leg exchange override (rare; default = `options_exchange`). |
 | `entry_price` | float | No | Supplying this turns on `unrealized_pnl` per leg and in totals. |
 
-**How it works (lines 97-263):**
+**How it works (lines 100-266):**
 
 1. Validate every leg's basic shape up front so we never fan out a partial fetch.
 2. Fetch the underlying spot via `get_quotes_with_auth(underlying, spot_exchange)` — one broker call.
@@ -2263,7 +2275,7 @@ Historical combined-premium time series for an arbitrary leg list — generalise
 
 **Function:** `get_strategy_chart_data(legs, underlying, exchange, interval, auth_token, broker, config=None, options_exchange=None, days=5, include_underlying=True)`
 
-**Location:** `backend/services/strategy_chart_service.py:67`
+**Location:** `backend/services/strategy_chart_service.py:98`
 
 **Endpoint:** `POST /web/strategybuilder/chart`
 
@@ -2279,7 +2291,7 @@ Historical combined-premium time series for an arbitrary leg list — generalise
 | `include_underlying` | bool | No | Set false to skip the underlying overlay fetch. |
 | `legs` | array | Yes | Same `ChartLeg` shape as `SnapshotLeg`. |
 
-**How it works (lines 67-228):**
+**How it works (lines 98-260):**
 
 1. Validate leg shape; reject empties so we never fan out a partial fetch.
 2. Calendar window: `today − (days × 2 + 2)` so a 1-day request still finds Friday's session on a Monday morning.

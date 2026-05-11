@@ -1,6 +1,6 @@
 # OptionSymbol
 
-Resolve an option symbol from an underlying, expiry date, offset (ATM/ITM/OTM), and option type. Returns the exact trading symbol and lot size without placing an order.
+Resolve an option's exact OpenBull trading symbol from `(underlying, expiry, offset, option_type)`. Useful for SDK callers that want to pick "ATM call this expiry" without having to walk the chain themselves.
 
 ## Endpoint URL
 
@@ -27,14 +27,12 @@ POST http://127.0.0.1:8000/api/v1/optionsymbol
 {
   "status": "success",
   "symbol": "NIFTY28APR2624250CE",
-  "underlying": "NIFTY",
   "exchange": "NFO",
-  "offset": "ATM",
-  "option_type": "CE",
   "strike": 24250.0,
-  "expiry_date": "28APR26",
-  "underlying_ltp": 24231.30,
-  "lotsize": 65
+  "expiry": "28-APR-26",
+  "lotsize": 75,
+  "tick_size": 0.05,
+  "underlying_ltp": 24231.30
 }
 ```
 
@@ -43,48 +41,44 @@ POST http://127.0.0.1:8000/api/v1/optionsymbol
 | Parameter | Description | Mandatory/Optional | Default Value |
 |-----------|-------------|-------------------|---------------|
 | apikey | Your OpenBull API key | Mandatory | - |
-| underlying | Underlying symbol (NIFTY, BANKNIFTY, etc.) | Mandatory | - |
-| exchange | Exchange: NSE_INDEX, BSE_INDEX | Mandatory | - |
-| expiry_date | Expiry date in DDMMMYY format (e.g., 28APR26) | Mandatory | - |
-| offset | Strike offset: ATM, ITM1-ITM50, OTM1-OTM50 | Mandatory | - |
-| option_type | Option type: CE or PE | Mandatory | - |
+| underlying | Underlying — base ticker (`NIFTY`) or futures-style with embedded expiry (`NIFTY28APR26FUT`) | Mandatory | - |
+| exchange | Spot / quote exchange. Common values: `NSE_INDEX`, `BSE_INDEX`, `MCX_INDEX`, `NFO`, `BFO`, `MCX`, `CDS` | Mandatory | - |
+| expiry_date | Expiry in `DDMMMYY` (`28APR26`). Optional only when embedded in `underlying`. | Conditional | - |
+| offset | Strike offset — `ATM`, `ITM1`…`ITM50`, `OTM1`…`OTM50` | Mandatory | - |
+| option_type | `CE` or `PE` | Mandatory | - |
+
+An expiry that resolves to no strikes returns HTTP 404 `{"status": "error", "message": "No strikes found for ..."}`. An out-of-range offset returns HTTP 400. A symbol the master-contract doesn't know returns HTTP 404 `{"status": "error", "message": "Option <SYM> not found on <EXCH>."}`.
 
 ## Response Fields
 
+The success response is **flat** (no `data` wrapper) — fields are placed directly on the response object.
+
 | Field | Type | Description |
 |-------|------|-------------|
-| status | string | "success" or "error" |
-| symbol | string | Resolved option trading symbol |
-| underlying | string | Underlying symbol |
-| exchange | string | Exchange where the option trades (NFO/BFO) |
-| offset | string | Offset used for resolution |
-| option_type | string | CE or PE |
+| status | string | `"success"` |
+| symbol | string | Resolved OpenBull option symbol (e.g. `NIFTY28APR2624250CE`) |
+| exchange | string | Resolved options exchange (`NFO` for `NSE_INDEX`, `BFO` for `BSE_INDEX`, etc.) |
 | strike | number | Resolved strike price |
-| expiry_date | string | Expiry date |
-| underlying_ltp | number | Current underlying price used for ATM calculation |
-| lotsize | number | Lot size for the option |
+| expiry | string | Expiry as `DD-MMM-YY` uppercase (`28-APR-26`) — note this differs from the `DDMMMYY` request format |
+| lotsize | integer | Contract size |
+| tick_size | number | Minimum price increment in rupees |
+| underlying_ltp | number | Spot LTP used for ATM resolution (returned so the client can audit which spot was used) |
 
-## Offset Values
+> The response does **not** echo `underlying`, `offset`, or `option_type` — those were inputs, the resolved `symbol` is what you act on.
 
-| Offset | Description |
-|--------|-------------|
-| ATM | At-The-Money (strike closest to current price) |
-| ITM1 to ITM50 | In-The-Money (1-50 strikes away) |
-| OTM1 to OTM50 | Out-of-The-Money (1-50 strikes away) |
+## Offset Semantics
+
+| Offset | Meaning |
+|---|---|
+| `ATM` | Strike closest to the current spot LTP |
+| `ITM1`…`ITMn` | In-the-money — `n` strikes deep relative to ATM (CE: below ATM, PE: above ATM) |
+| `OTM1`…`OTMn` | Out-of-the-money — `n` strikes away (CE: above ATM, PE: below ATM) |
 
 ## Notes
 
-- This is a **read-only** endpoint -- it resolves the symbol without placing any order
-- Use this to discover the correct option symbol before using [PlaceOrder](../order-management/placeorder.md) or [Quotes](../market-data/quotes.md)
-- The ATM strike is calculated using the current underlying LTP
-- For **NSE_INDEX** exchange, the resolved symbol trades on **NFO**
-- The **lotsize** can be used to determine the minimum tradeable quantity
-
-## Use Cases
-
-- **Symbol discovery**: Find exact option symbol for a given offset
-- **Pre-trade validation**: Verify the correct strike before ordering
-- **Strategy planning**: Determine lot sizes and strikes for multi-leg strategies
+- This is a **read-only** endpoint — it resolves the symbol without placing any order. Pair with [PlaceOrder](../order-management/placeorder.md) or [OptionsOrder](../order-management/optionsorder.md) to act on it.
+- Used by `place_options_order_service` internally — `OptionsOrder` and `OptionsMultiOrder` resolve symbols using the same logic before placing the broker call.
+- For `NSE_INDEX` underlyings the resolved symbol trades on `NFO`; for `BSE_INDEX` it's `BFO`; for `MCX_INDEX` it's `MCX`.
 
 ---
 

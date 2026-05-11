@@ -1,136 +1,160 @@
 # LTP (WebSocket)
 
-Subscribe to real-time Last Traded Price (LTP) updates via WebSocket.
+Subscribe to real-time Last Traded Price (LTP) updates via the OpenBull WebSocket proxy.
+
+> **Full protocol spec:** [`docs/design/websockets-format.md`](../../design/websockets-format.md). This page is a quick reference for LTP-mode subscriptions; the spec is the source of truth for envelope, errors, and limits.
 
 ## WebSocket URL
 
 ```
-Local Host   :  ws://127.0.0.1:8765
-Custom Host  :  ws://<your-host>:8765
+Local:        ws://127.0.0.1:8765
+Production:   wss://<your-domain>/ws         # nginx terminates TLS, forwards to 127.0.0.1:8765
 ```
 
-## Subscribe to LTP
+## Flow
 
-### Subscribe Message
+1. Open the WebSocket.
+2. Send an **`authenticate`** message with your OpenBull API key.
+3. After the auth success response, send a **`subscribe`** message with `mode: "LTP"` and the symbols you want.
+4. Receive `market_data` messages for each tick (per-symbol 50 ms throttle).
+
+## 1. Authenticate
+
+```json
+{"action": "authenticate", "api_key": "YOUR_OPENBULL_API_KEY"}
+```
+
+Success response:
+
+```json
+{"type": "auth", "status": "success", "broker": "upstox"}
+```
+
+`broker` is one of `"upstox"`, `"zerodha"`, `"angel"`, `"dhan"`, `"fyers"`. Any subscribe call before successful authentication returns `{"type": "subscribe", "status": "error", "message": "Not authenticated"}`.
+
+## 2. Subscribe
 
 ```json
 {
   "action": "subscribe",
-  "mode": "ltp",
-  "instruments": [
-    {"exchange": "NSE", "symbol": "INFY"},
-    {"exchange": "NFO", "symbol": "NIFTY28APR2624250CE"}
+  "symbols": [
+    {"symbol": "INFY", "exchange": "NSE"},
+    {"symbol": "NIFTY28APR2624250CE", "exchange": "NFO"}
+  ],
+  "mode": "LTP"
+}
+```
+
+Success response:
+
+```json
+{
+  "type": "subscribe",
+  "status": "success",
+  "subscriptions": [
+    {"symbol": "INFY", "exchange": "NSE", "mode": "LTP"},
+    {"symbol": "NIFTY28APR2624250CE", "exchange": "NFO", "mode": "LTP"}
   ]
 }
 ```
 
-### LTP Update Message
+Mode is case-insensitive on the wire (`"LTP"` / `"ltp"` / `"Ltp"`). Limit: 1000 symbols per subscribe call.
+
+## 3. LTP tick
+
+Every matching trade emits a `market_data` envelope (`mode` lowercased on the response):
 
 ```json
 {
-  "type": "ltp",
+  "type": "market_data",
+  "symbol": "INFY",
+  "exchange": "NSE",
+  "mode": "ltp",
   "data": {
-    "exchange": "NSE",
     "symbol": "INFY",
+    "exchange": "NSE",
+    "mode": "ltp",
     "ltp": 1508.25,
-    "ltt": "2026-04-15 14:30:22",
-    "change": 14.45
+    "ltt": 1714742222,
+    "ltq": 50,
+    "cp": 1493.80,
+    "change": 14.45,
+    "change_percent": 0.97
   }
 }
 ```
 
-## Unsubscribe from LTP
+LTP messages are throttled per `(symbol, exchange)` pair to one every 50 ms.
+
+| Field | Type | Description |
+|---|---|---|
+| `ltp` | number | Last traded price |
+| `ltt` | int | Last trade time (Unix epoch seconds) |
+| `ltq` | int | Last traded quantity |
+| `cp` | number | Previous-day close |
+| `change` | number | `ltp - cp` |
+| `change_percent` | number | `change / cp * 100` |
+
+## 4. Unsubscribe
 
 ```json
 {
   "action": "unsubscribe",
-  "mode": "ltp",
-  "instruments": [
-    {"exchange": "NSE", "symbol": "INFY"}
-  ]
+  "symbols": [{"symbol": "INFY", "exchange": "NSE"}],
+  "mode": "LTP"
 }
 ```
+
+The proxy only forwards an unsubscribe to the broker when the last client for that `(symbol, exchange, mode)` tuple drops.
 
 ## Python Example
 
 ```python
-import websocket
 import json
-
-def on_message(ws, message):
-    data = json.loads(message)
-    if data.get("type") == "ltp":
-        d = data["data"]
-        print(f"LTP: {d['symbol']} = {d['ltp']} (change: {d['change']})")
+import websocket
 
 def on_open(ws):
-    subscribe_msg = {
-        "action": "subscribe",
-        "mode": "ltp",
-        "instruments": [
-            {"exchange": "NSE", "symbol": "INFY"},
-            {"exchange": "NFO", "symbol": "NIFTY28APR2624250CE"}
-        ]
-    }
-    ws.send(json.dumps(subscribe_msg))
+    ws.send(json.dumps({"action": "authenticate",
+                        "api_key": "YOUR_OPENBULL_API_KEY"}))
 
-ws = websocket.WebSocketApp(
-    "ws://127.0.0.1:8765",
-    on_message=on_message,
-    on_open=on_open
-)
+def on_message(ws, raw):
+    msg = json.loads(raw)
+    if msg.get("type") == "auth" and msg.get("status") == "success":
+        ws.send(json.dumps({
+            "action": "subscribe",
+            "symbols": [
+                {"symbol": "INFY", "exchange": "NSE"},
+                {"symbol": "NIFTY28APR2624250CE", "exchange": "NFO"},
+            ],
+            "mode": "LTP",
+        }))
+    elif msg.get("type") == "market_data" and msg.get("mode") == "ltp":
+        d = msg["data"]
+        print(f"{msg['symbol']}: ltp={d['ltp']} change={d['change']:+.2f}")
+
+ws = websocket.WebSocketApp("ws://127.0.0.1:8765",
+                            on_open=on_open,
+                            on_message=on_message)
 ws.run_forever()
 ```
 
-## Message Fields
+## Limits
 
-### Subscribe/Unsubscribe Message
+| Limit | Value |
+|---|---|
+| Concurrent client connections | 10 |
+| Max WS message size (client) | 64 KB |
+| Symbols per subscribe call | 1000 |
+| LTP fanout throttle | 50 ms per `(symbol, exchange)` |
 
-| Field | Type | Description |
-|-------|------|-------------|
-| action | string | "subscribe" or "unsubscribe" |
-| mode | string | "ltp" |
-| instruments | array | Array of instrument objects |
+See [`docs/design/websockets-format.md`](../../design/websockets-format.md#limits) for the full table and rationale.
 
-### Instrument Object
+## Related
 
-| Field | Type | Description |
-|-------|------|-------------|
-| exchange | string | Exchange code (NSE, BSE, NFO, etc.) |
-| symbol | string | Trading symbol |
-
-### LTP Update Message
-
-| Field | Type | Description |
-|-------|------|-------------|
-| type | string | "ltp" |
-| data | object | LTP data object |
-
-### Data Object
-
-| Field | Type | Description |
-|-------|------|-------------|
-| exchange | string | Exchange code |
-| symbol | string | Trading symbol |
-| ltp | number | Last traded price |
-| ltt | string | Last trade time |
-| change | number | Price change from previous close |
-
-## Notes
-
-- LTP mode provides **minimal data** for lowest latency
-- Updates are pushed **on every tick** (each trade)
-- Subscribe to multiple symbols in a single message
-- Use for:
-  - Price displays
-  - Trigger-based alerts
-  - Simple strategy signals
-
-## Related Endpoints
-
-- [Quote WebSocket](./quote.md) - More data including OHLCV
-- [Depth WebSocket](./depth.md) - Full market depth
+- [Quote WebSocket](./quote.md) — LTP + OHLC + OI + total buy/sell qty
+- [Depth WebSocket](./depth.md) — Quote + 5-level bid/ask book
+- Full protocol spec: [`docs/design/websockets-format.md`](../../design/websockets-format.md)
 
 ---
 
-**Back to**: [API Documentation](../README.md)
+**Back to:** [API Documentation](../README.md)

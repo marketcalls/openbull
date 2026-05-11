@@ -1,6 +1,6 @@
 # Symbol
 
-Get detailed symbol information including instrument type, lot size, tick size, and other metadata for a specific trading symbol.
+Look up the master-contract row for a specific OpenBull symbol — instrument type, lot size, tick size, broker-native ticker, broker-native exchange, and the broker instrument token.
 
 ## Endpoint URL
 
@@ -25,16 +25,16 @@ POST http://127.0.0.1:8000/api/v1/symbol
   "status": "success",
   "data": {
     "symbol": "NIFTY28APR2624250CE",
-    "exchange": "NFO",
-    "token": "54650",
+    "brsymbol": "NIFTY26APR2424250CE",
     "name": "NIFTY",
-    "instrument_type": "OPTIDX",
+    "exchange": "NFO",
+    "brexchange": "NSE_FO",
+    "token": "54650",
+    "expiry": "28-APR-26",
     "strike": 24250.0,
-    "option_type": "CE",
-    "expiry": "2026-04-28",
-    "lotsize": 65,
-    "tick_size": 0.05,
-    "segment": "NFO-OPT"
+    "lotsize": 75,
+    "instrumenttype": "OPTIDX",
+    "tick_size": 0.05
   }
 }
 ```
@@ -44,39 +44,40 @@ POST http://127.0.0.1:8000/api/v1/symbol
 | Parameter | Description | Mandatory/Optional | Default Value |
 |-----------|-------------|-------------------|---------------|
 | apikey | Your OpenBull API key | Mandatory | - |
-| symbol | Trading symbol | Mandatory | - |
-| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX | Mandatory | - |
+| symbol | OpenBull canonical trading symbol | Mandatory | - |
+| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX, NCDEX, NSE_INDEX, BSE_INDEX, MCX_INDEX | Mandatory | - |
+
+A request missing `symbol` or `exchange` returns HTTP 400 `{"status": "error", "message": "symbol and exchange are required"}`. An unknown symbol on the given exchange returns HTTP 404 `{"status": "error", "message": "Symbol not found"}`.
 
 ## Response Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| status | string | "success" or "error" |
-| data | object | Symbol metadata object |
+| status | string | `"success"` or `"error"` |
+| data | object | Master-contract row (see below) |
 
 ### Data Object Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| symbol | string | Trading symbol |
-| exchange | string | Exchange code |
-| token | string | Broker-specific instrument token |
-| name | string | Underlying name (e.g., NIFTY, INFY) |
-| instrument_type | string | Instrument type (EQ, OPTIDX, FUTIDX, OPTSTK, etc.) |
-| strike | number | Strike price (options only) |
-| option_type | string | CE or PE (options only) |
-| expiry | string | Expiry date in YYYY-MM-DD format (F&O only) |
-| lotsize | number | Lot size for F&O instruments |
-| tick_size | number | Minimum price movement |
-| segment | string | Market segment (NSE-EQ, NFO-OPT, NFO-FUT, etc.) |
+| symbol | string | OpenBull canonical symbol (the value you sent) |
+| brsymbol | string | Broker-native ticker for the same instrument (used by `mapping/order_data.py` when round-tripping orders) |
+| name | string | Underlying ticker for F&O rows (`NIFTY`, `RELIANCE`); company/index name for equity & index rows |
+| exchange | string | OpenBull canonical exchange code |
+| brexchange | string | Broker-native exchange code (e.g. Upstox's `NSE_FO`, Zerodha's `NFO-OPT`) |
+| token | string | Broker instrument token |
+| expiry | string | `DD-MMM-YY` uppercase (`28-APR-26`); empty string for cash equities and indices |
+| strike | number | Strike price (`0.0` for non-options) |
+| lotsize | integer | Contract size (`1` for cash equities) |
+| instrumenttype | string | `EQ`, `OPTIDX` (index options), `OPTSTK` (stock options), `FUTIDX`, `FUTSTK`, `INDEX`, etc. (exact set is broker-dependent) |
+| tick_size | number | Minimum price increment in rupees (e.g. `0.05` for NFO) |
 
 ## Notes
 
-- For **equity** symbols, fields like strike, option_type, and expiry will not be present
-- The **token** is the broker-specific instrument identifier used internally for order routing
-- **lotsize** for equity is typically 1
-- Use this endpoint to validate symbols before placing orders
-- The **instrument_type** field helps distinguish between equity, futures, and options
+- The endpoint hits the in-process `symtoken` cache hydrated from PostgreSQL on startup (and mirrored to Redis under `symtoken:*` hashes). It does not call the broker — purely a master-contract lookup.
+- For cash equities, `expiry` is empty and `strike` is `0.0` — those are F&O columns.
+- The `brsymbol` and `brexchange` round-trip correctness is the integrator's contract with `mapping/order_data.py`: any orderbook response is mapped back from these broker-native values to OpenBull canonical via the same row.
+- Validation source for the `exchange` field: `backend/utils/constants.py::VALID_EXCHANGES`. See [order-constants.md](../../design/order-constants.md).
 
 ---
 

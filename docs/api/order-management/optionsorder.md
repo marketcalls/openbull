@@ -113,24 +113,56 @@ POST http://127.0.0.1:8000/api/v1/optionsorder
 
 ## Response Fields
 
+Response shape **differs based on `splitsize`**:
+
+### Without split (default — `splitsize=0` or omitted)
+
 | Field | Type | Description |
 |-------|------|-------------|
-| status | string | "success" or "error" |
-| orderid | string | Unique order ID from broker |
-| symbol | string | Resolved option symbol |
-| exchange | string | Exchange where order was placed (NFO/BFO) |
-| offset | string | Offset used for resolution |
-| option_type | string | CE or PE |
-| underlying | string | Underlying symbol |
-| underlying_ltp | number | Last traded price of underlying |
+| status | string | `"success"` or `"error"` |
+| symbol | string | Resolved option symbol (e.g. `NIFTY28APR2624250CE`) |
+| exchange | string | Resolved options exchange (`NFO` for `NSE_INDEX`, `BFO` for `BSE_INDEX`) |
+| underlying | string | Echo of the request `underlying` |
+| underlying_ltp | number | Spot LTP used for ATM resolution |
+| offset | string | Echo of the request `offset` |
+| option_type | string | Echo of the request `option_type` |
+| orderid | string | Broker order ID for the placed order |
+
+### With split (`splitsize > 0`)
+
+The `orderid` field is replaced with a nested `split` object containing the SplitOrder response — one row per child order:
+
+```json
+{
+  "status": "success",
+  "symbol": "NIFTY28APR2624250CE",
+  "exchange": "NFO",
+  "underlying": "NIFTY",
+  "underlying_ltp": 24231.30,
+  "offset": "ATM",
+  "option_type": "CE",
+  "split": {
+    "status": "success",
+    "split_size": 50,
+    "total_quantity": 150,
+    "results": [
+      {"order_num": 1, "quantity": 50, "orderid": "260415000386285", "status": "success"},
+      {"order_num": 2, "quantity": 50, "orderid": "260415000386286", "status": "success"},
+      {"order_num": 3, "quantity": 50, "orderid": "260415000386287", "status": "success"}
+    ]
+  }
+}
+```
+
+See [SplitOrder](./splitorder.md) for the inner `split` object shape.
 
 ## Notes
 
-- The **underlying** is used to fetch the current price for ATM calculation
-- For **NSE_INDEX** or **BSE_INDEX** exchange, the order is placed on NFO/BFO respectively
-- The **expiry_date** must be in DDMMMYY format (e.g., 28APR26, 25NOV25)
-- Use **splitsize** to break large orders into smaller chunks (max 100 orders per split)
-- The API uses the synthetic futures price or spot price to determine ATM strike
+- The `underlying` is used to fetch the current LTP for ATM resolution.
+- For `NSE_INDEX` the order routes to `NFO`; for `BSE_INDEX` to `BFO`; for `MCX_INDEX` to `MCX`.
+- The `expiry_date` is `DDMMMYY` on input (`28APR26`). It's not echoed in the response — the resolved `symbol` already encodes it.
+- Use `splitsize` to break large orders into smaller chunks (max 100 child orders per split).
+- ATM resolution uses the spot LTP — not the synthetic future — for compatibility with OpenAlgo SDKs that pass `NSE_INDEX` as the exchange.
 
 ---
 

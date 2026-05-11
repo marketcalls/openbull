@@ -1,6 +1,6 @@
 # CancelAllOrder
 
-Cancel all open/pending orders. Optionally filter by strategy to cancel only orders belonging to a specific strategy.
+Cancel every open / trigger-pending order across the account.
 
 ## Endpoint URL
 
@@ -22,7 +22,10 @@ POST http://127.0.0.1:8000/api/v1/cancelallorder
 ```json
 {
   "status": "success",
-  "message": "All open orders cancelled"
+  "data": {
+    "canceled": ["250508001234567", "250508001234568"],
+    "failed": []
+  }
 }
 ```
 
@@ -31,22 +34,23 @@ POST http://127.0.0.1:8000/api/v1/cancelallorder
 | Parameter | Description | Mandatory/Optional | Default Value |
 |-----------|-------------|-------------------|---------------|
 | apikey | Your OpenBull API key | Mandatory | - |
-| strategy | Strategy identifier (filters orders to cancel) | Optional | - |
+| strategy | Strategy identifier — accepted for OpenAlgo SDK parity, currently **ignored** by the cancel logic | Optional | - |
 
 ## Response Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| status | string | "success" or "error" |
-| message | string | Confirmation or error message |
+| status | string | `"success"` or `"error"` |
+| data.canceled | array of strings | Broker order IDs that were successfully cancelled |
+| data.failed | array of strings | Broker order IDs the broker refused to cancel (already filled, already cancelled, etc.) |
+| message | string | Error message (only present when `status="error"`) |
 
 ## Notes
 
-- If **strategy** is provided, only orders placed with that strategy tag are cancelled
-- If **strategy** is omitted, **all** open/pending orders are cancelled
-- Already executed, rejected, or cancelled orders are not affected
-- This is a bulk operation -- individual order cancellation failures do not prevent others from being cancelled
-- Use with caution as this can cancel orders across all strategies if no filter is applied
+- Cancels **every** cancellable order regardless of the `strategy` tag. The `strategy` field is accepted in the request body so OpenAlgo client SDKs work unchanged, but the cancel call doesn't filter on it (see `backend/services/order_service.py::cancel_all_orders_service`).
+- Already-filled, already-cancelled, and rejected orders are not affected.
+- Individual broker failures are surfaced in `data.failed` — the call still returns `status: "success"` if any cancellation worked.
+- **Sandbox mode** — when the global trading mode is `sandbox`, the call is dispatched to `backend/sandbox` and only affects simulated orders.
 
 ---
 

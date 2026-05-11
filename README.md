@@ -89,7 +89,7 @@ sudo ./install/install.sh
 # follow the certbot prompts; nginx proxies /auth, /web, /upstox, /zerodha, /ws to the backend
 ```
 
-## API endpoints (33+)
+## API endpoints (35+)
 
 Full per-endpoint docs: [docs/api/README.md](docs/api/README.md). Bruno collection: `collections/openbull/`.
 
@@ -220,7 +220,8 @@ openbull/
 │   ├── security.py             # Argon2, Fernet, JWT
 │   ├── dependencies.py         # FastAPI DI + Redis cache-aside
 │   ├── middleware*.py          # Request-id, access log, DB-backed api_logs
-│   ├── models/                 # SQLAlchemy ORM (users, broker_*, sandbox_*, strategies, ...)
+│   ├── models/                 # SQLAlchemy ORM (users, broker_*, sandbox_*,
+│   │                           #   strategies, strategy_module, audit, ...)
 │   ├── schemas/                # Pydantic request/response
 │   ├── routers/                # Web routes (cookie auth)
 │   ├── api/                    # External API (/api/v1, key auth)
@@ -229,6 +230,10 @@ openbull/
 │   │                           #   multi_strike_oi, sandbox, trading_mode,
 │   │                           #   market_data_cache, margin
 │   ├── sandbox/                # Simulated trading engine
+│   ├── strategy/               # Strategy-module foundation (schema, CRUD,
+│   │                           #   symbol resolver, security) — engine in flight
+│   ├── events/                 # In-process event bus (strategy_events, ...)
+│   ├── subscribers/            # Event-bus consumers (audit writer, ...)
 │   ├── broker/                 # 5 broker plugins
 │   │   ├── upstox/, zerodha/, angel/, dhan/, fyers/
 │   ├── websocket_proxy/        # Unified WS proxy (ZeroMQ architecture)
@@ -320,13 +325,17 @@ FastAPI serves `frontend/dist/` automatically. The WebSocket proxy starts alongs
 
 ## Documentation
 
+Start at [docs/README.md](docs/README.md) — index of every doc with one-line descriptions, grouped by audience.
+
+Highlights:
+- [Product Overview](docs/PRODUCT.md) — what OpenBull is, who it's for, capability matrix, user journeys
 - [API Reference](docs/api/README.md) — per-endpoint docs with tested request/response samples
-- [Architecture](docs/design/ARCHITECTURE.md) — system design, data flows, design patterns, caching layer, logging & audit, trading modes, analytics tools, Strategy Builder
-- [Services](docs/design/SERVICES.md) — business logic layer, ~30 services
+- [Architecture](docs/design/ARCHITECTURE.md) — system design, data flows, caching layer, logging, trading modes
+- [Services](docs/design/SERVICES.md) — business-logic layer reference (every service, signature, location)
+- [Broker Integration](docs/design/broker-integration.md) — how to add a sixth broker
 - [WebSocket Protocol](docs/design/websockets-format.md) — wire format, modes, limits
 - [Symbol Format](docs/design/symbol-format.md) — OpenAlgo-compatible symbology
 - [Order Constants](docs/design/order-constants.md) — valid exchanges, products, pricetypes, actions
-- [Product Overview](docs/PRODUCT.md) — feature-level summary
 
 ## License
 

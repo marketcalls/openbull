@@ -1,6 +1,25 @@
 # OpenBull API Documentation
 
+| Field | Value |
+|---|---|
+| **Last updated** | 2026-05-11 |
+| **API version** | `/api/v1` |
+| **Owner** | Platform team |
+| **Change history** | [../CHANGELOG.md](../CHANGELOG.md) |
+
 REST + WebSocket API documentation for the OpenBull Options Trading Platform. Endpoints follow the OpenAlgo standard format for cross-compatibility — existing OpenAlgo SDKs / scripts work against OpenBull unchanged.
+
+## Live API Reference (auto-generated)
+
+FastAPI auto-generates an interactive API reference at runtime from the live route definitions and Pydantic schemas. Three flavours, all available on a running backend:
+
+| URL | Tool | Use when |
+|---|---|---|
+| `http://127.0.0.1:8000/docs` | Swagger UI | You want to try a call interactively against a live server. Click "Try it out", fill the form, hit Execute, see the response. |
+| `http://127.0.0.1:8000/redoc` | ReDoc | You want a clean, side-by-side spec view for browsing — no try-it-out, but better readability for large endpoints. |
+| `http://127.0.0.1:8000/openapi.json` | Raw OpenAPI 3 spec | You want to import the spec into Postman, generate a client SDK, run contract tests, or feed it to another API tool. |
+
+These are the **authoritative request/response schemas** at runtime. The Markdown docs in this folder are narrative reference — they explain *why* and *when*, with examples and notes. Treat the auto-docs as canonical for shape; treat the Markdown as canonical for intent.
 
 ## Base URL
 
@@ -106,13 +125,13 @@ Server-computed options analytics powering the in-app `/tools/*` pages. Open to 
 
 | Endpoint | Description |
 |----------|-------------|
-| `oitracker` | OI change tracker — per-strike OI deltas across the chain |
-| `maxpain` | Max Pain calculation for a given expiry |
-| `ivchart` | Historical ATM IV time series |
-| `ivsmile` | Per-strike CE / PE IV at the chosen expiry — also exposes `atm_iv` |
-| `volsurface` | Full IV surface across strikes × expiries (3-D plot data) |
-| `straddle` | Historical ATM straddle premium (CE+PE) + synthetic future |
-| `gex` | Gamma exposure — chain-wide gamma profile, ZGI, GEX flip |
+| [OITracker](./analytics-tools/oitracker.md) | OI per strike across the chain plus PCR-OI / PCR-Volume |
+| [MaxPain](./analytics-tools/maxpain.md) | Max Pain strike + per-strike pain breakdown for one expiry |
+| [IVChart](./analytics-tools/ivchart.md) | Historical IV + Greeks time series for ATM CE & PE |
+| [IVSmile](./analytics-tools/ivsmile.md) | Per-strike CE / PE IV at one expiry, with ATM IV and skew |
+| [VolSurface](./analytics-tools/volsurface.md) | IV surface across strikes × expiries (3-D Plotly source) |
+| [Straddle](./analytics-tools/straddle.md) | Dynamic-ATM straddle premium + synthetic future time series |
+| [GEX](./analytics-tools/gex.md) | Gamma exposure per strike — walls, totals, GEX flip |
 
 ### WebSocket Streaming
 Real-time tick stream for the user's broker feed. Not part of `/api/v1` — separate WebSocket endpoint.
@@ -178,8 +197,12 @@ A new broker = one folder under `backend/broker/{name}/` + a `plugin.json`. See 
 | `CDS` | Currency Derivatives (NSE) |
 | `BCD` | Currency Derivatives (BSE) |
 | `MCX` | Multi Commodity Exchange |
-| `NSE_INDEX` | NSE Index quote feed |
-| `BSE_INDEX` | BSE Index quote feed |
+| `NCDEX` | National Commodity & Derivatives Exchange |
+| `NSE_INDEX` | NSE Index quote feed (non-tradable) |
+| `BSE_INDEX` | BSE Index quote feed (non-tradable) |
+| `MCX_INDEX` | MCX commodity index feed (non-tradable) |
+
+`*_INDEX` codes are read-only — accepted by market-data / symbol endpoints, rejected by order endpoints. Validation source: `backend/utils/constants.py`. See [order-constants.md](../design/order-constants.md) for the canonical enum.
 
 ### Product Types
 | Code | Description |

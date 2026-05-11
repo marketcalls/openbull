@@ -1,6 +1,6 @@
 # OpenPosition
 
-Get the current net open position quantity for a specific symbol. Useful for checking position before placing smart orders or managing risk.
+Get the current net open quantity for a specific symbol + exchange + product. Useful before placing a smart order or for inline risk checks.
 
 ## Endpoint URL
 
@@ -26,11 +26,7 @@ POST http://127.0.0.1:8000/api/v1/openposition
 {
   "status": "success",
   "data": {
-    "symbol": "INFY",
-    "exchange": "NSE",
-    "product": "MIS",
-    "quantity": 1,
-    "strategy": "Python"
+    "quantity": 1
   }
 }
 ```
@@ -40,36 +36,26 @@ POST http://127.0.0.1:8000/api/v1/openposition
 | Parameter | Description | Mandatory/Optional | Default Value |
 |-----------|-------------|-------------------|---------------|
 | apikey | Your OpenBull API key | Mandatory | - |
-| symbol | Trading symbol | Mandatory | - |
-| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX | Mandatory | - |
+| symbol | OpenBull trading symbol | Mandatory | - |
+| exchange | Exchange code: NSE, BSE, NFO, BFO, CDS, BCD, MCX, NCDEX | Mandatory | - |
 | product | Product type: MIS, CNC, NRML | Mandatory | - |
-| strategy | Strategy identifier | Optional | - |
+| strategy | Strategy identifier — accepted for OpenAlgo SDK parity, **not used** as a filter (see Notes) | Optional | - |
+
+A request missing any of `symbol`, `exchange`, or `product` returns HTTP 400 `{"status": "error", "message": "symbol, exchange, and product are required"}`.
 
 ## Response Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| status | string | "success" or "error" |
-| data | object | Position data object |
-
-### Data Object Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| symbol | string | Trading symbol |
-| exchange | string | Exchange code |
-| product | string | Product type |
-| quantity | number | Net open position quantity (positive = long, negative = short, 0 = flat) |
-| strategy | string | Strategy identifier |
+| status | string | `"success"` or `"error"` |
+| data.quantity | integer | Net open quantity. Positive = long, negative = short, `0` = flat. |
+| message | string | Error description (only present when `status="error"`). |
 
 ## Notes
 
-- Returns the **net quantity** for the specified symbol, exchange, and product combination
-- Positive quantity indicates a **long** position
-- Negative quantity indicates a **short** position
-- Zero quantity means the position is **flat** (no open position)
-- When **strategy** is provided, only positions matching that strategy tag are considered
-- This endpoint is commonly used before PlaceSmartOrder to verify current position state
+- The response only carries the `quantity`. The request `symbol`/`exchange`/`product`/`strategy` are not echoed in the response body — they're the keys you sent, not data the service computes.
+- **Strategy filter** — the `strategy` field is accepted so OpenAlgo SDKs work unchanged, but the broker call does not filter positions by strategy tag (it can't — brokers don't track strategy attribution server-side). `quantity` is the **aggregate** net position across every strategy that has traded the symbol on the same product.
+- Positive `quantity` = long, negative = short, `0` = flat — commonly used right before [PlaceSmartOrder](../order-management/placesmartorder.md) to compute the delta to a target position size.
 
 ---
 
