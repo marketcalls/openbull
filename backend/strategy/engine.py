@@ -30,7 +30,9 @@ from backend.models.strategy_module import (
     SmStrategyOrder,
     SmStrategyRun,
 )
-from backend.strategy import repository as repo, state as state_module, symbol_resolver
+from backend.strategy import (
+    repository as repo, state as state_module, symbol_resolver, tick_feed,
+)
 from backend.strategy.order_dispatch import dispatch_order
 
 logger = logging.getLogger(__name__)
@@ -338,11 +340,25 @@ async def start_run(
         entry_by_leg = {ls["leg_id"]: ls for ls in leg_summaries}
         await state_module.init_run_state(
             run_id=run.id,
+            strategy_id=strategy.id,
             strategy_legs=strategy.legs or [],
             entry_orders_by_leg=entry_by_leg,
         )
     except Exception:
         logger.exception("Failed to init Redis state for run %d", run.id)
+
+    # Subscribe to ticks for every leg that placed successfully — Phase 6
+    # risk evaluator runs on these ticks.
+    try:
+        symbols = list({
+            (ls["exchange"], ls["symbol"])
+            for ls in leg_summaries
+            if ls.get("status") != "rejected"
+            and ls.get("symbol") and ls.get("exchange")
+        })
+        tick_feed.add_run_subscriptions(run.id, symbols)
+    except Exception:
+        logger.exception("Failed to subscribe ticks for run %d", run.id)
 
     return run, leg_summaries
 
@@ -512,6 +528,10 @@ async def stop_run(
         await state_module.clear_run_state(run.id)
     except Exception:
         logger.exception("Failed to clear Redis state for run %d", run.id)
+    try:
+        tick_feed.remove_run_subscriptions(run.id)
+    except Exception:
+        logger.exception("Failed to unsubscribe ticks for run %d", run.id)
     return {"run_id": run.id, "stop_reason": stop_reason, "legs": summaries}
 
 

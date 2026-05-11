@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -84,17 +85,24 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Failed to register event-bus subscribers")
 
-    # Strategy module: crash-safe recovery + periodic checkpoint loop.
-    # Recovery must happen before checkpoint starts so any newly-hydrated
-    # state is populated when the first checkpoint pass runs.
+    # Strategy module: recovery, then tick processor + tick feed, then
+    # periodic checkpoints. Order matters — the processor must be alive
+    # before the feed starts dispatching, and recovery should run before
+    # the first checkpoint pass.
     try:
-        from backend.strategy import checkpoint as strategy_checkpoint
+        from backend.strategy import (
+            checkpoint as strategy_checkpoint,
+            tick_feed as strategy_tick_feed,
+            tick_processor as strategy_tick_processor,
+        )
         from backend.strategy.recovery import recover_all as strategy_recover_all
 
         await strategy_recover_all()
+        queue = strategy_tick_processor.start()
+        strategy_tick_feed.init(asyncio.get_running_loop(), queue)
         strategy_checkpoint.start()
     except Exception:
-        logger.exception("Strategy recovery / checkpoint loop failed to start")
+        logger.exception("Strategy engine startup failed")
 
     # Load broker plugins
     plugins = load_all_plugins()
@@ -143,11 +151,17 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Error stopping sandbox engine/scheduler/MTM")
     try:
-        from backend.strategy import checkpoint as strategy_checkpoint
+        from backend.strategy import (
+            checkpoint as strategy_checkpoint,
+            tick_feed as strategy_tick_feed,
+            tick_processor as strategy_tick_processor,
+        )
 
+        strategy_tick_feed.shutdown()
+        await strategy_tick_processor.stop()
         await strategy_checkpoint.stop()
     except Exception:
-        logger.exception("Error stopping strategy checkpoint loop")
+        logger.exception("Error stopping strategy engine")
     await engine.dispose()
     logger.info("OpenBull shut down")
     # Flush DB error sink before the process exits so in-flight queued
@@ -276,8 +290,10 @@ app.include_router(strategybuilder_router)
 # Strategy module — multi-leg options strategies with risk management
 # (separate from the legacy Strategy Builder above)
 from backend.routers.strategy_module import router as strategy_module_router
+from backend.strategy.ws import router as strategy_ws_router
 
 app.include_router(strategy_module_router)
+app.include_router(strategy_ws_router)
 
 
 # Health check

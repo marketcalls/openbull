@@ -240,6 +240,7 @@ def _state_from_db_and_checkpoint(
 
     return {
         "run_id": run.id,
+        "strategy_id": strategy.id,
         "pnl_realized": float(checkpoint.pnl_realized) if checkpoint else 0.0,
         "pnl_unrealized": float(checkpoint.pnl_unrealized) if checkpoint else 0.0,
         "pnl_total": float(checkpoint.pnl_total) if checkpoint else 0.0,

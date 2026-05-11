@@ -53,6 +53,12 @@ import {
   type StrategyStatus,
 } from "@/types/strategy_module";
 import { cn } from "@/lib/utils";
+import {
+  useStrategyWebSocket,
+  type StrategySnapshot,
+  type StrategyWsEvent,
+  type WsStatus,
+} from "@/hooks/useStrategyWebSocket";
 
 function statusBadgeVariant(
   status: StrategyStatus,
@@ -109,19 +115,51 @@ function orderStatusVariant(
 // Live tab
 // ---------------------------------------------------------------------------
 
+function fmtPnl(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value) || value === 0) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}`;
+}
+
+function fmtPrice(value: unknown): string {
+  if (value == null || Number.isNaN(Number(value))) return "—";
+  return Number(value).toFixed(2);
+}
+
+function wsStatusBadge(status: WsStatus): {
+  label: string;
+  variant: "default" | "secondary" | "destructive" | "outline";
+} {
+  switch (status) {
+    case "open":
+      return { label: "live", variant: "default" };
+    case "connecting":
+    case "reconnecting":
+      return { label: status, variant: "secondary" };
+    case "error":
+      return { label: "error", variant: "destructive" };
+    default:
+      return { label: status, variant: "outline" };
+  }
+}
+
 function LiveTab({
   strategy,
   orders,
   onCloseLeg,
   closingLegId,
+  liveState,
+  wsStatus,
 }: {
   strategy: Strategy;
   orders: StrategyOrder[];
   onCloseLeg: (legId: number) => void;
   closingLegId: number | null;
+  liveState: StrategySnapshot | null;
+  wsStatus: WsStatus;
 }) {
   // Pair each leg config with its current run's entry + (latest) exit order
-  // to derive the leg's open/closed state. Real LTPs and MTM come in Phase 6.
+  // for the fallback rendering when the WS hasn't sent state yet.
   const currentRunOrders = strategy.current_run_id
     ? orders.filter((o) => o.kind === "entry" || o.kind.startsWith("exit"))
     : [];
@@ -135,22 +173,38 @@ function LiveTab({
     }
   }
 
+  // Live state from WS overrides the REST fallback whenever present.
+  const liveLegByLegId = new Map<number, Record<string, unknown>>();
+  if (liveState) {
+    for (const l of liveState.legs) {
+      liveLegByLegId.set(Number(l.leg_id), l);
+    }
+  }
+
+  const ws = wsStatusBadge(wsStatus);
+  const haveLive = liveState !== null && strategy.status === "running";
+
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader>
-          <CardTitle>Live P&L</CardTitle>
-          <CardDescription>
-            Realized · Unrealized · Total — streamed over WebSocket once the
-            engine ships in Phase 6.
-          </CardDescription>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle>Live P&L</CardTitle>
+            <CardDescription>
+              Realized + Unrealized = Total. Streamed via WebSocket while the
+              run is active.
+            </CardDescription>
+          </div>
+          <Badge variant={ws.variant} className="text-[10px]">
+            {`WS ${ws.label}`}
+          </Badge>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-3 gap-4">
             {[
-              { label: "Realized", value: "—" },
-              { label: "Unrealized", value: "—" },
-              { label: "Total P&L", value: "—" },
+              { label: "Realized", value: liveState?.mtm_realized ?? null },
+              { label: "Unrealized", value: liveState?.mtm_unrealized ?? null },
+              { label: "Total P&L", value: liveState?.mtm_total ?? null },
             ].map((m) => (
               <div
                 key={m.label}
@@ -159,10 +213,25 @@ function LiveTab({
                 <p className="text-xs uppercase tracking-wider text-muted-foreground">
                   {m.label}
                 </p>
-                <p className="mt-1 font-mono text-2xl font-semibold">{m.value}</p>
+                <p
+                  className={cn(
+                    "mt-1 font-mono text-2xl font-semibold",
+                    m.value != null && m.value > 0 && "text-green-600",
+                    m.value != null && m.value < 0 && "text-red-600",
+                  )}
+                >
+                  {fmtPnl(m.value)}
+                </p>
               </div>
             ))}
           </div>
+          {liveState && (
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground sm:grid-cols-4">
+              <span>Peak: <span className="font-mono">{fmtPnl(liveState.peak)}</span></span>
+              <span>Trough: <span className="font-mono">{fmtPnl(liveState.trough)}</span></span>
+              <span>Updated: <span className="font-mono">{liveState.ts_ist}</span></span>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -171,7 +240,7 @@ function LiveTab({
           <CardTitle>Legs</CardTitle>
           <CardDescription>
             {strategy.status === "running"
-              ? "Active run — manual leg-close available."
+              ? "Active run — live LTP / MTM / effective SL stream from the engine."
               : "Run inactive — start the strategy to see live state here."}
           </CardDescription>
         </CardHeader>
@@ -181,47 +250,72 @@ function LiveTab({
               <TableHeader>
                 <TableRow>
                   <TableHead>#</TableHead>
-                  <TableHead>Symbol / segment</TableHead>
-                  <TableHead>Position</TableHead>
+                  <TableHead>Symbol</TableHead>
+                  <TableHead>Pos</TableHead>
                   <TableHead className="text-right">Qty</TableHead>
+                  <TableHead className="text-right">Entry</TableHead>
+                  <TableHead className="text-right">LTP</TableHead>
+                  <TableHead className="text-right">MTM</TableHead>
+                  <TableHead className="text-right">Eff. SL</TableHead>
+                  <TableHead className="text-right">Eff. Tgt</TableHead>
                   <TableHead>State</TableHead>
-                  <TableHead>Entry order</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {strategy.legs.map((leg) => {
+                  const live = haveLive ? liveLegByLegId.get(leg.id) : null;
                   const entry = entryByLeg.get(leg.id);
                   const exit = exitByLeg.get(leg.id);
                   const isOpen =
-                    !!entry &&
-                    entry.status !== "rejected" &&
-                    !exit;
-                  const stateLabel = !entry
-                    ? "configured"
-                    : entry.status === "rejected"
-                      ? "rejected"
-                      : exit
-                        ? "closed"
-                        : "open";
+                    !!entry && entry.status !== "rejected" && !exit;
+                  const stateLabel =
+                    (live?.status as string) ??
+                    (!entry
+                      ? "configured"
+                      : entry.status === "rejected"
+                        ? "rejected"
+                        : exit
+                          ? "closed"
+                          : "open");
+                  const symbol =
+                    (live?.symbol as string) ?? entry?.symbol ?? "—";
+                  const qty =
+                    (live?.qty as number) ?? entry?.qty ?? leg.lots;
+                  const liveMtm = live?.mtm as number | undefined;
                   return (
                     <TableRow key={leg.id}>
                       <TableCell className="font-mono">{leg.id}</TableCell>
-                      <TableCell>
-                        {entry ? (
-                          <span className="font-mono">{entry.symbol}</span>
-                        ) : (
-                          <Badge variant="outline">
-                            {leg.segment}
-                            {leg.option_type ? ` · ${leg.option_type}` : ""}
-                          </Badge>
-                        )}
-                      </TableCell>
+                      <TableCell className="font-mono text-xs">{symbol}</TableCell>
                       <TableCell>
                         <Badge variant="outline">{leg.position}</Badge>
                       </TableCell>
+                      <TableCell className="text-right font-mono">{qty}</TableCell>
                       <TableCell className="text-right font-mono">
-                        {entry?.qty ?? leg.lots}
+                        {fmtPrice(live?.entry_avg)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {fmtPrice(live?.ltp)}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right font-mono",
+                          liveMtm != null && liveMtm > 0 && "text-green-600",
+                          liveMtm != null && liveMtm < 0 && "text-red-600",
+                        )}
+                      >
+                        {fmtPnl(liveMtm)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {fmtPrice(live?.effective_sl)}
+                        {Boolean(live?.trail_active) && (
+                          <span className="ml-1 text-[10px] text-amber-600">
+                            (trail)
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {fmtPrice(live?.effective_target)}
                       </TableCell>
                       <TableCell>
                         <Badge
@@ -236,14 +330,15 @@ function LiveTab({
                           {stateLabel}
                         </Badge>
                       </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {entry?.broker_order_id ?? "—"}
-                      </TableCell>
                       <TableCell className="text-right">
                         <Button
                           size="sm"
                           variant="outline"
-                          disabled={!isOpen || closingLegId === leg.id || strategy.status !== "running"}
+                          disabled={
+                            !isOpen ||
+                            closingLegId === leg.id ||
+                            strategy.status !== "running"
+                          }
                           onClick={() => onCloseLeg(leg.id)}
                           title={
                             !isOpen
@@ -427,8 +522,50 @@ function HistoryTab({ runs }: { runs: StrategyRun[] }) {
 // Events tab — audit trail
 // ---------------------------------------------------------------------------
 
-function EventsTab({ events }: { events: StrategyEvent[] }) {
-  if (events.length === 0) {
+function EventsTab({
+  events,
+  wsEvents,
+}: {
+  events: StrategyEvent[];
+  wsEvents: StrategyWsEvent[];
+}) {
+  // Merge: WS events are prepended (they're newer and not yet in the REST
+  // page until next refetch). De-dup by (kind, ts) approximate key.
+  type Row = {
+    key: string;
+    ts: string;
+    kind: string;
+    severity: string;
+    message: string;
+    live: boolean;
+  };
+  const seenKeys = new Set<string>();
+  const merged: Row[] = [];
+  for (const e of wsEvents) {
+    const k = `ws:${e.kind}:${e.ts_ms_utc}`;
+    if (seenKeys.has(k)) continue;
+    seenKeys.add(k);
+    merged.push({
+      key: k,
+      ts: e.ts_ist,
+      kind: e.kind,
+      severity: e.severity,
+      message: e.message,
+      live: true,
+    });
+  }
+  for (const e of events) {
+    merged.push({
+      key: `db:${e.id}`,
+      ts: e.ts,
+      kind: e.kind,
+      severity: e.severity,
+      message: e.message,
+      live: false,
+    });
+  }
+
+  if (merged.length === 0) {
     return (
       <Card>
         <CardContent className="py-12 text-center">
@@ -439,29 +576,37 @@ function EventsTab({ events }: { events: StrategyEvent[] }) {
       </Card>
     );
   }
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Audit trail</CardTitle>
         <CardDescription>
-          Every event the strategy module publishes is persisted here. Newest
-          first.
+          Every event the strategy module publishes lands here. Live events
+          appear instantly via WebSocket; persisted rows poll every 10s.
         </CardDescription>
       </CardHeader>
       <CardContent>
         <div className="space-y-1.5">
-          {events.map((e) => (
+          {merged.map((e) => (
             <div
-              key={e.id}
+              key={e.key}
               className="grid grid-cols-[170px_140px_60px_1fr] items-start gap-2 border-b border-border/40 py-1.5 text-sm last:border-0"
             >
               <span className="font-mono text-xs text-muted-foreground">
                 {formatIst(e.ts)}
+                {e.live && (
+                  <Badge variant="secondary" className="ml-1 text-[9px]">
+                    live
+                  </Badge>
+                )}
               </span>
               <Badge variant="outline" className="w-fit font-mono text-[10px]">
                 {e.kind}
               </Badge>
-              <span className={cn("font-mono text-[10px]", severityClass(e.severity))}>
+              <span
+                className={cn("font-mono text-[10px]", severityClass(e.severity))}
+              >
                 {e.severity}
               </span>
               <span className="whitespace-pre-wrap">{e.message}</span>
@@ -663,12 +808,22 @@ export default function StrategyDetail() {
     queryFn: () => getStrategy(numId),
     enabled: Number.isFinite(numId) && numId > 0,
     refetchInterval: (q) => {
-      // Poll while a run is active so the legs table reflects exits.
-      // Phase 6 replaces this with a WebSocket push.
+      // Light REST poll for status/current_run_id transitions; live legs/MTM
+      // arrive via the WebSocket (Phase 6).
       const d = q.state.data;
-      return d && d.status === "running" ? 5_000 : false;
+      return d && d.status === "running" ? 10_000 : false;
     },
   });
+
+  // Phase 6 WebSocket connection — only while running, to keep idle pages quiet.
+  const wsEnabled =
+    Number.isFinite(numId) && numId > 0 &&
+    strategyQuery.data?.status === "running";
+  const { status: wsStatus, liveState, events: wsEvents } =
+    useStrategyWebSocket(
+      wsEnabled && strategyQuery.data ? numId : null,
+      wsEnabled,
+    );
 
   const ordersQuery = useQuery({
     queryKey: ["strategy-orders", numId],
@@ -894,13 +1049,15 @@ export default function StrategyDetail() {
               setClosingLegId(legId);
               closeLegMutation.mutate(legId);
             }}
+            liveState={liveState}
+            wsStatus={wsStatus}
           />
         </TabsContent>
         <TabsContent value="orders" className="mt-4">
           <OrdersTab orders={orders} />
         </TabsContent>
         <TabsContent value="events" className="mt-4">
-          <EventsTab events={events} />
+          <EventsTab events={events} wsEvents={wsEvents} />
         </TabsContent>
         <TabsContent value="risk" className="mt-4">
           <RiskTab strategy={strategy} />

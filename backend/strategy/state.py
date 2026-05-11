@@ -44,7 +44,7 @@ def _lock_key(run_id: int) -> str:
 
 
 def _build_initial_state(
-    *, run_id: int, strategy_legs: list[dict[str, Any]],
+    *, run_id: int, strategy_id: int, strategy_legs: list[dict[str, Any]],
     entry_orders_by_leg: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
     """Construct the initial state dict from engine inputs.
@@ -80,6 +80,7 @@ def _build_initial_state(
         }
     return {
         "run_id": run_id,
+        "strategy_id": strategy_id,
         "pnl_realized": 0.0,
         "pnl_unrealized": 0.0,
         "pnl_total": 0.0,
@@ -93,12 +94,13 @@ def _build_initial_state(
 
 
 async def init_run_state(
-    *, run_id: int, strategy_legs: list[dict[str, Any]],
+    *, run_id: int, strategy_id: int, strategy_legs: list[dict[str, Any]],
     entry_orders_by_leg: dict[int, dict[str, Any]],
 ) -> None:
     """Write the initial state on engine.start_run."""
     state = _build_initial_state(
         run_id=run_id,
+        strategy_id=strategy_id,
         strategy_legs=strategy_legs,
         entry_orders_by_leg=entry_orders_by_leg,
     )

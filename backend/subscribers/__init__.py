@@ -4,7 +4,7 @@ Call :func:`register_all` once during app startup. New subscribers can be
 added without touching publishers — that's the point of the event bus.
 """
 
-from backend.subscribers import strategy_audit_subscriber
+from backend.subscribers import strategy_audit_subscriber, strategy_ws_subscriber
 from backend.utils.event_bus import bus
 from backend.utils.logging import get_logger
 
@@ -52,7 +52,12 @@ def register_all() -> None:
             strategy_audit_subscriber.persist_event,
             f"audit:{topic}",
         )
+        bus.subscribe(
+            topic,
+            strategy_ws_subscriber.push_event,
+            f"ws:{topic}",
+        )
     logger.info(
-        "EventBus: %d strategy-audit subscriptions registered",
-        len(_STRATEGY_AUDIT_TOPICS),
+        "EventBus: %d audit + %d ws-broadcast subscriptions registered",
+        len(_STRATEGY_AUDIT_TOPICS), len(_STRATEGY_AUDIT_TOPICS),
     )
