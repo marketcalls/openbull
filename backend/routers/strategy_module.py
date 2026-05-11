@@ -576,6 +576,124 @@ async def get_strategy_events(
     return {"status": "success", "events": [_format_event(e) for e in events]}
 
 
+class EnableLiveRequest(BaseModel):
+    """Password re-auth body for going live (plan Section 14.3)."""
+
+    model_config = ConfigDict(extra="forbid")
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+@router.post("/{strategy_id}/enable_live")
+async def enable_live_mode(
+    strategy_id: int,
+    payload: EnableLiveRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Flip ``strategy.live_enabled`` to true after password re-auth.
+
+    Phase 10 lower bar than the plan's 5-min re-auth window — we always
+    re-verify the password here, regardless of how recently the user
+    logged in. The endpoint is idempotent (already-live is 200 ok),
+    refuses to flip when the strategy is currently running.
+    """
+    from backend.events.strategy_events import LiveEnabledEvent
+    from backend.security import verify_password
+    from backend.utils.event_bus import bus
+
+    try:
+        strategy = await repo.get_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    if strategy.status != "stopped":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot toggle live mode while strategy is '{strategy.status}'",
+        )
+
+    if not verify_password(payload.password, user.password_hash):
+        # Generic error — no distinction between "user not found" and
+        # "wrong password". Audit-log the failed attempt for forensics.
+        logger.warning(
+            "enable_live: password verification failed for user=%d strategy=%d",
+            user.id, strategy_id,
+        )
+        bus.publish(LiveEnabledEvent(
+            user_id=user.id,
+            strategy_id=strategy.id,
+            severity="warn",
+            message="enable_live rejected — wrong password",
+            payload={"action": "enable", "result": "rejected_password"},
+        ))
+        raise HTTPException(status_code=401, detail="Password verification failed")
+
+    if strategy.live_enabled:
+        return {"status": "success", "live_enabled": True, "note": "already enabled"}
+
+    strategy.live_enabled = True
+    await db.commit()
+    await db.refresh(strategy)
+
+    bus.publish(LiveEnabledEvent(
+        user_id=user.id,
+        strategy_id=strategy.id,
+        severity="warn",  # always warn — flipping to live is a high-impact change
+        message=f"Live mode enabled on '{strategy.name}'",
+        payload={"action": "enable"},
+    ))
+    logger.info(
+        "user=%d enabled LIVE mode on strategy=%d (%s)",
+        user.id, strategy_id, strategy.name,
+    )
+    return {"status": "success", "live_enabled": True}
+
+
+@router.post("/{strategy_id}/disable_live")
+async def disable_live_mode(
+    strategy_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Flip ``strategy.live_enabled`` back to false. No password re-prompt
+    on disable — the bar is intentionally lower than enabling. Refused
+    while the strategy is currently running (manual /stop first)."""
+    from backend.events.strategy_events import LiveEnabledEvent
+    from backend.utils.event_bus import bus
+
+    try:
+        strategy = await repo.get_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    if strategy.status != "stopped":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot toggle live mode while strategy is '{strategy.status}'",
+        )
+    if not strategy.live_enabled:
+        return {"status": "success", "live_enabled": False, "note": "already disabled"}
+
+    strategy.live_enabled = False
+    await db.commit()
+    await db.refresh(strategy)
+
+    bus.publish(LiveEnabledEvent(
+        user_id=user.id,
+        strategy_id=strategy.id,
+        severity="info",
+        message=f"Live mode disabled on '{strategy.name}'",
+        payload={"action": "disable"},
+    ))
+    logger.info(
+        "user=%d disabled live mode on strategy=%d", user.id, strategy_id,
+    )
+    return {"status": "success", "live_enabled": False}
+
+
 @router.get("/{strategy_id}/webhook_events")
 async def get_strategy_webhook_events(
     strategy_id: int,

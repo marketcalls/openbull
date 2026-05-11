@@ -277,3 +277,22 @@ export async function listEvents(
   );
   return response.data.events;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 10 — live-mode toggles (password re-auth on enable)
+// ---------------------------------------------------------------------------
+
+export async function enableLiveMode(
+  id: number,
+  password: string,
+): Promise<{ status: "success"; live_enabled: true; note?: string }> {
+  const response = await api.post(`/web/strategy/${id}/enable_live`, { password });
+  return response.data;
+}
+
+export async function disableLiveMode(
+  id: number,
+): Promise<{ status: "success"; live_enabled: false; note?: string }> {
+  const response = await api.post(`/web/strategy/${id}/disable_live`);
+  return response.data;
+}

@@ -426,7 +426,7 @@ def _broadcast_delta(
 
 async def _trigger_exit(run_id: int, leg_id: int, exit_kind: str) -> None:
     """Engine fires an exit when a leg's rule hits."""
-    from backend.strategy import engine
+    from backend.strategy import engine, live_auth
 
     from backend.models.strategy_module import SmStrategy, SmStrategyRun
 
@@ -437,14 +437,32 @@ async def _trigger_exit(run_id: int, leg_id: int, exit_kind: str) -> None:
         strategy = await db.get(SmStrategy, run.strategy_id)
         if strategy is None:
             return
+
+        # Live runs: resolve the user's broker auth fresh from the DB on
+        # every exit. Tokens are never cached in strategy state (plan
+        # Section 14.8). For sandbox runs, broker/auth/config stay None.
+        auth_token: Optional[str] = None
+        broker = run.broker
+        config: Optional[dict] = None
+        if run.mode == "live":
+            ctx = await live_auth.resolve_live_auth(
+                db, user_id=strategy.user_id, broker=run.broker,
+            )
+            if ctx is None:
+                logger.warning(
+                    "Auto-exit refused for run %d leg %d: no active broker auth "
+                    "(token expired/revoked). Leaving leg open — operator must "
+                    "square off manually.", run_id, leg_id,
+                )
+                return
+            auth_token = ctx.auth_token
+            config = ctx.config
+
         try:
-            # Live mode would need broker auth here; rule-driven exits in
-            # Phase 6 are sandbox-only until Phase 10. Pass empty broker
-            # context for sandbox.
             await engine._exit_legs(  # noqa: SLF001 — engine-internal call
                 db, strategy=strategy, run=run, leg_ids=[leg_id],
                 exit_kind=exit_kind,
-                auth_token=None, broker=run.broker, config=None,
+                auth_token=auth_token, broker=broker, config=config,
             )
         except Exception:
             logger.exception("Auto-exit failed for run %d leg %d", run_id, leg_id)
@@ -458,27 +476,43 @@ async def _trigger_run_stop(run_id: int, stop_reason: str) -> None:
     manual /stop. Already-closed legs are skipped by the Phase 4
     'already closed' guard in ``engine._exit_legs``.
     """
-    from backend.strategy import engine
+    from backend.strategy import engine, live_auth
 
-    from backend.models.strategy_module import SmStrategy
+    from backend.models.strategy_module import SmStrategy, SmStrategyRun
 
     async with async_session() as db:
-        # Resolve strategy via the run row (mirrors stop_run's own lookup).
-        from backend.models.strategy_module import SmStrategyRun
         run = await db.get(SmStrategyRun, run_id)
         if run is None or run.stopped_at is not None:
             return
         strategy = await db.get(SmStrategy, run.strategy_id)
         if strategy is None or strategy.status != "running":
             return
+
+        auth_token: Optional[str] = None
+        broker = run.broker
+        config: Optional[dict] = None
+        if run.mode == "live":
+            ctx = await live_auth.resolve_live_auth(
+                db, user_id=strategy.user_id, broker=run.broker,
+            )
+            if ctx is None:
+                logger.warning(
+                    "Auto-stop refused for run %d (reason=%s): no active broker auth. "
+                    "Run left running — operator must square off manually.",
+                    run_id, stop_reason,
+                )
+                return
+            auth_token = ctx.auth_token
+            config = ctx.config
+
         try:
             await engine.stop_run(
                 db,
                 strategy=strategy,
                 stop_reason=stop_reason,
-                auth_token=None,
-                broker=run.broker,
-                config=None,
+                auth_token=auth_token,
+                broker=broker,
+                config=config,
             )
         except Exception:
             logger.exception(

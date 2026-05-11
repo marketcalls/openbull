@@ -278,8 +278,6 @@ async def _fire_start(strategy_id: int, mode: str) -> None:
 
         broker = await _resolve_user_broker(db, strategy.user_id)
         if not broker:
-            # No broker configured — sandbox runs still need a name on the
-            # run row. Fall back to a sentinel; live mode bails out.
             if mode == "live":
                 logger.warning(
                     "Scheduler: strategy %d cannot start live — no active broker",
@@ -288,14 +286,33 @@ async def _fire_start(strategy_id: int, mode: str) -> None:
                 return
             broker = "scheduler-sandbox"
 
+        # Live runs need a real broker token threaded through to the
+        # engine so it can place real orders. Resolved fresh from DB —
+        # tokens are never cached in strategy state (plan Section 14.8).
+        auth_token = None
+        config = None
+        if mode == "live":
+            from backend.strategy import live_auth
+            ctx = await live_auth.resolve_live_auth(
+                db, user_id=strategy.user_id, broker=broker,
+            )
+            if ctx is None:
+                logger.warning(
+                    "Scheduler: strategy %d cannot start live — broker session "
+                    "expired or revoked", strategy_id,
+                )
+                return
+            auth_token = ctx.auth_token
+            config = ctx.config
+
         try:
             await engine.start_run(
                 db,
                 strategy=strategy,
                 mode=mode,
                 broker=broker,
-                auth_token=None,
-                config=None,
+                auth_token=auth_token,
+                config=config,
                 trigger_source="scheduler",
             )
         except engine.EngineError as e:
@@ -310,7 +327,8 @@ async def _fire_start(strategy_id: int, mode: str) -> None:
 
 async def _fire_auto_stop(strategy_id: int) -> None:
     """Cron-triggered stop. Idempotent: no-op when already stopped."""
-    from backend.strategy import engine
+    from backend.models.strategy_module import SmStrategyRun
+    from backend.strategy import engine, live_auth
 
     async with async_session() as db:
         strategy = await db.get(SmStrategy, strategy_id)
@@ -321,14 +339,35 @@ async def _fire_auto_stop(strategy_id: int) -> None:
                 "Scheduler: strategy %d not running — skip auto-stop", strategy_id,
             )
             return
+
+        auth_token = None
+        broker = None
+        config = None
+        if strategy.current_run_id:
+            run = await db.get(SmStrategyRun, strategy.current_run_id)
+            if run and run.mode == "live":
+                ctx = await live_auth.resolve_live_auth(
+                    db, user_id=strategy.user_id, broker=run.broker,
+                )
+                if ctx is None:
+                    logger.warning(
+                        "Scheduler: strategy %d live auto-stop blocked — no "
+                        "broker auth. Leaving run live; operator must square "
+                        "off manually.", strategy_id,
+                    )
+                    return
+                auth_token = ctx.auth_token
+                broker = ctx.broker
+                config = ctx.config
+
         try:
             await engine.stop_run(
                 db,
                 strategy=strategy,
                 stop_reason="scheduler",
-                auth_token=None,
-                broker=None,
-                config=None,
+                auth_token=auth_token,
+                broker=broker,
+                config=config,
             )
         except engine.EngineError as e:
             logger.warning(

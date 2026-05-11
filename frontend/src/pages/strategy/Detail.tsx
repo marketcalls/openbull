@@ -35,6 +35,8 @@ import {
   closeAll,
   closeLeg,
   deleteStrategy,
+  disableLiveMode,
+  enableLiveMode,
   getStrategy,
   listEvents,
   listOrders,
@@ -802,6 +804,8 @@ export default function StrategyDetail() {
     token: string;
     url: string;
   } | null>(null);
+  const [enableLiveDialogOpen, setEnableLiveDialogOpen] = useState(false);
+  const [liveModePassword, setLiveModePassword] = useState("");
 
   const strategyQuery = useQuery({
     queryKey: ["strategy", numId],
@@ -930,6 +934,36 @@ export default function StrategyDetail() {
     onError: () => toast.error("Failed to rotate token"),
   });
 
+  const enableLiveMutation = useMutation({
+    mutationFn: (password: string) => enableLiveMode(numId, password),
+    onSuccess: () => {
+      toast.success("Live mode enabled");
+      setEnableLiveDialogOpen(false);
+      setLiveModePassword("");
+      queryClient.invalidateQueries({ queryKey: ["strategy", numId] });
+    },
+    onError: (err: unknown) => {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } }).response?.data
+          ?.detail ?? "Live-enable failed";
+      toast.error(detail);
+    },
+  });
+
+  const disableLiveMutation = useMutation({
+    mutationFn: () => disableLiveMode(numId),
+    onSuccess: () => {
+      toast.success("Live mode disabled");
+      queryClient.invalidateQueries({ queryKey: ["strategy", numId] });
+    },
+    onError: (err: unknown) => {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } }).response?.data
+          ?.detail ?? "Live-disable failed";
+      toast.error(detail);
+    },
+  });
+
   const deleteMutation = useMutation({
     mutationFn: () => deleteStrategy(numId),
     onSuccess: () => {
@@ -1008,6 +1042,25 @@ export default function StrategyDetail() {
               </Button>
             </>
           )}
+          {isStopped && !strategy.live_enabled && (
+            <Button
+              variant="destructive"
+              onClick={() => setEnableLiveDialogOpen(true)}
+              title="Enable live mode (password re-auth required)"
+            >
+              Enable LIVE
+            </Button>
+          )}
+          {isStopped && strategy.live_enabled && (
+            <Button
+              variant="outline"
+              onClick={() => disableLiveMutation.mutate()}
+              disabled={disableLiveMutation.isPending}
+              title="Disable live mode — strategy reverts to sandbox-only"
+            >
+              {disableLiveMutation.isPending ? "Disabling…" : "Disable LIVE"}
+            </Button>
+          )}
           <Button variant="outline" onClick={() => navigate("/strategy")}>
             Back
           </Button>
@@ -1073,6 +1126,62 @@ export default function StrategyDetail() {
           <HistoryTab runs={runs} />
         </TabsContent>
       </Tabs>
+
+      {/* Enable LIVE mode — password re-auth (plan Section 14.3) */}
+      <Dialog open={enableLiveDialogOpen} onOpenChange={setEnableLiveDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Enable live mode — confirm with password</DialogTitle>
+            <p className="text-sm text-muted-foreground">
+              Live mode places real broker orders. Once enabled, any
+              scheduled / webhook / manual start with{" "}
+              <span className="font-mono">mode=live</span> will hit your
+              broker. Disable again from the Detail header.
+            </p>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="livepw">Account password</Label>
+              <Input
+                id="livepw"
+                type="password"
+                value={liveModePassword}
+                onChange={(e) => setLiveModePassword(e.target.value)}
+                autoFocus
+                autoComplete="current-password"
+                placeholder="re-enter your account password"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && liveModePassword) {
+                    enableLiveMutation.mutate(liveModePassword);
+                  }
+                }}
+              />
+            </div>
+            <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
+              You are about to enable LIVE mode. Real orders, real margin.
+              This action is recorded in the audit trail.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setEnableLiveDialogOpen(false);
+                setLiveModePassword("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!liveModePassword || enableLiveMutation.isPending}
+              onClick={() => enableLiveMutation.mutate(liveModePassword)}
+            >
+              {enableLiveMutation.isPending ? "Verifying…" : "Enable LIVE"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Start-run mode picker */}
       <Dialog open={startDialogOpen} onOpenChange={setStartDialogOpen}>

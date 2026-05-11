@@ -400,7 +400,7 @@ async def handle_webhook(
             result_label="ok",
         )
 
-        from backend.strategy import engine, scheduler as sm_scheduler
+        from backend.strategy import engine, live_auth, scheduler as sm_scheduler
 
         try:
             if action == "start":
@@ -415,9 +415,6 @@ async def handle_webhook(
                         },
                         result_label="ok",
                     )
-                # Resolve broker via scheduler's helper (same logic — looks
-                # up user's active BrokerConfig). Sandbox falls back to a
-                # sentinel; live refuses without a broker.
                 broker = await sm_scheduler._resolve_user_broker(db, strategy_fresh.user_id)
                 if not broker:
                     if mode == "live":
@@ -435,13 +432,37 @@ async def handle_webhook(
                         )
                     broker = "webhook-sandbox"
 
+                # Live: fetch broker auth token fresh from DB so the engine
+                # can place real orders. Sandbox leaves auth_token=None.
+                auth_token = None
+                cfg_dict = None
+                if mode == "live":
+                    ctx = await live_auth.resolve_live_auth(
+                        db, user_id=strategy_fresh.user_id, broker=broker,
+                    )
+                    if ctx is None:
+                        await _record_event(
+                            db, strategy_id=strategy.id, action=action, mode=mode,
+                            payload=parsed, ip=ip, user_agent=user_agent,
+                            result_label="rejected_engine_error",
+                            error="broker_session_expired",
+                        )
+                        return WebhookOutcome(
+                            status_code=403,
+                            body={"status": "error", "message": "Broker session expired or revoked"},
+                            result_label="rejected_engine_error",
+                            error="broker_session_expired",
+                        )
+                    auth_token = ctx.auth_token
+                    cfg_dict = ctx.config
+
                 run, _ = await engine.start_run(
                     db,
                     strategy=strategy_fresh,
                     mode=mode,
                     broker=broker,
-                    auth_token=None,
-                    config=None,
+                    auth_token=auth_token,
+                    config=cfg_dict,
                     trigger_source="webhook",
                 )
                 # Stamp the webhook_event onto the run for forensic linking.
@@ -460,13 +481,35 @@ async def handle_webhook(
                         body={"status": "ok", "note": "not running — nothing to stop"},
                         result_label="ok",
                     )
+                # If the running run is live, resolve broker auth for the
+                # exit orders. Sandbox stop needs nothing.
+                stop_auth = None
+                stop_broker = None
+                stop_cfg = None
+                if strategy_fresh.current_run_id:
+                    from backend.models.strategy_module import SmStrategyRun
+                    run = await db.get(SmStrategyRun, strategy_fresh.current_run_id)
+                    if run and run.mode == "live":
+                        ctx = await live_auth.resolve_live_auth(
+                            db, user_id=strategy_fresh.user_id, broker=run.broker,
+                        )
+                        if ctx is None:
+                            return WebhookOutcome(
+                                status_code=403,
+                                body={"status": "error", "message": "Broker session expired"},
+                                result_label="rejected_engine_error",
+                                error="broker_session_expired",
+                            )
+                        stop_auth = ctx.auth_token
+                        stop_broker = ctx.broker
+                        stop_cfg = ctx.config
                 result = await engine.stop_run(
                     db,
                     strategy=strategy_fresh,
                     stop_reason="webhook",
-                    auth_token=None,
-                    broker=None,
-                    config=None,
+                    auth_token=stop_auth,
+                    broker=stop_broker,
+                    config=stop_cfg,
                 )
                 return WebhookOutcome(
                     status_code=200,
