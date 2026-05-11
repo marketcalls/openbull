@@ -121,12 +121,21 @@ def evaluate_strategy(
     if lock_profit_cfg:
         mode = lock_profit_cfg.get("mode")
         arm_at = lock_profit_cfg.get("if_profit_reaches")
-        floor_initial = lock_profit_cfg.get("lock_profit")
-        trail_step = lock_profit_cfg.get("trail_step")
+        floor_initial = float(lock_profit_cfg.get("lock_profit") or 0.0)
+        trail_step_cfg = lock_profit_cfg.get("trail_step")
+        trail_step = float(trail_step_cfg) if trail_step_cfg else None
 
+        just_armed = False
         if not out.lock_armed and arm_at is not None and mtm_total >= float(arm_at):
             out.lock_armed = True
-            out.lock_floor = float(floor_initial or 0.0)
+            just_armed = True
+            # For Lock+Trail, set the arming-tick floor to the trail-adjusted
+            # value directly so the audit shows a single coherent event
+            # instead of "armed at lock_profit, then immediately advanced".
+            if mode == "lock_and_trail" and trail_step:
+                out.lock_floor = max(floor_initial, out.pnl_peak - trail_step)
+            else:
+                out.lock_floor = floor_initial
             out.events.append({
                 "kind": "lock_profit_armed",
                 "severity": "info",
@@ -142,12 +151,11 @@ def evaluate_strategy(
             })
 
         if out.lock_armed:
-            # Trail mode ratchets the floor upward as the peak rises.
-            if mode == "lock_and_trail" and trail_step:
-                new_floor = max(
-                    float(floor_initial or 0.0),
-                    out.pnl_peak - float(trail_step),
-                )
+            # Trail mode ratchets the floor upward as the peak rises. Skip
+            # this on the same tick that armed — the arming event above
+            # already includes the trail-adjusted initial floor.
+            if not just_armed and mode == "lock_and_trail" and trail_step:
+                new_floor = max(floor_initial, out.pnl_peak - trail_step)
                 if out.lock_floor is None or new_floor > out.lock_floor:
                     prev = out.lock_floor
                     out.lock_floor = new_floor
@@ -162,7 +170,7 @@ def evaluate_strategy(
                             "payload": {
                                 "lock_floor": new_floor,
                                 "pnl_peak": out.pnl_peak,
-                                "trail_step": float(trail_step),
+                                "trail_step": trail_step,
                             },
                         })
 
