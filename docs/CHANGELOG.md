@@ -6,6 +6,29 @@ The most recent entries are at the top. Older entries are pruned to a rolling 12
 
 ---
 
+## 2026-05-11 — `/playground` Interactive API Tester
+
+**Scope**: new in-app surface for testing every REST + WebSocket endpoint that OpenBull exposes. Ported from openalgo's `/playground` to openbull's React + FastAPI stack; pixel-identical layout, openbull branding, mode wired to `useTradingMode()`.
+
+**New documentation**
+- `docs/design/websockets-format.md` — new "Application-level Ping" section documenting the `{action: "ping", _pingId, timestamp}` ↔ `{type: "pong", _pingId, timestamp}` round-trip used by the Playground for latency measurement. This is distinct from the WS protocol's frame-level ping which the browser handles internally.
+
+**Feature additions**
+- `backend/routers/playground.py` — three cookie-authed helper endpoints: `GET /web/playground/{api-key,endpoints,host}` ([details in API ref](api/README.md)).
+- `backend/websocket_proxy/server.py` — `ping` action handler so the Playground's Connection Panel can compute round-trip latency.
+- `collections/openbull/IN_stock/*.bru` — 14 new Bruno endpoint files (8 HTTP + 6 WebSocket): CloseAllPositions, PlaceSmartOrder, OITracker, MaxPain, IVChart, IVSmile, VolSurface, Straddle, GEX, WS_Authenticate, WS_Subscribe_{LTP,Quote,Depth}, WS_Unsubscribe, WS_Ping.
+- Frontend: `/playground` route (top-level, full-screen), Playground page, four WebSocket panel components, JSON editor (CodeMirror 6), three Base-UI primitive wrappers (Switch, Select, ScrollArea).
+
+**Conventions baked into the new examples**
+- NFO weekly expiries fall on Tuesday — sample expiry is `12MAY26` across analytics endpoints; VolSurface uses `[12MAY26, 19MAY26]` (consecutive Tuesdays).
+- BFO weekly expiries fall on Thursday — call out separately when adding SENSEX / BANKEX examples.
+- Index examples use `NIFTY` / `BANKNIFTY` on `NSE_INDEX`.
+- Cash equity examples use `RELIANCE` / `NHPC` / `TCS` / `INFY` / `SBIN` / `AXISBANK` on `NSE`.
+- For equities, default to `CNC` (delivery) — `MIS` is intraday and inappropriate as a default in docs.
+- Lot sizes are sourced from the broker's master contract via `backend/services/symbol_service.py::get_option_underlyings`, not hardcoded.
+
+---
+
 ## 2026-05-11 — Code-vs-Docs Audit Pass
 
 **Scope**: full validation of all API endpoint docs, SERVICES.md line numbers, and supporting design docs against current code in `backend/`. Four parallel audit agents; every drift verified against code before fix.

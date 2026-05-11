@@ -45,6 +45,8 @@ Why through the UI? Setup and broker OAuth are one-time steps that involve secre
 
 ---
 
+> **Want to skip the curl?** Once you've completed Steps 0 and 1, open `/playground` in your browser. Every endpoint in this tutorial is listed in the sidebar — click an endpoint, the request body fills with a sane default and your API key is pre-injected, hit **Send**. Toggle the topbar switch to flip between Live and Sandbox without leaving the page. The CLI walkthrough below is what's happening under the hood.
+
 ## Step 1 — Generate an API key
 
 In the UI: `/apikey` → click "Generate" → copy the key (shown **once** — the database stores only an Argon2id hash, so save it somewhere safe).

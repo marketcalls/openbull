@@ -338,6 +338,17 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
 
                 await _send_json(ws, {"type": "unsubscribe", "status": "success"})
 
+            elif action == "ping":
+                # App-level ping for client-side latency measurement. The WS
+                # protocol's frame-level pings (ping_interval=30) are
+                # browser-hidden, so the Playground UI needs an echo on a
+                # JSON message to compute round-trip time.
+                ping_id = msg.get("_pingId")
+                pong: dict = {"type": "pong", "timestamp": int(time.time() * 1000)}
+                if ping_id is not None:
+                    pong["_pingId"] = ping_id
+                await _send_json(ws, pong)
+
             else:
                 await _send_json(ws, {"type": "error", "message": f"Unknown action: {action}"})
 

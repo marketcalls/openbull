@@ -13,6 +13,7 @@ OpenBull is a self-hosted options trading platform for Indian markets. Multi-use
 - **Redis cache layer** — API key, broker context, and master-contract symtoken cached with TTLs and invalidation on logout / OAuth.
 - **Centralized logging** — request-id stamping, sensitive-data redaction, bounded rotating files, DB-backed `error_logs` and `api_logs` tables with worker-trimmed row caps. `/logs` viewer in-app.
 - **Light / Dark / Sandbox theming** — full light & dark modes (preference persists in `localStorage`), plus a fixed slate-indigo palette that activates whenever the global trading mode is sandbox so "not live" reads instantly.
+- **`/playground` interactive tester** — Postman/Stripe-style page covering every REST + WebSocket endpoint. Sidebar of endpoints from the Bruno collection, multi-tab request editor with CodeMirror JSON, syntax-highlighted responses with status/latency/size, cURL export. WebSocket mode has a Connect/Disconnect/Ping panel and a message-template gallery. Honours the Live ↔ Sandbox toggle so the call you test is the call you'll run.
 - **Production install scripts** — `install/install.sh`, `install/update.sh`, `install/perftuning.sh` — Cloudflare-aware, A-grade nginx security headers, certbot-friendly.
 
 ## Tech Stack

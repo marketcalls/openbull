@@ -1,0 +1,32 @@
+meta {
+  name: Ping
+  type: websocket
+  seq: 45
+}
+
+websocket {
+  url: ws://127.0.0.1:8765
+  description: App-level ping for client-side latency measurement (round-trip in ms)
+}
+
+message:json {
+  {
+    "action": "ping",
+    "_pingId": "ping-1",
+    "timestamp": 0
+  }
+}
+
+docs {
+  Server responds with:
+    {"type": "pong", "_pingId": "ping-1", "timestamp": <epoch_ms>}
+
+  This is an application-level ping distinct from the WebSocket protocol's
+  frame-level ping (which the browser handles internally and doesn't surface).
+  The Playground uses this to measure round-trip latency in the Connection
+  Panel; the response's ``_pingId`` is echoed back so the client can match
+  responses to pending pings.
+
+  Replace ``timestamp`` with ``Date.now()`` at send time if you want to
+  measure clock skew or one-way latency.
+}

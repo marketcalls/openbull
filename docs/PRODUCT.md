@@ -136,7 +136,17 @@ Paired pages implementing the full lifecycle of a multi-leg options strategy: **
 - **One shared WebSocket** across the entire page — a symbol used by three strategies streams once.
 - Live aggregate P&L per card; close-at-exit dialog with editable per-leg exit prices; hard delete with optimistic UI.
 
-### 3.7 Sandbox simulated trading
+### 3.7 Interactive API Playground (`/playground`)
+
+A Postman/Stripe-style API tester baked into the platform — every REST and WebSocket endpoint discoverable from a sidebar, request bodies pre-filled with sensible defaults from the Bruno collection, responses syntax-highlighted with status, latency, and payload-size readouts.
+
+- **Sidebar of endpoints** — six collapsible categories (account, orders, data, analytics, utilities, websocket) populated from `collections/openbull/IN_stock/*.bru`. Search across name and path.
+- **Multi-tab REST tester** — each endpoint opens in its own tab with a modified-dot indicator. CodeMirror JSON editor with bracket matching and auto-indent on the request side; syntax-highlighted response on the right with status pill, latency (ms), payload size, line numbers, cURL export, copy.
+- **WebSocket mode** — same page, REST/WebSocket toggle in the topbar. ConnectionPanel with status pill, Connect/Disconnect/Ping, last + average latency, auto-reconnect. MessageComposer with categorised template gallery (Authenticate / Subscribe / Depth / Unsubscribe / Utility) and Ctrl/Cmd+Enter to send. MessageLog with timestamp + direction badges, expandable JSON, search filter, JSON export.
+- **Mode-aware** — the topbar Live ↔ Sandbox toggle is bound to the global `useTradingMode()` context, so a `/api/v1/placeorder` you fire from the Playground routes through the same `dispatch_by_mode` as the live UI. Test in sandbox; flip to live when you're ready.
+- **API key pre-injected** — cookie auth picks up the caller's API key from the backend and pre-fills `apikey` fields in request bodies and the WebSocket authenticate template. Show/hide and copy controls in the sidebar footer.
+
+### 3.8 Sandbox simulated trading
 
 `backend/sandbox/` — tick-driven simulation engine with full lifecycle parity to live trading.
 
@@ -150,11 +160,11 @@ Paired pages implementing the full lifecycle of a multi-leg options strategy: **
 
 The frontend reflects sandbox via `TradingModeContext`: a topbar switch flips the mode, the layout tints amber when sandbox is active, and `/sandbox/mypnl` surfaces the per-user P&L history.
 
-### 3.8 Symbol search (`/search`)
+### 3.9 Symbol search (`/search`)
 
 Tokenized async search across the full master-contract table (~120k rows). Multi-token AND matching, exchange filters, instrument-type filters. The same search component powers the underlying-picker combobox in every options tool.
 
-### 3.9 Logging & audit
+### 3.10 Logging & audit
 
 - **Request-id stamping** — every log line and every response header is correlated to a `X-Request-ID` via a contextvar.
 - **Sensitive-data redaction** — automatic regex stripping of `apikey` / `access_token` / `api_secret` / `Authorization` / `Bearer` payloads on every log record, including request/response bodies in `api_logs`.

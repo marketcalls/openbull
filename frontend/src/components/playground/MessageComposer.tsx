@@ -28,7 +28,7 @@ import { cn } from "@/lib/utils";
 import type { MessageTemplate } from "@/types/websocket";
 
 interface CategorizedTemplate extends MessageTemplate {
-  category: "auth" | "subscribe" | "depth" | "unsubscribe";
+  category: "auth" | "subscribe" | "depth" | "unsubscribe" | "utility";
 }
 
 function getMessageTemplates(): CategorizedTemplate[] {
@@ -161,6 +161,15 @@ function getMessageTemplates(): CategorizedTemplate[] {
       },
       category: "unsubscribe",
     },
+
+    // Utility
+    {
+      key: "ping",
+      label: "Ping",
+      description: "App-level ping for latency measurement",
+      template: { action: "ping", timestamp: "{{TIMESTAMP}}" },
+      category: "utility",
+    },
   ];
 }
 
@@ -169,6 +178,7 @@ const CATEGORY_LABELS: Record<CategorizedTemplate["category"], string> = {
   subscribe: "Subscriptions",
   depth: "Market Depth",
   unsubscribe: "Unsubscribe",
+  utility: "Utility",
 };
 
 function getTemplatesByCategory(): Record<string, CategorizedTemplate[]> {
@@ -205,6 +215,9 @@ export function MessageComposer({
       let str = JSON.stringify(template.template, null, 2);
       if (apiKey && str.includes("{{API_KEY}}")) {
         str = str.replace("{{API_KEY}}", apiKey);
+      }
+      if (str.includes("{{TIMESTAMP}}")) {
+        str = str.replace('"{{TIMESTAMP}}"', String(Date.now()));
       }
       onChange(str);
       setSelectedTemplate(templateKey);

@@ -15,11 +15,12 @@ FastAPI auto-generates an interactive API reference at runtime from the live rou
 
 | URL | Tool | Use when |
 |---|---|---|
-| `http://127.0.0.1:8000/docs` | Swagger UI | You want to try a call interactively against a live server. Click "Try it out", fill the form, hit Execute, see the response. |
-| `http://127.0.0.1:8000/redoc` | ReDoc | You want a clean, side-by-side spec view for browsing — no try-it-out, but better readability for large endpoints. |
-| `http://127.0.0.1:8000/openapi.json` | Raw OpenAPI 3 spec | You want to import the spec into Postman, generate a client SDK, run contract tests, or feed it to another API tool. |
+| `http://127.0.0.1:5173/playground` | **Playground** (recommended) | You want the OpenBull-shaped tester — sidebar of every endpoint from the Bruno collection, REST + WebSocket modes in one page, syntax-highlighted JSON, latency/size readout, cURL export, and the global Live ↔ Sandbox toggle wired in. Cookie-authed so it picks up your API key automatically. |
+| `http://127.0.0.1:8000/docs` | Swagger UI | Generated directly from the FastAPI route signatures. Useful for the raw OpenAPI surface and "Try it out" against a live server. |
+| `http://127.0.0.1:8000/redoc` | ReDoc | Clean, side-by-side spec view for browsing — no try-it-out, but better readability for large endpoints. |
+| `http://127.0.0.1:8000/openapi.json` | Raw OpenAPI 3 spec | Import into Postman, generate a client SDK, run contract tests, or feed to another API tool. |
 
-These are the **authoritative request/response schemas** at runtime. The Markdown docs in this folder are narrative reference — they explain *why* and *when*, with examples and notes. Treat the auto-docs as canonical for shape; treat the Markdown as canonical for intent.
+These are the **authoritative request/response schemas** at runtime. The Markdown docs in this folder are narrative reference — they explain *why* and *when*, with examples and notes. Treat the auto-docs and the playground as canonical for shape; treat the Markdown as canonical for intent.
 
 ## Base URL
 

@@ -317,6 +317,32 @@ Top-level errors (not tied to an action) and action-scoped errors:
 `Max connections reached` is sent immediately before the server closes the
 socket — OpenBull caps concurrent clients at 10 (`MAX_WS_CONNECTIONS`).
 
+## Application-level Ping
+
+For client-side latency measurement, OpenBull supports an app-level ping
+distinct from the WebSocket protocol's frame-level ping (which the browser
+handles internally and doesn't expose to JavaScript).
+
+Request:
+
+```json
+{"action": "ping", "_pingId": "ping-1", "timestamp": 1717023123456}
+```
+
+Response:
+
+```json
+{"type": "pong", "_pingId": "ping-1", "timestamp": 1717023123482}
+```
+
+The server echoes any `_pingId` field back so clients can match responses to
+outstanding pings (useful when several pings are in flight). The `timestamp`
+on the response is the server's millisecond epoch when it sent the pong —
+useful for one-way latency analysis if both clocks are NTP-synced.
+
+The Playground's Connection Panel uses this protocol to compute round-trip
+latency and the rolling average over the last 100 samples.
+
 ## Heartbeat and Reconnection
 
 - Server sends WebSocket-level pings every 30 s with a 10 s timeout

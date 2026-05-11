@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | **Last updated** | 2026-05-11 |
-| **Doc-set version** | Aligned with code at commit `29dfd36`. Note: the Strategy Module has advanced from phase 3 (when this doc set was last refreshed) to phase 6 (engine + crash recovery + tick feed). Runtime documentation for the module is queued — caveats remain in [PRODUCT.md](./PRODUCT.md), [ARCHITECTURE.md](./design/ARCHITECTURE.md), [SERVICES.md](./design/SERVICES.md). |
+| **Doc-set version** | Aligned with code at HEAD. Two large feature areas have landed since the last full doc refresh: (1) the Strategy Module engine (phases 4–8 — engine skeleton, crash recovery, tick feed, per-leg + strategy-level risk, APScheduler cron), runtime docs still queued; (2) the `/playground` interactive REST + WebSocket tester, covered in the changelog and surfaced under "For integrators" below. |
 | **Owner** | Platform team |
 | **Change history** | [CHANGELOG.md](./CHANGELOG.md) |
 
@@ -39,6 +39,7 @@ Welcome. This is the index for everything under `docs/`. Pick the doc closest to
 | Doc | Topic |
 |---|---|
 | [`api/README.md`](./api/README.md) | External API reference index — auth, base URL, response envelope, rate limits, full endpoint catalogue. |
+| **Interactive playground** at `/playground` | The fastest way to learn the API — sidebar of every endpoint, live Send button, syntax-highlighted responses, latency / payload size readout, cURL export. Toggle between REST and WebSocket modes from the topbar. Honours the global Live ↔ Sandbox switch so the same call you test here is the call you'll run from a script. |
 
 ### REST endpoints by group
 
