@@ -664,12 +664,12 @@ export default function Playground() {
             )}
           </Button>
 
-          <Button variant="ghost" size="sm" className="h-7 text-xs" asChild>
-            <Link to="/dashboard">
+          <Link to="/dashboard">
+            <Button variant="ghost" size="sm" className="h-7 text-xs">
               <Home className="h-3.5 w-3.5 mr-1.5" />
               Dashboard
-            </Link>
-          </Button>
+            </Button>
+          </Link>
 
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -1088,12 +1088,12 @@ export default function Playground() {
                     Select an endpoint from the sidebar to get started
                   </p>
                   {!apiKey && (
-                    <Button variant="outline" size="sm" asChild>
-                      <Link to="/apikey">
+                    <Link to="/apikey">
+                      <Button variant="outline" size="sm">
                         <Key className="h-4 w-4 mr-2" />
                         Generate API Key
-                      </Link>
-                    </Button>
+                      </Button>
+                    </Link>
                   )}
                 </div>
               )}
