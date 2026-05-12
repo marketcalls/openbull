@@ -10,15 +10,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { JsonEditor } from "@/components/ui/json-editor";
 import {
   buildExportUrl,
   getApiLogStats,
@@ -28,25 +20,95 @@ import {
 } from "@/api/logs";
 import { cn } from "@/lib/utils";
 
-const METHODS = ["", "GET", "POST", "PUT", "PATCH", "DELETE"] as const;
-const STATUS_CLASSES = ["", "2xx", "3xx", "4xx", "5xx"] as const;
+// ---------------------------------------------------------------------------
+// Constants / helpers
+// ---------------------------------------------------------------------------
+
+const API_TYPES = [
+  "",
+  "placeorder",
+  "placesmartorder",
+  "modifyorder",
+  "cancelorder",
+  "cancelallorder",
+  "closeposition",
+  "basketorder",
+  "splitorder",
+  "optionsorder",
+  "optionsmultiorder",
+] as const;
+
+const STATUS_CLASSES = ["", "2xx", "4xx", "5xx"] as const;
 const MODES = ["", "live", "sandbox"] as const;
 
 type Filters = {
-  method: string;
+  api_type: string;
   mode: string;
   status_class: string;
-  path_contains: string;
+  search: string;
   start: string;
   end: string;
 };
 
-function statusBadge(code: number): "default" | "secondary" | "destructive" | "outline" {
-  if (code >= 500) return "destructive";
-  if (code >= 400) return "destructive";
-  if (code >= 300) return "secondary";
-  if (code >= 200) return "default";
-  return "outline";
+function apiTypeFromPath(path: string): string {
+  const tail = path.split("/").filter(Boolean).pop();
+  return tail || path;
+}
+
+function apiTypeTone(apiType: string): string {
+  switch (apiType) {
+    case "placeorder":
+      return "bg-blue-500/15 text-blue-700 ring-blue-500/30 dark:text-blue-300";
+    case "placesmartorder":
+      return "bg-purple-500/15 text-purple-700 ring-purple-500/30 dark:text-purple-300";
+    case "modifyorder":
+      return "bg-amber-500/15 text-amber-700 ring-amber-500/30 dark:text-amber-300";
+    case "cancelorder":
+    case "cancelallorder":
+      return "bg-rose-500/15 text-rose-700 ring-rose-500/30 dark:text-rose-300";
+    case "closeposition":
+      return "bg-emerald-500/15 text-emerald-700 ring-emerald-500/30 dark:text-emerald-300";
+    case "basketorder":
+    case "splitorder":
+      return "bg-indigo-500/15 text-indigo-700 ring-indigo-500/30 dark:text-indigo-300";
+    case "optionsorder":
+    case "optionsmultiorder":
+      return "bg-cyan-500/15 text-cyan-700 ring-cyan-500/30 dark:text-cyan-300";
+    default:
+      return "bg-muted text-muted-foreground ring-border";
+  }
+}
+
+function statusTone(code: number): string {
+  if (code >= 500) return "bg-rose-500/15 text-rose-700 ring-rose-500/30 dark:text-rose-300";
+  if (code >= 400) return "bg-amber-500/15 text-amber-700 ring-amber-500/30 dark:text-amber-300";
+  if (code >= 200 && code < 300)
+    return "bg-emerald-500/15 text-emerald-700 ring-emerald-500/30 dark:text-emerald-300";
+  return "bg-muted text-muted-foreground ring-border";
+}
+
+function actionTone(action: string): string {
+  return action.toUpperCase() === "BUY"
+    ? "bg-emerald-500/15 text-emerald-700 ring-emerald-500/30 dark:text-emerald-300"
+    : "bg-rose-500/15 text-rose-700 ring-rose-500/30 dark:text-rose-300";
+}
+
+function modeTone(mode: string | null): string {
+  if (mode === "sandbox")
+    return "bg-indigo-500/15 text-indigo-700 ring-indigo-500/30 dark:text-indigo-300";
+  if (mode === "live")
+    return "bg-emerald-500/15 text-emerald-700 ring-emerald-500/30 dark:text-emerald-300";
+  return "bg-muted text-muted-foreground ring-border";
+}
+
+function parseJson(s: string | null): Record<string, unknown> {
+  if (!s) return {};
+  try {
+    const v = JSON.parse(s);
+    return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
 function prettyJson(s: string | null): string {
@@ -67,16 +129,27 @@ function fmtMs(ms: number | null | undefined): string {
 
 function fmtTime(iso: string | null): string {
   if (!iso) return "—";
-  const d = new Date(iso);
-  return d.toLocaleString();
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(iso));
 }
+
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
 
 export default function Logs() {
   const [filters, setFilters] = useState<Filters>({
-    method: "",
+    api_type: "",
     mode: "",
     status_class: "",
-    path_contains: "",
+    search: "",
     start: "",
     end: "",
   });
@@ -86,12 +159,14 @@ export default function Logs() {
 
   const queryParams: ListApiLogsParams = useMemo(
     () => ({
-      limit: 100,
+      limit: 50,
       before_id: cursor ?? undefined,
-      method: filters.method || undefined,
       mode: (filters.mode || undefined) as ListApiLogsParams["mode"],
       status_class: (filters.status_class || undefined) as ListApiLogsParams["status_class"],
-      path_contains: filters.path_contains || undefined,
+      // api_type filter is enforced server-side by path_contains since the
+      // backend already restricts to trade endpoints — passing the api_type
+      // value as path_contains narrows further to a single endpoint.
+      path_contains: filters.api_type || filters.search || undefined,
       start: filters.start ? new Date(filters.start).toISOString() : undefined,
       end: filters.end ? new Date(filters.end).toISOString() : undefined,
     }),
@@ -99,14 +174,14 @@ export default function Logs() {
   );
 
   const logsQuery = useQuery({
-    queryKey: ["api-logs", queryParams],
+    queryKey: ["trade-logs", queryParams],
     queryFn: () => listApiLogs(queryParams),
     refetchInterval: autoRefresh ? 5000 : false,
     refetchIntervalInBackground: false,
   });
 
   const statsQuery = useQuery({
-    queryKey: ["api-logs-stats", filters.start, filters.end],
+    queryKey: ["trade-logs-stats", filters.start, filters.end],
     queryFn: () =>
       getApiLogStats(
         filters.start ? new Date(filters.start).toISOString() : undefined,
@@ -118,7 +193,7 @@ export default function Logs() {
   const setFilter = useCallback(
     <K extends keyof Filters>(key: K, value: Filters[K]) => {
       setFilters((prev) => ({ ...prev, [key]: value }));
-      setCursor(null); // reset pagination when filters change
+      setCursor(null);
       setExpandedId(null);
     },
     []
@@ -126,51 +201,94 @@ export default function Logs() {
 
   const resetFilters = useCallback(() => {
     setFilters({
-      method: "",
+      api_type: "",
       mode: "",
       status_class: "",
-      path_contains: "",
+      search: "",
       start: "",
       end: "",
     });
     setCursor(null);
   }, []);
 
+  // Client-side search filter — narrows down by symbol / orderid in the
+  // request body, on top of server-side filters. Lets the user grep without
+  // a round-trip when the page is already loaded.
+  const items = useMemo(() => {
+    const rows = logsQuery.data?.items ?? [];
+    const term = filters.search.trim().toLowerCase();
+    if (!term) return rows;
+    return rows.filter((r) => {
+      const blob = `${r.path} ${r.request_body ?? ""} ${r.response_body ?? ""}`.toLowerCase();
+      return blob.includes(term);
+    });
+  }, [logsQuery.data, filters.search]);
+
+  const nextCursor = logsQuery.data?.next_cursor ?? null;
+
   const exportUrl = useMemo(() => {
     const { limit: _l, before_id: _b, ...rest } = queryParams;
     return buildExportUrl(rest);
   }, [queryParams]);
 
-  const items = logsQuery.data?.items ?? [];
-  const nextCursor = logsQuery.data?.next_cursor ?? null;
-
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">API Logs</h1>
-        <p className="text-sm text-muted-foreground">
-          One row per <em>authenticated</em> HTTP request. Unauthenticated traffic
-          (attacker floods, expired cookies, invalid API keys) is discarded at the
-          middleware and never reaches the DB. Oldest rows are trimmed once the
-          table exceeds the configured cap.
-        </p>
+      {/* Header */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+            Trade Logs
+          </h1>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            Event-driven log of every authenticated order action — live and
+            sandbox. API keys, passwords and tokens are redacted at the
+            middleware before the row is written.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => logsQuery.refetch()}
+            disabled={logsQuery.isFetching}
+          >
+            {logsQuery.isFetching ? "Refreshing…" : "Refresh"}
+          </Button>
+          <Button
+            variant={autoRefresh ? "default" : "outline"}
+            size="sm"
+            onClick={() => setAutoRefresh((v) => !v)}
+            title="Toggle 5-second auto-refresh"
+          >
+            {autoRefresh ? "Live · on" : "Live · off"}
+          </Button>
+          <a
+            href={exportUrl}
+            className={cn(
+              "inline-flex h-7 items-center rounded-md border border-input bg-background px-2.5 text-[0.8rem] font-medium",
+              "hover:bg-muted hover:text-foreground"
+            )}
+          >
+            Export CSV
+          </a>
+        </div>
       </div>
 
       {/* Stats */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatCard label="Total" value={statsQuery.data?.total ?? "—"} />
+        <StatCard label="Total orders" value={statsQuery.data?.total ?? "—"} />
         <StatCard
-          label="2xx"
+          label="Accepted (2xx)"
           value={statsQuery.data?.ok_2xx ?? "—"}
           tone="good"
         />
         <StatCard
-          label="4xx"
+          label="Rejected (4xx)"
           value={statsQuery.data?.client_errors_4xx ?? "—"}
           tone="warn"
         />
         <StatCard
-          label="5xx"
+          label="Server errors (5xx)"
           value={statsQuery.data?.server_errors_5xx ?? "—"}
           tone="bad"
         />
@@ -178,47 +296,39 @@ export default function Logs() {
 
       {/* Filters */}
       <Card>
-        <CardHeader>
-          <CardTitle>Filters</CardTitle>
-          <CardDescription>
-            Cursor-paginated by id. Changing any filter resets the cursor.
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Filters</CardTitle>
+          <CardDescription className="text-[12px]">
+            Filters apply server-side. Cursor resets when any field changes.
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
-            <div className="space-y-1">
-              <Label htmlFor="log-method">Method</Label>
-              <select
-                id="log-method"
-                value={filters.method}
-                onChange={(e) => setFilter("method", e.target.value)}
-                className={cn(
-                  "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                )}
-              >
-                {METHODS.map((m) => (
-                  <option key={m || "any"} value={m}>
-                    {m || "Any"}
-                  </option>
-                ))}
-              </select>
+            <div className="space-y-1 lg:col-span-2">
+              <Label htmlFor="log-search">Search</Label>
+              <Input
+                id="log-search"
+                value={filters.search}
+                onChange={(e) => setFilter("search", e.target.value)}
+                placeholder="Symbol, order id, strategy…"
+                autoComplete="off"
+              />
             </div>
 
             <div className="space-y-1">
-              <Label htmlFor="log-status">Status</Label>
+              <Label htmlFor="log-apitype">API type</Label>
               <select
-                id="log-status"
-                value={filters.status_class}
-                onChange={(e) => setFilter("status_class", e.target.value)}
+                id="log-apitype"
+                value={filters.api_type}
+                onChange={(e) => setFilter("api_type", e.target.value)}
                 className={cn(
-                  "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm",
+                  "flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 )}
               >
-                {STATUS_CLASSES.map((s) => (
-                  <option key={s || "any"} value={s}>
-                    {s || "Any"}
+                {API_TYPES.map((a) => (
+                  <option key={a || "any"} value={a}>
+                    {a || "Any"}
                   </option>
                 ))}
               </select>
@@ -231,7 +341,7 @@ export default function Logs() {
                 value={filters.mode}
                 onChange={(e) => setFilter("mode", e.target.value)}
                 className={cn(
-                  "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm",
+                  "flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 )}
               >
@@ -243,15 +353,23 @@ export default function Logs() {
               </select>
             </div>
 
-            <div className="space-y-1 lg:col-span-2">
-              <Label htmlFor="log-path">Path contains</Label>
-              <Input
-                id="log-path"
-                value={filters.path_contains}
-                onChange={(e) => setFilter("path_contains", e.target.value)}
-                placeholder="/api/v1/placeorder"
-                autoComplete="off"
-              />
+            <div className="space-y-1">
+              <Label htmlFor="log-status">Status</Label>
+              <select
+                id="log-status"
+                value={filters.status_class}
+                onChange={(e) => setFilter("status_class", e.target.value)}
+                className={cn(
+                  "flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                )}
+              >
+                {STATUS_CLASSES.map((s) => (
+                  <option key={s || "any"} value={s}>
+                    {s === "" ? "Any" : s === "2xx" ? "Accepted (2xx)" : s === "4xx" ? "Rejected (4xx)" : "Server (5xx)"}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div className="space-y-1">
@@ -279,22 +397,6 @@ export default function Logs() {
             <Button variant="outline" size="sm" onClick={resetFilters}>
               Reset
             </Button>
-            <Button
-              variant={autoRefresh ? "default" : "outline"}
-              size="sm"
-              onClick={() => setAutoRefresh((v) => !v)}
-            >
-              {autoRefresh ? "Auto-refresh: on" : "Auto-refresh: off"}
-            </Button>
-            <a
-              href={exportUrl}
-              className={cn(
-                "inline-flex h-9 items-center rounded-md border border-input bg-background px-3 text-sm font-medium",
-                "hover:bg-accent hover:text-accent-foreground"
-              )}
-            >
-              Export CSV
-            </a>
             {logsQuery.isFetching && (
               <span className="text-xs text-muted-foreground">Loading…</span>
             )}
@@ -302,85 +404,66 @@ export default function Logs() {
         </CardContent>
       </Card>
 
-      {/* Table */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <div>
-            <CardTitle>Requests</CardTitle>
-            <CardDescription>
-              Click any row to inspect the full request + response bodies.
-            </CardDescription>
-          </div>
-          <div className="text-xs text-muted-foreground">
-            {items.length} row{items.length === 1 ? "" : "s"}
-            {cursor !== null && " · paginated"}
-          </div>
-        </CardHeader>
-        <CardContent>
-          {logsQuery.error ? (
-            <p className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-              Failed to load logs.
-            </p>
-          ) : items.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              {logsQuery.isLoading
-                ? "Loading…"
-                : "No logs match these filters yet."}
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-[170px]">Time</TableHead>
-                    <TableHead className="w-[90px]">Method</TableHead>
-                    <TableHead>Path</TableHead>
-                    <TableHead className="w-[90px] text-right">Status</TableHead>
-                    <TableHead className="w-[90px] text-right">Latency</TableHead>
-                    <TableHead className="w-[80px] text-right">User</TableHead>
-                    <TableHead className="w-[90px]">Auth</TableHead>
-                    <TableHead className="w-[90px]">Mode</TableHead>
-                    <TableHead className="w-[110px]">IP</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {items.map((r) => (
-                    <LogRowBlock
-                      key={r.id}
-                      row={r}
-                      expanded={expandedId === r.id}
-                      onToggle={() => setExpandedId((cur) => (cur === r.id ? null : r.id))}
-                    />
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
+      {/* Logs */}
+      <div className="space-y-3">
+        {logsQuery.error ? (
+          <Card>
+            <CardContent className="p-6 text-sm text-destructive">
+              Failed to load trade logs.
+            </CardContent>
+          </Card>
+        ) : items.length === 0 ? (
+          <Card>
+            <CardContent className="py-12 text-center">
+              <p className="text-sm font-semibold tracking-tight">
+                No trade activity yet
+              </p>
+              <p className="mt-1 text-[12px] text-muted-foreground">
+                Place an order to see it logged here. Adjust filters if you
+                expected results.
+              </p>
+            </CardContent>
+          </Card>
+        ) : (
+          items.map((r) => (
+            <TradeLogRow
+              key={r.id}
+              row={r}
+              expanded={expandedId === r.id}
+              onToggle={() =>
+                setExpandedId((cur) => (cur === r.id ? null : r.id))
+              }
+            />
+          ))
+        )}
 
-          <div className="mt-4 flex items-center justify-between">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setCursor(null)}
-              disabled={cursor === null}
-            >
-              Back to latest
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => nextCursor && setCursor(nextCursor)}
-              disabled={!nextCursor}
-            >
-              Load older
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        <div className="flex items-center justify-between pt-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setCursor(null)}
+            disabled={cursor === null}
+          >
+            Back to latest
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => nextCursor && setCursor(nextCursor)}
+            disabled={!nextCursor}
+          >
+            Load older
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
 
-function LogRowBlock({
+// ---------------------------------------------------------------------------
+// Row
+// ---------------------------------------------------------------------------
+
+function TradeLogRow({
   row,
   expanded,
   onToggle,
@@ -389,111 +472,188 @@ function LogRowBlock({
   expanded: boolean;
   onToggle: () => void;
 }) {
+  const req = parseJson(row.request_body);
+  const apiType = apiTypeFromPath(row.path);
+  const action = typeof req.action === "string" ? (req.action as string) : "";
+  const symbol = typeof req.symbol === "string" ? (req.symbol as string) : "";
+  const exchange = typeof req.exchange === "string" ? (req.exchange as string) : "";
+  const strategy = typeof req.strategy === "string" ? (req.strategy as string) : "";
+  const product = typeof req.product === "string" ? (req.product as string) : "";
+  const pricetype = typeof req.pricetype === "string" ? (req.pricetype as string) : "";
+  const quantity = req.quantity ?? "";
+  const price = req.price ?? "";
+  const triggerPrice = req.trigger_price ?? "";
+  const orderId = typeof req.orderid === "string" ? (req.orderid as string) : "";
+
   return (
-    <>
-      <TableRow className="cursor-pointer hover:bg-muted/50" onClick={onToggle}>
-        <TableCell className="whitespace-nowrap text-xs">
-          {fmtTime(row.created_at)}
-        </TableCell>
-        <TableCell>
-          <Badge variant="outline">{row.method}</Badge>
-        </TableCell>
-        <TableCell className="max-w-[400px] truncate font-mono text-xs" title={row.path}>
-          {row.path}
-        </TableCell>
-        <TableCell className="text-right">
-          <Badge variant={statusBadge(row.status_code)}>{row.status_code}</Badge>
-        </TableCell>
-        <TableCell className="text-right font-mono text-xs">
-          {fmtMs(row.duration_ms)}
-        </TableCell>
-        <TableCell className="text-right font-mono text-xs">
-          {row.user_id ?? "—"}
-        </TableCell>
-        <TableCell className="text-xs">
-          <Badge variant="secondary">{row.auth_method ?? "—"}</Badge>
-        </TableCell>
-        <TableCell className="text-xs">
-          {row.mode ? (
-            <Badge
-              variant={row.mode === "sandbox" ? "default" : "outline"}
-              className={cn(
-                row.mode === "sandbox" &&
-                  "bg-amber-500 text-white hover:bg-amber-500/90"
-              )}
-            >
-              {row.mode}
-            </Badge>
-          ) : (
-            <span className="text-muted-foreground">—</span>
+    <Card className="overflow-hidden">
+      <CardContent className="p-4 sm:p-5">
+        {/* Top row: badges */}
+        <div className="flex flex-wrap items-center gap-2">
+          <Chip tone={apiTypeTone(apiType)} bold>
+            {apiType}
+          </Chip>
+          {action && <Chip tone={actionTone(action)}>{action}</Chip>}
+          {exchange && <Chip tone="bg-muted text-foreground ring-border">{exchange}</Chip>}
+          {strategy && (
+            <Chip tone="bg-muted text-foreground ring-border" subtle>
+              <span className="text-muted-foreground">strategy</span> {strategy}
+            </Chip>
           )}
-        </TableCell>
-        <TableCell className="font-mono text-xs">{row.client_ip ?? "—"}</TableCell>
-      </TableRow>
-      {expanded && (
-        <TableRow>
-          <TableCell colSpan={9} className="bg-muted/30 p-0">
-            <div className="grid grid-cols-1 gap-3 p-4 lg:grid-cols-2">
-              <DetailBlock title="Request" content={prettyJson(row.request_body)} />
-              <DetailBlock title="Response" content={prettyJson(row.response_body)} />
-            </div>
-            <div className="grid grid-cols-2 gap-x-6 gap-y-2 border-t border-border/50 bg-muted/20 p-4 text-xs md:grid-cols-4">
-              <KV label="Request ID" value={row.request_id ?? "—"} />
-              <KV label="Log ID" value={String(row.id)} />
-              <KV label="User-Agent" value={row.user_agent ?? "—"} />
-              <KV label="Error" value={row.error ?? "—"} tone={row.error ? "bad" : undefined} />
-            </div>
-          </TableCell>
-        </TableRow>
-      )}
-    </>
+          <Chip tone={statusTone(row.status_code)} bold>
+            {row.status_code}
+          </Chip>
+          {row.mode && <Chip tone={modeTone(row.mode)}>{row.mode}</Chip>}
+          <span className="ml-auto text-[11px] text-muted-foreground tabular-nums">
+            {fmtTime(row.created_at)} · {fmtMs(row.duration_ms)}
+          </span>
+        </div>
+
+        {/* Order detail tiles (only show what we have) */}
+        {(symbol || quantity || price || product || pricetype || orderId) && (
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            {symbol && <DetailTile label="Symbol" value={symbol} mono />}
+            {quantity !== "" && (
+              <DetailTile label="Quantity" value={String(quantity)} mono />
+            )}
+            {price !== "" && String(price) !== "0" && (
+              <DetailTile label="Price" value={String(price)} mono />
+            )}
+            {triggerPrice !== "" && String(triggerPrice) !== "0" && (
+              <DetailTile label="Trigger" value={String(triggerPrice)} mono />
+            )}
+            {product && <DetailTile label="Product" value={product} />}
+            {pricetype && <DetailTile label="Type" value={pricetype} />}
+            {orderId && <DetailTile label="Order ID" value={orderId} mono truncate />}
+          </div>
+        )}
+
+        {/* Error line */}
+        {row.error && (
+          <div className="mt-3 rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2 text-[12px] text-rose-700 dark:text-rose-300">
+            <span className="font-semibold uppercase tracking-[0.1em]">
+              Error
+            </span>
+            {" — "}
+            {row.error}
+          </div>
+        )}
+
+        {/* Toggle */}
+        <button
+          type="button"
+          onClick={onToggle}
+          className={cn(
+            "mt-4 inline-flex w-full items-center justify-between rounded-md bg-muted/40 px-3 py-2 text-[12px] font-medium text-muted-foreground transition-colors",
+            "hover:bg-muted hover:text-foreground"
+          )}
+          aria-expanded={expanded}
+        >
+          <span>Request &amp; response payload</span>
+          <span className="text-[10px] tracking-[0.12em]">
+            {expanded ? "HIDE" : "VIEW"}
+          </span>
+        </button>
+
+        {expanded && (
+          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <PayloadBlock title="Request" content={prettyJson(row.request_body)} />
+            <PayloadBlock title="Response" content={prettyJson(row.response_body)} />
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
-function DetailBlock({ title, content }: { title: string; content: string }) {
+// ---------------------------------------------------------------------------
+// Small bits
+// ---------------------------------------------------------------------------
+
+function Chip({
+  children,
+  tone,
+  bold,
+  subtle,
+}: {
+  children: React.ReactNode;
+  tone: string;
+  bold?: boolean;
+  subtle?: boolean;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] uppercase tracking-[0.1em] ring-1 ring-inset",
+        bold ? "font-semibold" : "font-medium",
+        subtle && "normal-case tracking-normal",
+        tone
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+function DetailTile({
+  label,
+  value,
+  mono,
+  truncate,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  truncate?: boolean;
+}) {
+  return (
+    <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
+      <p className="text-[9px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/80">
+        {label}
+      </p>
+      <p
+        className={cn(
+          "mt-0.5 text-[13px] font-semibold tracking-tight",
+          mono && "font-mono tabular-nums",
+          truncate && "truncate"
+        )}
+        title={truncate ? value : undefined}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function PayloadBlock({ title, content }: { title: string; content: string }) {
+  // Auto-size by line count, cap at ~70vh
+  const lines = content ? content.split("\n").length : 0;
+  const maxH =
+    typeof window !== "undefined" ? Math.floor(window.innerHeight * 0.7) : 600;
+  const height = Math.min(Math.max(lines * 20 + 24, 120), maxH);
+
   return (
     <div>
-      <div className="mb-2 flex items-center justify-between">
-        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+      <div className="mb-1.5 flex items-center justify-between">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
           {title}
         </p>
         {content && (
           <button
             type="button"
-            className="text-xs text-muted-foreground hover:text-foreground"
+            className="text-[10px] uppercase tracking-[0.1em] text-muted-foreground hover:text-foreground"
             onClick={() => navigator.clipboard?.writeText(content)}
           >
             Copy
           </button>
         )}
       </div>
-      <pre className="max-h-80 overflow-auto rounded-md border border-border bg-background p-3 font-mono text-xs">
-        {content || <span className="text-muted-foreground">(empty)</span>}
-      </pre>
-    </div>
-  );
-}
-
-function KV({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: "bad";
-}) {
-  return (
-    <div>
-      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
-      <p
-        className={cn(
-          "break-all font-mono",
-          tone === "bad" && "text-red-600"
-        )}
+      <div
+        className="rounded-md border border-border bg-card/50"
+        style={{ height }}
       >
-        {value}
-      </p>
+        <JsonEditor value={content || "{}"} readOnly lineWrapping={false} />
+      </div>
     </div>
   );
 }
@@ -508,14 +668,23 @@ function StatCard({
   tone?: "good" | "warn" | "bad";
 }) {
   return (
-    <div className="rounded-md border border-border bg-card p-3">
-      <p className="text-xs uppercase tracking-wider text-muted-foreground">{label}</p>
+    <div
+      className={cn(
+        "rounded-lg border border-border bg-card px-3 py-3 sm:px-4 sm:py-3.5",
+        tone === "good" && "border-emerald-500/30 bg-emerald-500/5",
+        tone === "warn" && "border-amber-500/30 bg-amber-500/5",
+        tone === "bad" && "border-rose-500/30 bg-rose-500/5"
+      )}
+    >
+      <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+        {label}
+      </p>
       <p
         className={cn(
-          "text-2xl font-semibold",
-          tone === "good" && "text-green-600",
-          tone === "warn" && "text-amber-600",
-          tone === "bad" && "text-red-600"
+          "mt-1 text-xl font-bold tracking-tight tabular-nums sm:text-2xl",
+          tone === "good" && "text-emerald-600 dark:text-emerald-400",
+          tone === "warn" && "text-amber-600 dark:text-amber-400",
+          tone === "bad" && "text-rose-600 dark:text-rose-400"
         )}
       >
         {value}

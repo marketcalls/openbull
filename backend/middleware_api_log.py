@@ -1,21 +1,19 @@
 """
-Auth-gated API request logger.
+Auth-gated trade log writer.
 
-Captures request + response for every HTTP call whose dependency chain set
-``request.state.user_id`` (i.e. an auth dependency succeeded). Unauthenticated
-noise — attacker floods, expired cookies, invalid API keys — never reaches
-the ``api_logs`` table. This mirrors openalgo's ``order_logs`` policy of
-logging only successful authenticated calls.
+Captures request + response for every authenticated **order-action** call
+(placeorder, modifyorder, cancelorder, …). Read-only / data / strategy /
+auth / health calls are NOT logged — the ``api_logs`` table is reserved for
+trade activity, mirroring openalgo's ``order_logs`` semantics.
 
-The middleware runs *inside* :class:`RequestLoggingMiddleware` so it inherits
-the request id, but outside route handlers so it wraps the full request
-body capture. It enqueues rows on a bounded thread-safe queue managed by
-:mod:`backend.utils.api_log_writer`; the actual DB insert happens on a daemon
-thread.
+Logging is event-driven: the middleware enqueues a row on a bounded
+thread-safe queue managed by :mod:`backend.utils.api_log_writer`; a daemon
+thread drains the queue and inserts. The async request path never waits on
+the DB, and a DB outage cannot backpressure trade placement.
 
-Bodies are redacted (``api_key``, ``password``, tokens, etc.) and truncated
-at 64 KB per side. Non-JSON bodies are not stored verbatim — we log their
-size instead — so binary uploads don't bloat the table.
+Bodies are redacted (``api_key``, ``password``, tokens, …) and truncated at
+64 KB per side. Non-JSON bodies are stored as size markers only, so binary
+uploads cannot bloat the table.
 """
 
 from __future__ import annotations
@@ -47,19 +45,45 @@ SENSITIVE_KEYS = {
     "new_password",
     "access_token",
     "refresh_token",
+    "auth_token",
+    "session_token",
+    "webhook_token",
     "totp",
     "pin",
     "otp",
+    "secret",
+    "client_secret",
 }
 
-SKIP_PREFIXES = (
-    "/health",
-    # Meta: the log viewer's own API must not be logged (would flood itself).
-    "/web/logs",
-    # WebSocket test page polls these every 5s; logging would drown out real calls.
-    "/api/websocket/health",
-    "/api/websocket/metrics",
+# Allowlist of HTTP paths that are considered "trade activity" and therefore
+# eligible for the trade log. Anything outside this list is silently dropped
+# at the middleware so the api_logs table never holds non-order traffic.
+#
+# Path matching is exact-tail: the request path's final segment must equal
+# one of these values (after the /api/v1 prefix), so e.g. /api/v1/placeorder
+# is in scope but /api/v1/placeorder-something would not be.
+TRADE_ENDPOINTS = frozenset(
+    {
+        "placeorder",
+        "placesmartorder",
+        "modifyorder",
+        "cancelorder",
+        "cancelallorder",
+        "closeposition",
+        "basketorder",
+        "splitorder",
+        "optionsorder",
+        "optionsmultiorder",
+    }
 )
+TRADE_PATH_PREFIX = "/api/v1/"
+
+
+def _is_trade_path(path: str) -> bool:
+    if not path.startswith(TRADE_PATH_PREFIX):
+        return False
+    tail = path[len(TRADE_PATH_PREFIX) :].strip("/")
+    return tail in TRADE_ENDPOINTS
 
 
 # ---- Redaction helpers -----------------------------------------------------
@@ -116,8 +140,9 @@ class ApiLogMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         method = request.method
 
-        # Hard skip — never attempt to capture these, so we don't pay the body-clone cost.
-        if method == "OPTIONS" or any(path.startswith(p) for p in SKIP_PREFIXES):
+        # Allowlist: only trade-action endpoints are eligible for the log.
+        # Everything else short-circuits without paying the body-clone cost.
+        if method == "OPTIONS" or not _is_trade_path(path):
             return await call_next(request)
 
         # Capture request body up-front; Starlette caches it on request._body

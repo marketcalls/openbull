@@ -14,8 +14,8 @@
  * CLOSED / EXPIRED, realized (exit_price vs entry, no live data).
  *
  * "View" navigates back to the builder via /tools/strategybuilder?load=<id>.
- * "Close" opens the close-dialog (page-owned). "Delete" hard-deletes
- * after a confirm() prompt.
+ * "Close" opens the close-dialog (page-owned). "Delete" opens a themed
+ * ConfirmDialog before hard-deleting.
  */
 
 import { useMemo, useState } from "react";
@@ -28,6 +28,7 @@ import { LivePriceCell } from "@/components/strategy-builder/LivePriceCell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Table,
   TableBody,
@@ -106,6 +107,7 @@ export function StrategyCard({
 }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const navigate = useNavigate();
 
   const exchange = strategy.exchange.toUpperCase();
@@ -142,18 +144,16 @@ export function StrategyCard({
     navigate(`/tools/strategybuilder?load=${strategy.id}`);
   };
 
-  const handleDelete = async () => {
-    if (
-      !window.confirm(
-        `Delete '${strategy.name}'? This only removes the saved record — it does not affect any open broker positions.`,
-      )
-    ) {
-      return;
-    }
+  const handleDeleteClick = () => {
+    setConfirmDeleteOpen(true);
+  };
+
+  const handleDeleteConfirm = async () => {
     setDeleting(true);
     try {
       await deleteStrategy(strategy.id);
       toast.success(`Deleted '${strategy.name}'`);
+      setConfirmDeleteOpen(false);
       onDeleted(strategy.id);
     } catch (e) {
       const msg =
@@ -260,7 +260,7 @@ export function StrategyCard({
           <Button
             variant="ghost"
             size="sm"
-            onClick={handleDelete}
+            onClick={handleDeleteClick}
             disabled={deleting}
             className="text-muted-foreground hover:text-destructive"
           >
@@ -379,6 +379,26 @@ export function StrategyCard({
           </div>
         )}
       </CardContent>
+
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        onOpenChange={(open) => {
+          if (!deleting) setConfirmDeleteOpen(open);
+        }}
+        title={`Delete '${strategy.name}'?`}
+        description={
+          <>
+            This only removes the saved record from your portfolio. It does{" "}
+            <span className="font-semibold text-foreground">not</span> close or
+            modify any open broker positions associated with this strategy.
+          </>
+        }
+        confirmLabel="Delete strategy"
+        cancelLabel="Keep"
+        variant="destructive"
+        loading={deleting}
+        onConfirm={handleDeleteConfirm}
+      />
     </Card>
   );
 }

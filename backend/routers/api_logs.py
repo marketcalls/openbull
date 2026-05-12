@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
 from datetime import datetime
 
@@ -19,12 +20,25 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.dependencies import get_current_user, get_db
+from backend.middleware_api_log import TRADE_ENDPOINTS, TRADE_PATH_PREFIX
 from backend.models.audit import ApiLog
 from backend.models.user import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/web/logs", tags=["api-logs"])
+
+# The set of `path` values that count as trade activity. Used as a server-side
+# WHERE filter so historic non-order rows (from before the middleware allowlist
+# landed) stay hidden from the trade log view.
+_TRADE_PATH_VALUES = tuple(
+    sorted(f"{TRADE_PATH_PREFIX}{ep}" for ep in TRADE_ENDPOINTS)
+)
+
+
+def _scope_to_trade_paths(stmt):
+    """Restrict any select to trade-action paths only."""
+    return stmt.where(ApiLog.path.in_(_TRADE_PATH_VALUES))
 
 
 def _row_to_dict(r: ApiLog) -> dict:
@@ -109,6 +123,7 @@ async def list_api_logs(
     if before_id is not None:
         stmt = stmt.where(ApiLog.id < before_id)
     stmt = _apply_filters(stmt, user=user, filters=filters)
+    stmt = _scope_to_trade_paths(stmt)
 
     rows = (await db.execute(stmt)).scalars().all()
     next_cursor = rows[-1].id if rows and len(rows) == limit else None
@@ -127,7 +142,9 @@ async def api_logs_stats(
     db: AsyncSession = Depends(get_db),
 ):
     """Small aggregate: total rows + simple status breakdown for the viewer."""
-    base = select(func.count()).select_from(ApiLog)
+    base = select(func.count()).select_from(ApiLog).where(
+        ApiLog.path.in_(_TRADE_PATH_VALUES)
+    )
     if not user.is_admin:
         base = base.where(ApiLog.user_id == user.id)
     if start:
@@ -143,17 +160,22 @@ async def api_logs_stats(
 
     ok_q = (
         select(func.count()).select_from(ApiLog).where(
-            ApiLog.status_code >= 200, ApiLog.status_code < 300
+            ApiLog.path.in_(_TRADE_PATH_VALUES),
+            ApiLog.status_code >= 200,
+            ApiLog.status_code < 300,
         )
     )
     client_err_q = (
         select(func.count()).select_from(ApiLog).where(
-            ApiLog.status_code >= 400, ApiLog.status_code < 500
+            ApiLog.path.in_(_TRADE_PATH_VALUES),
+            ApiLog.status_code >= 400,
+            ApiLog.status_code < 500,
         )
     )
     server_err_q = (
         select(func.count()).select_from(ApiLog).where(
-            ApiLog.status_code >= 500
+            ApiLog.path.in_(_TRADE_PATH_VALUES),
+            ApiLog.status_code >= 500,
         )
     )
     if not user.is_admin:
@@ -184,7 +206,10 @@ async def get_api_log(
     db: AsyncSession = Depends(get_db),
 ):
     row = (
-        await db.execute(select(ApiLog).where(ApiLog.id == log_id))
+        await db.execute(
+            select(ApiLog)
+            .where(ApiLog.id == log_id, ApiLog.path.in_(_TRADE_PATH_VALUES))
+        )
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Log not found")
@@ -220,28 +245,52 @@ async def export_api_logs(
     }
     stmt = select(ApiLog).order_by(ApiLog.id.desc()).limit(10_000)
     stmt = _apply_filters(stmt, user=user, filters=filters)
+    stmt = _scope_to_trade_paths(stmt)
     rows = (await db.execute(stmt)).scalars().all()
+
+    def _req_field(req_body: str | None, key: str) -> str:
+        """Pull a single key out of the JSON request body for the CSV row.
+
+        Robust to bad JSON and binary markers — returns "" if anything fails.
+        """
+        if not req_body:
+            return ""
+        try:
+            parsed = json.loads(req_body)
+        except Exception:
+            return ""
+        if not isinstance(parsed, dict):
+            return ""
+        v = parsed.get(key, "")
+        return "" if v is None else str(v)
 
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow([
-        "id", "created_at", "user_id", "auth_method", "mode", "method", "path",
-        "status_code", "duration_ms", "client_ip", "request_id", "error",
+        "id", "created_at", "mode", "api_type", "strategy", "exchange",
+        "symbol", "action", "product", "pricetype", "quantity",
+        "price", "trigger_price", "orderid", "status_code", "error",
         "request_body", "response_body",
     ])
     for r in rows:
+        api_type = (r.path or "").rsplit("/", 1)[-1]
+        rb = r.request_body
         w.writerow([
             r.id,
             r.created_at.isoformat() if r.created_at else "",
-            r.user_id or "",
-            r.auth_method or "",
             r.mode or "",
-            r.method or "",
-            r.path or "",
+            api_type,
+            _req_field(rb, "strategy"),
+            _req_field(rb, "exchange"),
+            _req_field(rb, "symbol"),
+            _req_field(rb, "action"),
+            _req_field(rb, "product"),
+            _req_field(rb, "pricetype"),
+            _req_field(rb, "quantity"),
+            _req_field(rb, "price"),
+            _req_field(rb, "trigger_price"),
+            _req_field(rb, "orderid"),
             r.status_code,
-            f"{r.duration_ms:.2f}" if r.duration_ms is not None else "",
-            r.client_ip or "",
-            r.request_id or "",
             r.error or "",
             r.request_body or "",
             r.response_body or "",
@@ -250,5 +299,5 @@ async def export_api_logs(
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": 'attachment; filename="api_logs.csv"'},
+        headers={"Content-Disposition": 'attachment; filename="trade_logs.csv"'},
     )
