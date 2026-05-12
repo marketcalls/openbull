@@ -280,14 +280,6 @@ export default function OrderBook() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <SortableHead
-                    sortKey="timestamp"
-                    current={sort}
-                    onSort={handleSort}
-                    className="w-[90px]"
-                  >
-                    Time
-                  </SortableHead>
                   <SortableHead sortKey="symbol" current={sort} onSort={handleSort}>
                     Symbol
                   </SortableHead>
@@ -320,6 +312,14 @@ export default function OrderBook() {
                     Price
                   </SortableHead>
                   <SortableHead
+                    sortKey="timestamp"
+                    current={sort}
+                    onSort={handleSort}
+                    className="w-[100px]"
+                  >
+                    Time
+                  </SortableHead>
+                  <SortableHead
                     sortKey="order_status"
                     current={sort}
                     onSort={handleSort}
@@ -336,12 +336,6 @@ export default function OrderBook() {
                     cancelMutation.isPending && cancelMutation.variables === order.orderid;
                   return (
                     <TableRow key={order.orderid || i} className={i % 2 === 0 ? "bg-muted/30" : ""}>
-                      <TableCell
-                        className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground"
-                        title={formatOrderDateTime(order.timestamp)}
-                      >
-                        {formatOrderTime(order.timestamp)}
-                      </TableCell>
                       <TableCell className="font-medium">{order.symbol}</TableCell>
                       <TableCell>{order.exchange}</TableCell>
                       <TableCell>
@@ -360,6 +354,12 @@ export default function OrderBook() {
                       <TableCell className="text-right">{order.quantity}</TableCell>
                       <TableCell className="text-right">
                         {order.price.toFixed(2)}
+                      </TableCell>
+                      <TableCell
+                        className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground"
+                        title={formatOrderDateTime(order.timestamp)}
+                      >
+                        {formatOrderTime(order.timestamp)}
                       </TableCell>
                       <TableCell>
                         <Badge variant={getStatusVariant(order.order_status)}>

@@ -300,7 +300,19 @@ def reject_order(user_id: int, orderid: str, reason: str) -> None:
 
 
 def to_dict(order: SandboxOrder) -> dict[str, Any]:
-    """Broker-compatible orderbook row shape."""
+    """Broker-compatible orderbook row shape.
+
+    The ``timestamp`` field name matches what the live broker mappers
+    (upstox, zerodha) produce — both map ``order_timestamp`` from the
+    raw broker payload into ``timestamp`` so the React orderbook table
+    can render either source. ``order_timestamp`` is kept as an alias
+    to avoid breaking any internal sandbox code that still reads it.
+    """
+    ts = (
+        order.order_timestamp.strftime("%d-%b-%Y %H:%M:%S")
+        if isinstance(order.order_timestamp, datetime)
+        else None
+    )
     return {
         "orderid": order.orderid,
         "symbol": order.symbol,
@@ -315,11 +327,8 @@ def to_dict(order: SandboxOrder) -> dict[str, Any]:
         "price": round(order.price, 2),
         "trigger_price": round(order.trigger_price, 2),
         "average_price": round(order.average_price, 2),
-        "order_timestamp": (
-            order.order_timestamp.strftime("%d-%b-%Y %H:%M:%S")
-            if isinstance(order.order_timestamp, datetime)
-            else None
-        ),
+        "timestamp": ts,
+        "order_timestamp": ts,
         "strategy": order.strategy or "",
         "rejection_reason": order.rejection_reason or "",
     }

@@ -165,14 +165,6 @@ export default function TradeBook() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <SortableHead
-                    sortKey="timestamp"
-                    current={sort}
-                    onSort={handleSort}
-                    className="w-[90px]"
-                  >
-                    Time
-                  </SortableHead>
                   <SortableHead sortKey="symbol" current={sort} onSort={handleSort}>
                     Symbol
                   </SortableHead>
@@ -209,17 +201,20 @@ export default function TradeBook() {
                   >
                     Trade Value
                   </SortableHead>
+                  <SortableHead
+                    sortKey="timestamp"
+                    current={sort}
+                    onSort={handleSort}
+                    align="right"
+                    className="w-[110px]"
+                  >
+                    Time
+                  </SortableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {sortedTrades.map((trade, i) => (
                   <TableRow key={i} className={i % 2 === 0 ? "bg-muted/30" : ""}>
-                    <TableCell
-                      className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground"
-                      title={formatOrderDateTime(trade.timestamp)}
-                    >
-                      {formatOrderTime(trade.timestamp)}
-                    </TableCell>
                     <TableCell className="font-medium">{trade.symbol}</TableCell>
                     <TableCell>{trade.exchange}</TableCell>
                     <TableCell>
@@ -240,6 +235,12 @@ export default function TradeBook() {
                     </TableCell>
                     <TableCell className="text-right">
                       {trade.trade_value.toFixed(2)}
+                    </TableCell>
+                    <TableCell
+                      className="whitespace-nowrap text-right font-mono text-xs tabular-nums text-muted-foreground"
+                      title={formatOrderDateTime(trade.timestamp)}
+                    >
+                      {formatOrderTime(trade.timestamp)}
                     </TableCell>
                   </TableRow>
                 ))}
