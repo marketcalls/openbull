@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 
 import { getOrderbook } from "@/api/dashboard";
 import { cancelAllOrders, cancelOrder } from "@/api/orders";
@@ -37,7 +38,8 @@ type OrderSortKey =
   | "pricetype"
   | "quantity"
   | "price"
-  | "order_status";
+  | "order_status"
+  | "orderid";
 
 const ORDER_NUMERIC_KEYS = new Set<OrderSortKey>(["timestamp", "quantity", "price"]);
 
@@ -61,8 +63,11 @@ function orderSortValue(row: OrderbookItem, key: OrderSortKey): string | number 
       return row.price;
     case "order_status":
       return row.order_status;
+    case "orderid":
+      return row.orderid;
   }
 }
+
 
 function cmp(a: string | number, b: string | number): number {
   if (typeof a === "number" && typeof b === "number") return a - b;
@@ -326,6 +331,13 @@ export default function OrderBook() {
                   >
                     Status
                   </SortableHead>
+                  <SortableHead
+                    sortKey="orderid"
+                    current={sort}
+                    onSort={handleSort}
+                  >
+                    Order ID
+                  </SortableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -365,6 +377,30 @@ export default function OrderBook() {
                         <Badge variant={getStatusVariant(order.order_status)}>
                           {order.order_status}
                         </Badge>
+                      </TableCell>
+                      <TableCell>
+                        {order.orderid ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard
+                                ?.writeText(order.orderid)
+                                .then(() => toast.success("Order ID copied"))
+                                .catch(() => toast.error("Copy failed"));
+                            }}
+                            className={cn(
+                              "inline-flex items-center whitespace-nowrap rounded border border-border bg-muted/40 px-1.5 py-0.5",
+                              "font-mono text-[11px] tabular-nums text-muted-foreground transition-colors",
+                              "hover:border-foreground/30 hover:bg-muted hover:text-foreground",
+                              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            )}
+                            title="Click to copy"
+                          >
+                            {order.orderid}
+                          </button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">
