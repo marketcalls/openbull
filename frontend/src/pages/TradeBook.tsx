@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { SortableHead, type SortState } from "@/components/ui/sortable-head";
@@ -11,6 +12,7 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import { getTradebook } from "@/api/dashboard";
+import { cn } from "@/lib/utils";
 import { downloadCsv, type CsvColumn } from "@/lib/csv";
 import {
   formatOrderDateTime,
@@ -27,7 +29,8 @@ type TradeSortKey =
   | "product"
   | "quantity"
   | "average_price"
-  | "trade_value";
+  | "trade_value"
+  | "orderid";
 
 const TRADE_NUMERIC_KEYS = new Set<TradeSortKey>([
   "timestamp",
@@ -54,6 +57,8 @@ function tradeSortValue(row: TradebookItem, key: TradeSortKey): string | number 
       return row.average_price;
     case "trade_value":
       return row.trade_value;
+    case "orderid":
+      return row.orderid;
   }
 }
 
@@ -202,6 +207,13 @@ export default function TradeBook() {
                     Trade Value
                   </SortableHead>
                   <SortableHead
+                    sortKey="orderid"
+                    current={sort}
+                    onSort={handleSort}
+                  >
+                    Order ID
+                  </SortableHead>
+                  <SortableHead
                     sortKey="timestamp"
                     current={sort}
                     onSort={handleSort}
@@ -235,6 +247,30 @@ export default function TradeBook() {
                     </TableCell>
                     <TableCell className="text-right">
                       {trade.trade_value.toFixed(2)}
+                    </TableCell>
+                    <TableCell>
+                      {trade.orderid ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard
+                              ?.writeText(trade.orderid)
+                              .then(() => toast.success("Order ID copied"))
+                              .catch(() => toast.error("Copy failed"));
+                          }}
+                          className={cn(
+                            "inline-flex items-center whitespace-nowrap rounded border border-border bg-muted/40 px-1.5 py-0.5",
+                            "font-mono text-[11px] tabular-nums text-muted-foreground transition-colors",
+                            "hover:border-foreground/30 hover:bg-muted hover:text-foreground",
+                            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          )}
+                          title="Click to copy"
+                        >
+                          {trade.orderid}
+                        </button>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </TableCell>
                     <TableCell
                       className="whitespace-nowrap text-right font-mono text-xs tabular-nums text-muted-foreground"
