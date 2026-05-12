@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAuth } from "@/contexts/AuthContext";
 import { useTradingMode } from "@/contexts/TradingModeContext";
 import {
@@ -91,9 +92,12 @@ export default function Sandbox() {
     },
   });
 
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+
   const resetMutation = useMutation({
     mutationFn: resetSandbox,
     onSuccess: () => {
+      setConfirmResetOpen(false);
       qc.invalidateQueries({ queryKey: ["sandbox-summary"] });
       // Force funds/positions/orderbook to refetch so the UI reflects the wipe.
       qc.invalidateQueries({ predicate: (q) => {
@@ -177,15 +181,7 @@ export default function Sandbox() {
           <Button
             variant="destructive"
             disabled={resetMutation.isPending}
-            onClick={() => {
-              if (
-                window.confirm(
-                  "This will wipe your sandbox orders, trades, positions and holdings, and reset your funds. Continue?"
-                )
-              ) {
-                resetMutation.mutate();
-              }
-            }}
+            onClick={() => setConfirmResetOpen(true)}
           >
             {resetMutation.isPending ? "Resetting…" : "Reset my sandbox"}
           </Button>
@@ -198,6 +194,31 @@ export default function Sandbox() {
             </span>
           )}
         </CardContent>
+
+        <ConfirmDialog
+          open={confirmResetOpen}
+          onOpenChange={(open) => {
+            if (!resetMutation.isPending) setConfirmResetOpen(open);
+          }}
+          title="Reset your sandbox?"
+          description={
+            <>
+              This wipes your sandbox{" "}
+              <span className="font-semibold text-foreground">
+                orders, trades, positions and holdings
+              </span>{" "}
+              and resets your funds to the current{" "}
+              <code className="font-mono">starting_capital</code>. Other users
+              are not affected, and{" "}
+              <span className="font-semibold text-foreground">this cannot be undone</span>.
+            </>
+          }
+          confirmLabel="Reset sandbox"
+          cancelLabel="Keep my data"
+          variant="destructive"
+          loading={resetMutation.isPending}
+          onConfirm={() => resetMutation.mutate()}
+        />
       </Card>
 
       {/* Manual triggers + mypnl link */}
