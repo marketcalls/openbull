@@ -7,6 +7,7 @@ import { closeAllPositions } from "@/api/orders";
 import { placeOrder } from "@/api/optionchain";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { downloadCsv, type CsvColumn } from "@/lib/csv";
 import {
   Card,
   CardContent,
@@ -151,6 +152,30 @@ export default function Positions() {
     setConfirming({ kind: "closeAll", count: openCount });
   };
 
+  const handleExportCsv = () => {
+    // Export the unfiltered list (including zero-qty closed-today rows) so
+    // the CSV mirrors what the broker returned — useful for end-of-day P&L
+    // reconciliation. The UI hides zero-qty rows but the audit trail should
+    // not.
+    const rows = positions ?? [];
+    if (rows.length === 0) return;
+    const columns: CsvColumn<PositionItem>[] = [
+      { header: "Symbol", value: (r) => r.symbol },
+      { header: "Exchange", value: (r) => r.exchange },
+      { header: "Product", value: (r) => r.product },
+      { header: "Quantity", value: (r) => r.quantity },
+      {
+        header: "Side",
+        value: (r) =>
+          r.quantity > 0 ? "LONG" : r.quantity < 0 ? "SHORT" : "FLAT",
+      },
+      { header: "Average Price", value: (r) => r.average_price.toFixed(2) },
+      { header: "LTP", value: (r) => r.ltp.toFixed(2) },
+      { header: "P&L", value: (r) => r.pnl.toFixed(2) },
+    ];
+    downloadCsv({ filename: "positions", columns, rows });
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -158,20 +183,34 @@ export default function Positions() {
           <h1 className="text-2xl font-bold tracking-tight">Positions</h1>
           <p className="text-sm text-muted-foreground">View your open positions</p>
         </div>
-        <Button
-          variant="destructive"
-          onClick={handleCloseAll}
-          disabled={openCount === 0 || closeAllMutation.isPending}
-          title={
-            openCount === 0
-              ? "No open positions to close"
-              : `Close every open position at MARKET (${openCount})`
-          }
-        >
-          {closeAllMutation.isPending
-            ? "Closing…"
-            : `Close All${openCount > 0 ? ` (${openCount})` : ""}`}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={handleExportCsv}
+            disabled={(positions?.length ?? 0) === 0}
+            title={
+              (positions?.length ?? 0) === 0
+                ? "No positions to export"
+                : `Export ${positions?.length} position${positions?.length === 1 ? "" : "s"} as CSV`
+            }
+          >
+            Export CSV
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={handleCloseAll}
+            disabled={openCount === 0 || closeAllMutation.isPending}
+            title={
+              openCount === 0
+                ? "No open positions to close"
+                : `Close every open position at MARKET (${openCount})`
+            }
+          >
+            {closeAllMutation.isPending
+              ? "Closing…"
+              : `Close All${openCount > 0 ? ` (${openCount})` : ""}`}
+          </Button>
+        </div>
       </div>
 
       <Card>

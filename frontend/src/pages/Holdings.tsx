@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import {
   Table,
@@ -9,6 +10,8 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import { getHoldings } from "@/api/dashboard";
+import { downloadCsv, type CsvColumn } from "@/lib/csv";
+import type { HoldingItem } from "@/types/order";
 
 function getPnlColor(value: number): string {
   if (value > 0) return "text-green-600 dark:text-green-400";
@@ -44,13 +47,43 @@ export default function Holdings() {
     );
   }
 
+  const handleExportCsv = () => {
+    const rows = holdings ?? [];
+    if (rows.length === 0) return;
+    const columns: CsvColumn<HoldingItem>[] = [
+      { header: "Symbol", value: (r) => r.symbol },
+      { header: "Exchange", value: (r) => r.exchange },
+      { header: "Product", value: (r) => r.product },
+      { header: "Quantity", value: (r) => r.quantity },
+      { header: "Average Price", value: (r) => r.average_price.toFixed(2) },
+      { header: "LTP", value: (r) => r.ltp.toFixed(2) },
+      { header: "P&L", value: (r) => r.pnl.toFixed(2) },
+      { header: "P&L %", value: (r) => r.pnlpercent.toFixed(2) },
+    ];
+    downloadCsv({ filename: "holdings", columns, rows });
+  };
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Holdings</h1>
-        <p className="text-sm text-muted-foreground">
-          View your stock holdings
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Holdings</h1>
+          <p className="text-sm text-muted-foreground">
+            View your stock holdings
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          onClick={handleExportCsv}
+          disabled={(holdings?.length ?? 0) === 0}
+          title={
+            (holdings?.length ?? 0) === 0
+              ? "No holdings to export"
+              : `Export ${holdings?.length} holding${holdings?.length === 1 ? "" : "s"} as CSV`
+          }
+        >
+          Export CSV
+        </Button>
       </div>
 
       <Card>
