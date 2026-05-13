@@ -286,13 +286,16 @@ async def _fire_start(strategy_id: int, mode: str) -> None:
                 return
             broker = "scheduler-sandbox"
 
-        # Live runs need a real broker token threaded through to the
-        # engine so it can place real orders. Resolved fresh from DB —
-        # tokens are never cached in strategy state (plan Section 14.8).
+        # Resolve broker auth from DB. Live runs require it (no token =
+        # no order placement). Sandbox runs use it best-effort - the token
+        # is consumed by ATM strike resolution (the underlying's LTP is
+        # fetched via the broker's quote API even when the resulting
+        # order routes to sandbox). Direct-strike legs work without auth.
+        # Tokens are never cached in strategy state (plan section 14.8).
+        from backend.strategy import live_auth
         auth_token = None
         config = None
         if mode == "live":
-            from backend.strategy import live_auth
             ctx = await live_auth.resolve_live_auth(
                 db, user_id=strategy.user_id, broker=broker,
             )
@@ -304,6 +307,15 @@ async def _fire_start(strategy_id: int, mode: str) -> None:
                 return
             auth_token = ctx.auth_token
             config = ctx.config
+        elif broker != "scheduler-sandbox":
+            # Sandbox with a real broker known - resolve so ATM legs can
+            # fetch underlying LTP. Failure is non-fatal here.
+            ctx = await live_auth.resolve_live_auth(
+                db, user_id=strategy.user_id, broker=broker,
+            )
+            if ctx is not None:
+                auth_token = ctx.auth_token
+                config = ctx.config
 
         try:
             await engine.start_run(

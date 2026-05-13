@@ -449,8 +449,12 @@ async def handle_webhook(
                         )
                     broker = "webhook-sandbox"
 
-                # Live: fetch broker auth token fresh from DB so the engine
-                # can place real orders. Sandbox leaves auth_token=None.
+                # Resolve broker auth from DB. For live runs this is mandatory.
+                # For sandbox runs the token is still used by ATM strike
+                # resolution (option_symbol_service fetches the underlying's
+                # LTP via the broker's quote API even when the resulting
+                # order routes to sandbox), so we resolve best-effort when a
+                # real broker is known. Direct-strike legs work either way.
                 auth_token = None
                 cfg_dict = None
                 if mode == "live":
@@ -473,6 +477,16 @@ async def handle_webhook(
                         )
                     auth_token = ctx.auth_token
                     cfg_dict = ctx.config
+                elif broker != "webhook-sandbox":
+                    # Sandbox with a real broker known - resolve so ATM
+                    # legs can fetch underlying LTP. Failure is non-fatal:
+                    # direct-strike legs still resolve without auth.
+                    ctx = await live_auth.resolve_live_auth(
+                        db, user_id=strategy_fresh.user_id, broker=broker,
+                    )
+                    if ctx is not None:
+                        auth_token = ctx.auth_token
+                        cfg_dict = ctx.config
 
                 run, _ = await engine.start_run(
                     db,
