@@ -670,6 +670,30 @@ async def _handle_signal_webhook(
             },
             result_label="rejected_direction_blocked",
         )
+    if outcome in ("outside_entry_window", "outside_trading_window"):
+        # Intraday-window rejections. Per design 5.3 these return 200
+        # OK with a clear note so TV alerts firing on the wrong side
+        # of the window are silently absorbed - not surfaced as errors
+        # the user has to react to. Release dedupe so a legitimate
+        # signal arriving moments later (at exactly entry_time) is
+        # processed.
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_outside_window",
+                error=outcome,
+            )
+        await _signal_dedupe_release(strategy_id, action, leg_id)
+        return WebhookOutcome(
+            status_code=200,
+            body={
+                "status": "ok",
+                "note": result.get("note") or outcome,
+                "leg_id": leg_id,
+            },
+            result_label="rejected_outside_window",
+        )
     # outcome == "rejected" - broker/sandbox refused the order.
     async with async_session() as db:
         await _record_event(

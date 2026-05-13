@@ -727,6 +727,38 @@ async def _signal_lock_strategy(
     )).scalar_one_or_none()
 
 
+def _intraday_window_status(strategy: SmStrategy) -> str:
+    """Classify the current moment against an intraday strategy's window.
+
+    Returns one of:
+      * 'no_window'       - positional strategy, no window applies.
+      * 'outside_entry'   - now < entry_time. Entry signals are blocked;
+                            exit signals pass through.
+      * 'active'          - entry_time <= now < exit_time. Everything OK.
+      * 'outside_trading' - now >= exit_time. All signals blocked; the
+                            scheduler's auto-square job is the only thing
+                            still allowed to act on the run.
+
+    All comparisons in IST (Asia/Kolkata) since strategy.entry_time /
+    exit_time are stored as bare IST time-of-day per design section 4.4.
+    """
+    if strategy.strategy_type != "intraday":
+        return "no_window"
+    entry_t = strategy.entry_time
+    exit_t = strategy.exit_time
+    if entry_t is None or exit_t is None:
+        # Schema validates these are non-null for intraday; if a row got
+        # here without them treat as no_window rather than crash.
+        return "no_window"
+    from backend.strategy.time_utils import now_ist
+    now_t = now_ist().time()
+    if now_t < entry_t:
+        return "outside_entry"
+    if now_t >= exit_t:
+        return "outside_trading"
+    return "active"
+
+
 def _direction_admits_entry(direction: str, action: str) -> bool:
     """Defense-in-depth direction check at the engine layer.
 
@@ -813,6 +845,27 @@ async def enter_leg(
             "note": f"strategy direction={strategy_direction!r} blocks {action!r}",
             "leg_id": leg_id,
             "direction": strategy_direction,
+        }
+
+    # Intraday window check. Entry signals refused before entry_time and
+    # after exit_time; exit signals are handled separately below in
+    # exit_leg_by_signal. Positional strategies bypass the window check.
+    window = _intraday_window_status(strategy)
+    if window == "outside_entry":
+        return {
+            "outcome": "outside_entry_window",
+            "note": (
+                f"entry signals are accepted from {strategy.entry_time} IST onward"
+            ),
+            "leg_id": leg_id,
+        }
+    if window == "outside_trading":
+        return {
+            "outcome": "outside_trading_window",
+            "note": (
+                f"trading window closed at {strategy.exit_time} IST; auto-square has run"
+            ),
+            "leg_id": leg_id,
         }
 
     # Ensure there is an active run.
@@ -954,12 +1007,18 @@ async def exit_leg_by_signal(
     broker: str,
     auth_token: Optional[str],
     config: Optional[dict[str, Any]],
+    bypass_window: bool = False,
 ) -> dict[str, Any]:
     """Close one signal-mode leg in response to long_exit or short_exit.
 
     Silent no-op (returns ``outcome='no_matching_position'``) when the
     leg isn't currently in the requested direction. Matches design 4.4
     so repeat exit alerts for an already-flat leg are idempotent.
+
+    ``bypass_window`` is set to True only by :func:`signal_auto_square`
+    so the scheduler's end-of-day cleanup can close positions AT
+    exit_time without being blocked by its own window check. External
+    callers (webhook handler) always leave it False.
     """
     if action not in _EXIT_ACTION_TO_SIDE:
         raise EngineError(f"exit_leg_by_signal: invalid action {action!r}")
@@ -984,6 +1043,27 @@ async def exit_leg_by_signal(
             "leg_id": leg_id,
             "direction": strategy_direction,
         }
+
+    # Intraday window check. Exits are allowed BEFORE entry_time
+    # (operator might want to flatten a stale overnight position) but
+    # blocked AFTER exit_time - by then the scheduler's auto-square
+    # should have flattened everything, and any signal arriving late
+    # is treated as a no-op so a delayed TV alert can't re-open a
+    # position that just got squared.
+    # bypass_window: True only when signal_auto_square calls us; that
+    # path fires AT exit_time and needs to close positions despite the
+    # window itself being over.
+    if not bypass_window:
+        window = _intraday_window_status(strategy)
+        if window == "outside_trading":
+            return {
+                "outcome": "outside_trading_window",
+                "note": (
+                    f"trading window closed at {strategy.exit_time} IST; "
+                    f"auto-square has run"
+                ),
+                "leg_id": leg_id,
+            }
 
     # No active run = nothing to exit. Silent no-op.
     if strategy.current_run_id is None:
@@ -1075,4 +1155,131 @@ async def exit_leg_by_signal(
         "leg_id": leg_id,
         "run_id": run.id,
         "reject_reason": None if ok else order_row.reject_reason,
+    }
+
+
+async def signal_auto_square(
+    db: AsyncSession,
+    *,
+    strategy: SmStrategy,
+    mode: str,
+    broker: str,
+    auth_token: Optional[str],
+    config: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Square every open signal-mode leg at end-of-day, then finalize the run.
+
+    Called from the scheduler's _fire_auto_stop when the strategy's
+    auto_stop_time IST cron tick fires (or, fallback, when exit_time
+    fires for intraday strategies without an explicit auto_stop_time).
+
+    Sequential rather than parallel - design open question (section 9)
+    resolved here: sequential preserves audit ordering (each exit's
+    event lands before the next one places), keeps the broker-side
+    request rate well under the typical 10/sec limit even with 10 legs,
+    and lets one leg's failure surface in the log next to the right
+    leg rather than collated with N other failures. The slowdown
+    (~50-200ms per leg) is irrelevant at EOD when the market window
+    is already over.
+
+    Each leg's exit goes through ``exit_leg_by_signal``, which carries
+    the same direction-gate + state-check + silent-no-op contract that
+    a manual long_exit/short_exit signal does. That means:
+      - legs already flat (status='closed') are no-op'd cleanly
+      - legs in the wrong direction relative to the strategy's
+        current direction setting are skipped (operator must widen
+        direction to clean up legacy positions)
+
+    Idempotent: a second auto-square call on an already-squared run
+    finalizes nothing extra (finalize_run is guarded by run.stopped_at).
+    """
+    # Lock the strategy row to serialize against concurrent webhook
+    # signals - if a long_exit arrives while we're auto-squaring, the
+    # caller waits behind us and then finds nothing to exit.
+    locked = await _signal_lock_strategy(db, strategy.id)
+    if locked is None:
+        raise EngineError(f"Strategy {strategy.id} not found")
+    strategy = locked
+
+    if strategy.current_run_id is None:
+        return {"outcome": "no_active_run", "leg_summaries": []}
+    run = await db.get(SmStrategyRun, strategy.current_run_id)
+    if run is None or run.stopped_at is not None:
+        return {"outcome": "already_stopped", "leg_summaries": []}
+
+    state = await state_module.get_run_state(run.id)
+    open_legs: list[tuple[int, str]] = []
+    for lid_str, leg in (state or {}).get("legs", {}).items():
+        side = leg.get("current_side")
+        if side == "long":
+            open_legs.append((int(lid_str), "long_exit"))
+        elif side == "short":
+            open_legs.append((int(lid_str), "short_exit"))
+
+    cfg_by_leg = {int(leg["id"]): leg for leg in (strategy.legs or [])}
+    summaries: list[dict[str, Any]] = []
+    for leg_id, exit_action in open_legs:
+        leg_config = cfg_by_leg.get(leg_id)
+        if leg_config is None:
+            # Leg appeared in state but isn't on the strategy config.
+            # Should be unreachable; log and skip rather than crash.
+            logger.warning(
+                "signal_auto_square: leg %d in state but missing from "
+                "strategy %d.legs - skipping",
+                leg_id, strategy.id,
+            )
+            continue
+        try:
+            result = await exit_leg_by_signal(
+                db, strategy=strategy, leg_config=leg_config,
+                action=exit_action, mode=mode, broker=broker,
+                auth_token=auth_token, config=config,
+                bypass_window=True,
+            )
+        except Exception:
+            logger.exception(
+                "signal_auto_square: exit_leg_by_signal raised for "
+                "strategy %d leg %d", strategy.id, leg_id,
+            )
+            summaries.append({"leg_id": leg_id, "outcome": "error"})
+            continue
+        # Re-lock for the next iteration - exit_leg_by_signal commits
+        # its transaction (via record_order) and releases the row lock.
+        locked = await _signal_lock_strategy(db, strategy.id)
+        if locked is not None:
+            strategy = locked
+        summaries.append({"leg_id": leg_id, **result})
+
+    # Finalize the run regardless of per-leg outcomes - the trading
+    # window is closed, and any legs still open are operator-cleanup.
+    try:
+        await repo.finalize_run(
+            db, run=run, strategy=strategy, stop_reason="eod",
+        )
+    except Exception:
+        logger.exception(
+            "signal_auto_square: finalize_run raised for strategy %d run %d",
+            strategy.id, run.id,
+        )
+
+    # Clear Redis state and unsubscribe ticks - same teardown as
+    # batch-mode stop_run.
+    try:
+        await state_module.clear_run_state(run.id)
+    except Exception:
+        logger.exception(
+            "signal_auto_square: clear_run_state raised for run %d", run.id,
+        )
+    try:
+        tick_feed.remove_run_subscriptions(run.id)
+    except Exception:
+        logger.exception(
+            "signal_auto_square: tick unsubscribe raised for run %d", run.id,
+        )
+
+    return {
+        "outcome": "squared",
+        "run_id": run.id,
+        "stop_reason": "eod",
+        "leg_summaries": summaries,
     }

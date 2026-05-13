@@ -29,3 +29,13 @@ def format_ist(dt: datetime | None) -> str | None:
 def now_utc() -> datetime:
     """Tz-aware UTC now. Use everywhere a timestamp is set in code (never naive)."""
     return datetime.now(timezone.utc)
+
+
+def now_ist() -> datetime:
+    """Tz-aware now in Asia/Kolkata.
+
+    Used by signal-mode engine checks for intraday entry/exit windows
+    (the strategy's entry_time/exit_time are stored as IST-local time
+    of day per design section 4.4).
+    """
+    return datetime.now(IST)

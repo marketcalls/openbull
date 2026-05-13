@@ -355,6 +355,7 @@ async def _fire_auto_stop(strategy_id: int) -> None:
         auth_token = None
         broker = None
         config = None
+        run = None
         if strategy.current_run_id:
             run = await db.get(SmStrategyRun, strategy.current_run_id)
             if run and run.mode == "live":
@@ -373,14 +374,29 @@ async def _fire_auto_stop(strategy_id: int) -> None:
                 config = ctx.config
 
         try:
-            await engine.stop_run(
-                db,
-                strategy=strategy,
-                stop_reason="scheduler",
-                auth_token=auth_token,
-                broker=broker,
-                config=config,
-            )
+            strategy_kind = getattr(strategy, "strategy_kind", "batch") or "batch"
+            if strategy_kind == "signal":
+                # Signal-mode auto-stop walks the open legs and exits each
+                # via the same exit_leg_by_signal path a manual *_exit
+                # signal would take. Sequential per leg; finalizes the run
+                # at the end. See engine.signal_auto_square docstring.
+                await engine.signal_auto_square(
+                    db,
+                    strategy=strategy,
+                    mode=run.mode if run else "sandbox",
+                    broker=broker or (run.broker if run else "scheduler-sandbox"),
+                    auth_token=auth_token,
+                    config=config,
+                )
+            else:
+                await engine.stop_run(
+                    db,
+                    strategy=strategy,
+                    stop_reason="scheduler",
+                    auth_token=auth_token,
+                    broker=broker,
+                    config=config,
+                )
         except engine.EngineError as e:
             logger.warning(
                 "Scheduler: stop_run failed for strategy %d: %s", strategy_id, e,

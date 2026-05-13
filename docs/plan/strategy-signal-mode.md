@@ -228,8 +228,8 @@ When `signal` is picked:
 | 2 | Backend schema + migration + Pydantic | `e6c6191` | done |
 | 3 | Webhook handler — signal actions + leg lookup | `95a1899` | done |
 | 4 | Engine — `enter_leg` / `exit_leg_by_signal` | `a8d6b90` | done |
-| 5 | Engine — direction gating | (this commit) | done |
-| 6 | Engine — intraday window enforcement | — | pending |
+| 5 | Engine — direction gating | `dc2e204` | done |
+| 6 | Engine — intraday window enforcement | (this commit) | done |
 | 7 | Frontend types | — | pending |
 | 8 | Frontend wizard — kind toggle + signal-mode leg builder | — | pending |
 | 9 | Frontend detail — kind-aware Setup tab + webhook examples | — | pending |
@@ -241,7 +241,7 @@ When `signal` is picked:
 
 (Resolve here before the slice that needs the answer.)
 
-- **Multi-symbol intraday auto-exit** — when `exit_time` fires for a signal-mode strategy with 5 open legs, do exits go out in parallel or sequentially? Sequential preserves audit ordering but is slower. Decision needed in slice 6.
+- **Multi-symbol intraday auto-exit** — RESOLVED in slice 6. Sequential. Rationale: preserves audit ordering (each exit's `leg_exit_placed` event lands before the next exit fires), keeps the broker-side request rate under the typical 10/sec cap even with 10 legs, and lets one leg's failure surface in the log adjacent to the right leg rather than collated across N concurrent attempts. The ~50-200ms slowdown per leg is irrelevant at end-of-day when the market window is already over. Implementation: `engine.signal_auto_square` loops legs and awaits `exit_leg_by_signal` per leg, re-acquiring the row lock between iterations (each `exit_leg_by_signal` commits a transaction and releases the lock).
 - **Sandbox mode and per-leg symbol** — sandbox's `place_order` validates symbol/lot/tick. For signal-mode cash legs the symbol differs per leg; need to confirm each leg's symbol resolves in `symtoken` before the strategy is allowed to save. Decision needed in slice 8 (wizard validation).
 - **Fill-propagation gap** — the iteration-9 audit finding (entry_avg never populated, so SL/Target/Trail never fire) applies to signal mode too. Slice 4 ships with the same limitation: signal-mode legs will have `entry_avg=None` after the entry order, so any configured per-leg SL/Target/Trail will not fire. **For v1, signal mode is expected to be driven exclusively by user-fired exit signals** (long_exit, short_exit). The SL/Target/Trail fields on signal-mode legs are accepted by the schema but inert until fill propagation lands.
 - **Opposite-direction signal flip (deferred)** — design §4.4 describes a two-step flip when a `long_entry` arrives on a short leg (side=both, direction=both): exit short, open long. Slice 4 v1 refuses this with `outcome="position_conflict"` (HTTP 409) so the operator must explicitly exit first. Implementing the atomic flip requires careful failure handling (the close fails, do we still open the new side?) and is deferred to a follow-up slice once production usage validates the simpler two-call workflow.
