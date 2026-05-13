@@ -472,36 +472,198 @@ async def _handle_signal_webhook(
             result_label="rejected_dedupe",
         )
 
-    # Step 6 - engine dispatch. Slice 4 will fill this in with the actual
-    # enter_leg / exit_leg_by_signal calls plus the Redis-state-based
-    # mismatched-signal silent no-op. Until then, record the would-be
-    # dispatch and surface a 501 so operators don't think the signal ran.
+    # Step 6 - engine dispatch.
+    async with async_session() as db:
+        # Re-load on this session - the engine entry points lock the
+        # strategy row via SELECT FOR UPDATE.
+        strategy_fresh = await db.get(SmStrategy, strategy_id)
+        if strategy_fresh is None:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_engine_error",
+                error="strategy_disappeared",
+            )
+            await _signal_dedupe_release(strategy_id, action, leg_id)
+            return WebhookOutcome(
+                status_code=500,
+                body={"status": "error", "message": "Strategy not found"},
+                result_label="rejected_engine_error",
+            )
+
+        # Resolve broker auth - mandatory for live, best-effort for
+        # sandbox (same asymmetry-fix pattern as commit 5e976ac on the
+        # batch-mode webhook).
+        from backend.strategy import engine, live_auth, scheduler as sm_scheduler
+
+        broker = await sm_scheduler._resolve_user_broker(db, strategy_fresh.user_id)
+        if not broker:
+            if mode == "live":
+                await _record_event(
+                    db, strategy_id=strategy_id, action=action, mode=mode,
+                    payload=payload, ip=ip, user_agent=user_agent,
+                    result_label="rejected_engine_error",
+                    error="no_active_broker",
+                )
+                await _signal_dedupe_release(strategy_id, action, leg_id)
+                return WebhookOutcome(
+                    status_code=403,
+                    body={"status": "error", "message": "No active broker for live mode"},
+                    result_label="rejected_engine_error",
+                    error="no_active_broker",
+                )
+            broker = "webhook-sandbox"
+
+        auth_token = None
+        cfg_dict = None
+        if mode == "live":
+            ctx = await live_auth.resolve_live_auth(
+                db, user_id=strategy_fresh.user_id, broker=broker,
+            )
+            if ctx is None:
+                await _record_event(
+                    db, strategy_id=strategy_id, action=action, mode=mode,
+                    payload=payload, ip=ip, user_agent=user_agent,
+                    result_label="rejected_engine_error",
+                    error="broker_session_expired",
+                )
+                await _signal_dedupe_release(strategy_id, action, leg_id)
+                return WebhookOutcome(
+                    status_code=403,
+                    body={"status": "error", "message": "Broker session expired or revoked"},
+                    result_label="rejected_engine_error",
+                    error="broker_session_expired",
+                )
+            auth_token = ctx.auth_token
+            cfg_dict = ctx.config
+        elif broker != "webhook-sandbox":
+            ctx = await live_auth.resolve_live_auth(
+                db, user_id=strategy_fresh.user_id, broker=broker,
+            )
+            if ctx is not None:
+                auth_token = ctx.auth_token
+                cfg_dict = ctx.config
+
+        try:
+            if action in ENTRY_SIGNALS:
+                result = await engine.enter_leg(
+                    db, strategy=strategy_fresh, leg_config=leg,
+                    action=action, mode=mode, broker=broker,
+                    auth_token=auth_token, config=cfg_dict,
+                )
+            else:
+                result = await engine.exit_leg_by_signal(
+                    db, strategy=strategy_fresh, leg_config=leg,
+                    action=action, mode=mode, broker=broker,
+                    auth_token=auth_token, config=cfg_dict,
+                )
+        except engine.EngineError as e:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_engine_error", error=str(e),
+            )
+            await _signal_dedupe_release(strategy_id, action, leg_id)
+            return WebhookOutcome(
+                status_code=200,
+                body={"status": "error", "message": str(e)},
+                result_label="rejected_engine_error", error=str(e),
+            )
+        except Exception as e:
+            logger.exception(
+                "Signal-mode dispatch raised for strategy %d", strategy_id,
+            )
+            try:
+                async with async_session() as db2:
+                    await _record_event(
+                        db2, strategy_id=strategy_id, action=action, mode=mode,
+                        payload=payload, ip=ip, user_agent=user_agent,
+                        result_label="rejected_engine_error", error=repr(e),
+                    )
+            except Exception:
+                pass
+            await _signal_dedupe_release(strategy_id, action, leg_id)
+            return WebhookOutcome(
+                status_code=500,
+                body={"status": "error", "message": "Internal error"},
+                result_label="rejected_engine_error", error=repr(e),
+            )
+
+    # Translate engine outcome to webhook response shape.
+    outcome = result.get("outcome")
+    if outcome == "placed" or outcome == "exited":
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="ok",
+            )
+        return WebhookOutcome(
+            status_code=200,
+            body={
+                "status": "ok",
+                "action": action,
+                "leg_id": leg_id,
+                "run_id": result.get("run_id"),
+                "broker_order_id": result.get("broker_order_id"),
+            },
+            result_label="ok",
+        )
+    if outcome == "already_in_position" or outcome == "no_matching_position":
+        # Silent no-op contract from design 4.4. Audit row uses
+        # rejected_no_match per the user's spec on the original ask.
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_no_match",
+                error=result.get("note"),
+            )
+        await _signal_dedupe_release(strategy_id, action, leg_id)
+        return WebhookOutcome(
+            status_code=200,
+            body={
+                "status": "ok",
+                "note": result.get("note") or "no_matching_position",
+                "leg_id": leg_id,
+            },
+            result_label="rejected_no_match",
+        )
+    if outcome == "position_conflict":
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_position_conflict",
+                error=result.get("note"),
+            )
+        await _signal_dedupe_release(strategy_id, action, leg_id)
+        return WebhookOutcome(
+            status_code=409,
+            body={
+                "status": "error",
+                "message": result.get("note") or "position conflict",
+                "leg_id": leg_id,
+            },
+            result_label="rejected_position_conflict",
+        )
+    # outcome == "rejected" - broker/sandbox refused the order.
     async with async_session() as db:
         await _record_event(
             db, strategy_id=strategy_id, action=action, mode=mode,
             payload=payload, ip=ip, user_agent=user_agent,
             result_label="rejected_engine_error",
-            error="signal_engine_not_implemented_yet",
+            error=result.get("reject_reason") or "broker_rejected",
         )
-    # Release dedupe so the operator can retry once slice 4 lands.
     await _signal_dedupe_release(strategy_id, action, leg_id)
     return WebhookOutcome(
-        status_code=501,
+        status_code=200,
         body={
             "status": "error",
-            "message": (
-                "Signal-mode engine dispatch is not yet wired (slice 4). "
-                "Webhook validation succeeded; the request was accepted "
-                "and audited but no order was placed."
-            ),
+            "message": result.get("reject_reason") or "broker_rejected",
             "leg_id": leg_id,
-            "leg_symbol": leg.get("symbol"),
-            "leg_exchange": leg.get("exchange"),
-            "action": action,
-            "mode": mode,
         },
         result_label="rejected_engine_error",
-        error="signal_engine_not_implemented_yet",
     )
 
 

@@ -615,3 +615,400 @@ async def close_leg(
         auth_token=auth_token, broker=broker, config=config,
     )
     return {"run_id": run.id, "legs": summaries}
+
+
+# ---------------------------------------------------------------------------
+# Signal-mode engine (slice 4)
+#
+# Signal-mode strategies don't run the batch lifecycle (start_run places
+# every leg at once, stop_run squares everything). Instead each leg has
+# its own state and reacts to per-leg TradingView signals
+# (long_entry / long_exit / short_entry / short_exit). The same run row
+# spans the trading day - the first signal of the day creates it; the
+# scheduler's auto-stop at exit_time finalizes it (slice 6).
+#
+# Per the design (docs/plan/strategy-signal-mode.md section 5):
+#   - enter_leg places one entry; idempotent if leg is already in the
+#     requested direction; deferred-to-v2 flip when in the opposite
+#     direction (v1 returns 'position_conflict' so the operator must
+#     exit first).
+#   - exit_leg_by_signal places one exit; silent no-op when the leg
+#     isn't in the requested direction (matches design 4.4).
+# ---------------------------------------------------------------------------
+
+
+# Map signal action -> (entry_side, broker_action)
+_ENTRY_ACTION_TO_SIDE: dict[str, str] = {
+    "long_entry": "long",
+    "short_entry": "short",
+}
+_ENTRY_ACTION_TO_BROKER: dict[str, str] = {
+    "long_entry": "BUY",
+    "short_entry": "SELL",
+}
+# Exit signals translate the requested closing side to the broker action
+# needed to flatten it.
+_EXIT_ACTION_TO_SIDE: dict[str, str] = {
+    "long_exit": "long",
+    "short_exit": "short",
+}
+_EXIT_ACTION_TO_BROKER: dict[str, str] = {
+    "long_exit": "SELL",   # close a long => sell
+    "short_exit": "BUY",   # close a short => buy
+}
+
+
+async def _get_or_create_signal_run(
+    db: AsyncSession,
+    *,
+    strategy: SmStrategy,
+    mode: str,
+    broker: str,
+    trigger_source: str,
+) -> SmStrategyRun:
+    """Find the strategy's active run or create one.
+
+    Signal-mode strategies use one run per trading day - the first signal
+    creates it; the scheduler's auto-stop closes it (slice 6). Concurrent
+    callers are serialized by the SELECT FOR UPDATE lock the caller already
+    holds on the strategy row (see enter_leg).
+    """
+    if strategy.current_run_id is not None:
+        existing = await db.get(SmStrategyRun, strategy.current_run_id)
+        if existing is not None and existing.stopped_at is None:
+            return existing
+    # No active run - create one.
+    run = await repo.start_run(
+        db, strategy=strategy, mode=mode, broker=broker,
+        trigger_source=trigger_source,
+    )
+    return run
+
+
+def _signal_leg_state(state_legs: dict[str, Any], leg_id: int) -> dict[str, Any]:
+    """Return the leg-state dict, initializing a flat shell on first touch.
+
+    Batch-mode init_run_state seeds every leg up front. Signal-mode legs
+    are dormant until their first signal, so the first enter_leg call may
+    find no leg entry in the state dict.
+    """
+    key = str(leg_id)
+    leg = state_legs.get(key)
+    if leg is None:
+        leg = {
+            "leg_id": leg_id,
+            "current_side": None,
+            "qty": None,
+            "symbol": None,
+            "exchange": None,
+            "entry_order_id": None,
+            "entry_avg": None,
+            "exit_order_id": None,
+            "ltp": None,
+            "mtm": 0.0,
+            "status": "configured",
+        }
+        state_legs[key] = leg
+    return leg
+
+
+async def _signal_lock_strategy(
+    db: AsyncSession, strategy_id: int,
+) -> Optional[SmStrategy]:
+    """Acquire the FOR UPDATE row lock used by every signal-mode entry/exit.
+
+    Same pattern as start_run's lock from iteration 7 - serializes
+    concurrent signals on the same strategy across workers.
+    """
+    return (await db.execute(
+        select(SmStrategy)
+        .where(SmStrategy.id == strategy_id)
+        .with_for_update()
+    )).scalar_one_or_none()
+
+
+async def enter_leg(
+    db: AsyncSession,
+    *,
+    strategy: SmStrategy,
+    leg_config: dict[str, Any],
+    action: str,
+    mode: str,
+    broker: str,
+    auth_token: Optional[str],
+    config: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Open one signal-mode leg in response to long_entry or short_entry.
+
+    Returns ``{outcome: ..., note?: ..., order_id?: ..., run_id?: ...}``
+    so the webhook handler can shape the HTTP response without knowing
+    the engine internals. ``outcome`` is one of:
+      * ``placed``               - new entry order placed
+      * ``already_in_position``  - leg already long/short; silent no-op
+      * ``position_conflict``    - leg in opposite direction; v1 refuses
+                                   the flip and asks the operator to exit
+                                   first (deferred design item, see
+                                   docs/plan/strategy-signal-mode.md
+                                   section 9)
+    """
+    if action not in _ENTRY_ACTION_TO_SIDE:
+        raise EngineError(f"enter_leg: invalid action {action!r}")
+    requested_side = _ENTRY_ACTION_TO_SIDE[action]
+    broker_action = _ENTRY_ACTION_TO_BROKER[action]
+    leg_id = int(leg_config["id"])
+
+    # Lock the strategy row (same TOCTOU guard the batch-mode start_run
+    # uses) and re-read it. The caller's `strategy` may be stale.
+    locked = await _signal_lock_strategy(db, strategy.id)
+    if locked is None:
+        raise EngineError(f"Strategy {strategy.id} not found")
+    strategy = locked
+
+    # Ensure there is an active run.
+    run = await _get_or_create_signal_run(
+        db, strategy=strategy, mode=mode, broker=broker,
+        trigger_source="webhook",
+    )
+
+    # Read leg state from Redis - lazily init for first-signal-of-day.
+    state = await state_module.get_run_state(run.id)
+    if state is None:
+        # Brand-new run created above hasn't been state-seeded yet.
+        state = {
+            "run_id": run.id,
+            "strategy_id": strategy.id,
+            "pnl_realized": 0.0, "pnl_unrealized": 0.0, "pnl_total": 0.0,
+            "pnl_peak": 0.0, "pnl_trough": 0.0,
+            "lock_armed": False, "lock_floor": None,
+            "trail_to_entry_active": False,
+            "legs": {},
+        }
+    leg_state = _signal_leg_state(state.setdefault("legs", {}), leg_id)
+    current_side = leg_state.get("current_side")
+
+    # Idempotency / conflict detection.
+    if current_side == requested_side:
+        # Already in the requested direction - silent no-op per design 4.4.
+        await state_module.hydrate_run_state(run.id, state)
+        return {
+            "outcome": "already_in_position",
+            "note": f"already {requested_side}",
+            "leg_id": leg_id,
+            "run_id": run.id,
+        }
+    if current_side is not None and current_side != requested_side:
+        # Opposite direction - flip is deferred to a future slice (open
+        # question 9.flip in the design doc). For now refuse and let the
+        # operator exit first.
+        return {
+            "outcome": "position_conflict",
+            "note": (
+                f"leg currently {current_side}; exit first via "
+                f"{current_side}_exit before opening the opposite side"
+            ),
+            "leg_id": leg_id,
+            "run_id": run.id,
+        }
+
+    # Place the entry order. qty is the absolute share/lot count stored
+    # on the signal-mode leg config - lotsize multiplication already
+    # baked in by the wizard for futures legs; raw shares for cash.
+    qty = int(leg_config["qty"])
+    if qty <= 0:
+        raise EngineError(f"Leg {leg_id}: qty must be > 0 (got {qty!r})")
+
+    order_data = {
+        "symbol": leg_config["symbol"],
+        "exchange": leg_config["exchange"],
+        "action": broker_action,
+        "quantity": str(qty),
+        "pricetype": strategy.pricetype or "MARKET",
+        "product": strategy.product or "MIS",
+        "price": "0",
+        "trigger_price": "0",
+        "strategy": strategy.name,
+    }
+    ok, response, _status = dispatch_order(
+        mode=mode, user_id=strategy.user_id, order_data=order_data,
+        auth_token=auth_token, broker=broker, config=config,
+    )
+    broker_order_id = response.get("orderid") if isinstance(response, dict) else None
+    order_row = await repo.record_order(
+        db,
+        run_id=run.id,
+        leg_id=leg_id,
+        kind="entry",
+        symbol=leg_config["symbol"],
+        exchange=leg_config["exchange"],
+        action=broker_action,
+        qty=qty,
+        pricetype=strategy.pricetype or "MARKET",
+        broker_order_id=broker_order_id,
+        status="open" if ok else "rejected",
+        reject_reason=None if ok else (response.get("message") if isinstance(response, dict) else "rejected"),
+    )
+
+    # Audit event + leg state update.
+    repo.emit_leg_entry_placed(
+        user_id=strategy.user_id,
+        strategy_id=strategy.id,
+        run_id=run.id,
+        leg_id=leg_id,
+        symbol=leg_config["symbol"],
+        action=broker_action,
+        qty=qty,
+        broker_order_id=broker_order_id,
+    )
+    if ok:
+        leg_state["current_side"] = requested_side
+        leg_state["qty"] = qty
+        leg_state["symbol"] = leg_config["symbol"]
+        leg_state["exchange"] = leg_config["exchange"]
+        leg_state["entry_order_id"] = order_row.id
+        leg_state["status"] = "open"
+        leg_state["exit_order_id"] = None
+    else:
+        # Order rejected at broker/sandbox. Leg stays flat. Surface the
+        # reject_reason so the operator can investigate from the UI.
+        leg_state["status"] = "rejected"
+    await state_module.hydrate_run_state(run.id, state)
+
+    # Tick subscription for risk eval - same pattern as batch start_run.
+    if ok:
+        try:
+            tick_feed.add_run_subscriptions(
+                run.id,
+                [(leg_config["exchange"], leg_config["symbol"])],
+            )
+        except Exception:
+            logger.exception("signal enter_leg: failed to subscribe ticks")
+
+    return {
+        "outcome": "placed" if ok else "rejected",
+        "order_id": order_row.id,
+        "broker_order_id": broker_order_id,
+        "leg_id": leg_id,
+        "run_id": run.id,
+        "reject_reason": None if ok else order_row.reject_reason,
+    }
+
+
+async def exit_leg_by_signal(
+    db: AsyncSession,
+    *,
+    strategy: SmStrategy,
+    leg_config: dict[str, Any],
+    action: str,
+    mode: str,
+    broker: str,
+    auth_token: Optional[str],
+    config: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Close one signal-mode leg in response to long_exit or short_exit.
+
+    Silent no-op (returns ``outcome='no_matching_position'``) when the
+    leg isn't currently in the requested direction. Matches design 4.4
+    so repeat exit alerts for an already-flat leg are idempotent.
+    """
+    if action not in _EXIT_ACTION_TO_SIDE:
+        raise EngineError(f"exit_leg_by_signal: invalid action {action!r}")
+    requested_side = _EXIT_ACTION_TO_SIDE[action]
+    broker_action = _EXIT_ACTION_TO_BROKER[action]
+    leg_id = int(leg_config["id"])
+
+    locked = await _signal_lock_strategy(db, strategy.id)
+    if locked is None:
+        raise EngineError(f"Strategy {strategy.id} not found")
+    strategy = locked
+
+    # No active run = nothing to exit. Silent no-op.
+    if strategy.current_run_id is None:
+        return {
+            "outcome": "no_matching_position",
+            "note": "no active run on this strategy",
+            "leg_id": leg_id,
+        }
+    run = await db.get(SmStrategyRun, strategy.current_run_id)
+    if run is None or run.stopped_at is not None:
+        return {
+            "outcome": "no_matching_position",
+            "note": "run already stopped",
+            "leg_id": leg_id,
+        }
+
+    state = await state_module.get_run_state(run.id)
+    leg_state = (state or {}).get("legs", {}).get(str(leg_id)) if state else None
+    current_side = leg_state.get("current_side") if leg_state else None
+    if current_side != requested_side:
+        return {
+            "outcome": "no_matching_position",
+            "note": (
+                f"leg is {current_side or 'flat'}; "
+                f"{action} requires current_side={requested_side}"
+            ),
+            "leg_id": leg_id,
+            "run_id": run.id,
+        }
+
+    # Exit the position. Quantity comes from the state (the qty actually
+    # in the market), not the leg config - if a future flip lands the qty
+    # could legitimately differ from the configured size.
+    qty = int(leg_state.get("qty") or leg_config["qty"])
+    if qty <= 0:
+        raise EngineError(f"Leg {leg_id}: exit qty must be > 0 (got {qty!r})")
+
+    order_data = {
+        "symbol": leg_state.get("symbol") or leg_config["symbol"],
+        "exchange": leg_state.get("exchange") or leg_config["exchange"],
+        "action": broker_action,
+        "quantity": str(qty),
+        "pricetype": "MARKET",
+        "product": strategy.product or "MIS",
+        "price": "0",
+        "trigger_price": "0",
+        "strategy": strategy.name,
+    }
+    ok, response, _status = dispatch_order(
+        mode=mode, user_id=strategy.user_id, order_data=order_data,
+        auth_token=auth_token, broker=broker, config=config,
+    )
+    broker_order_id = response.get("orderid") if isinstance(response, dict) else None
+    order_row = await repo.record_order(
+        db,
+        run_id=run.id,
+        leg_id=leg_id,
+        kind="exit_signal",
+        symbol=order_data["symbol"],
+        exchange=order_data["exchange"],
+        action=broker_action,
+        qty=qty,
+        pricetype="MARKET",
+        broker_order_id=broker_order_id,
+        status="open" if ok else "rejected",
+        reject_reason=None if ok else (response.get("message") if isinstance(response, dict) else "rejected"),
+    )
+    repo.emit_leg_exit_placed(
+        user_id=strategy.user_id,
+        strategy_id=strategy.id,
+        run_id=run.id,
+        leg_id=leg_id,
+        symbol=order_data["symbol"],
+        action=broker_action,
+        qty=qty,
+        kind="exit_signal",
+        broker_order_id=broker_order_id,
+    )
+    if ok:
+        leg_state["current_side"] = None
+        leg_state["status"] = "closed"
+        leg_state["exit_order_id"] = order_row.id
+        await state_module.hydrate_run_state(run.id, state)
+
+    return {
+        "outcome": "exited" if ok else "rejected",
+        "order_id": order_row.id,
+        "broker_order_id": broker_order_id,
+        "leg_id": leg_id,
+        "run_id": run.id,
+        "reject_reason": None if ok else order_row.reject_reason,
+    }

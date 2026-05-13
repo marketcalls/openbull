@@ -226,8 +226,8 @@ When `signal` is picked:
 |---|---|---|---|
 | 1 | Design doc | `d6d8909` | done |
 | 2 | Backend schema + migration + Pydantic | `e6c6191` | done |
-| 3 | Webhook handler — signal actions + leg lookup | (this commit) | done |
-| 4 | Engine — `enter_leg` / `exit_leg_by_signal` | — | pending |
+| 3 | Webhook handler — signal actions + leg lookup | `95a1899` | done |
+| 4 | Engine — `enter_leg` / `exit_leg_by_signal` | (this commit) | done |
 | 5 | Engine — direction gating | — | pending |
 | 6 | Engine — intraday window enforcement | — | pending |
 | 7 | Frontend types | — | pending |
@@ -243,7 +243,9 @@ When `signal` is picked:
 
 - **Multi-symbol intraday auto-exit** — when `exit_time` fires for a signal-mode strategy with 5 open legs, do exits go out in parallel or sequentially? Sequential preserves audit ordering but is slower. Decision needed in slice 6.
 - **Sandbox mode and per-leg symbol** — sandbox's `place_order` validates symbol/lot/tick. For signal-mode cash legs the symbol differs per leg; need to confirm each leg's symbol resolves in `symtoken` before the strategy is allowed to save. Decision needed in slice 8 (wizard validation).
-- **Fill-propagation gap** — the iteration-9 audit finding (entry_avg never populated, so SL/Target/Trail never fire) applies to signal mode too. The build assumes that gap is fixed before signal-mode goes live, OR signal-mode skips per-leg risk eval for v1 and relies solely on user-fired exit signals. Decision needed in slice 4.
+- **Fill-propagation gap** — the iteration-9 audit finding (entry_avg never populated, so SL/Target/Trail never fire) applies to signal mode too. Slice 4 ships with the same limitation: signal-mode legs will have `entry_avg=None` after the entry order, so any configured per-leg SL/Target/Trail will not fire. **For v1, signal mode is expected to be driven exclusively by user-fired exit signals** (long_exit, short_exit). The SL/Target/Trail fields on signal-mode legs are accepted by the schema but inert until fill propagation lands.
+- **Opposite-direction signal flip (deferred)** — design §4.4 describes a two-step flip when a `long_entry` arrives on a short leg (side=both, direction=both): exit short, open long. Slice 4 v1 refuses this with `outcome="position_conflict"` (HTTP 409) so the operator must explicitly exit first. Implementing the atomic flip requires careful failure handling (the close fails, do we still open the new side?) and is deferred to a follow-up slice once production usage validates the simpler two-call workflow.
+- **`run.webhook_event_id` stamping** — batch-mode runs are stamped with the originating webhook event id for forensic linking (`webhook_handler.py:485`). Signal-mode runs span many webhook events per day, so the FK doesn't have a natural single value. Slice 4 leaves it null. Each signal still writes its own `sm_webhook_event` row and the `sm_strategy_order` row carries the run_id, so the audit chain is complete via order timestamps.
 
 ---
 
