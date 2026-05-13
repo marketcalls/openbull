@@ -30,18 +30,27 @@ import {
 } from "@/api/strategy_module";
 import {
   ATM_OFFSETS,
+  LEG_SIDE_LABELS,
+  SIGNAL_MODE_ALLOWED_TABS,
+  STRATEGY_DIRECTION_LABELS,
+  STRATEGY_KIND_HINT,
+  STRATEGY_KIND_LABELS,
   TAB_DEFAULT_UNDERLYINGS,
   TAB_EXPIRIES,
   TAB_SEGMENTS,
   UNIVERSE_TAB_HINT,
   UNIVERSE_TAB_LABELS,
+  defaultProductForSignal,
   type ExpiryRank,
   type Leg,
+  type LegSide,
   type Position,
   type Product,
   type Segment,
   type Strategy,
   type StrategyCreate,
+  type StrategyDirection,
+  type StrategyKind,
   type StrategyType,
   type StrategyUpdate,
   type UniverseTab,
@@ -67,6 +76,34 @@ function freshLeg(id: number, tab: UniverseTab): Leg {
     strike_mode: "atm",
     atm_offset: "ATM",
     strike_value: null,
+    target_pts: null,
+    sl_pts: null,
+    trail: { x: 0, y: 0 },
+    momentum: null,
+  };
+}
+
+/** Signal-mode leg starts cash + long with qty=1. The user picks segment,
+ *  side, and qty from there. Distinct from freshLeg so signal-mode legs
+ *  never carry option_type / strike_mode etc. (backend Pydantic rejects
+ *  those on signal-mode legs per slice 2). */
+function freshSignalLeg(id: number, tab: UniverseTab): Leg {
+  const segment: Segment = tab === "mcx" ? "futures" : "cash";
+  const expiry: ExpiryRank | null = segment === "futures" ? "current" : null;
+  return {
+    id,
+    segment,
+    expiry,
+    lots: 1,
+    position: "B",
+    option_type: null,
+    strike_mode: null,
+    atm_offset: null,
+    strike_value: null,
+    symbol: "",
+    exchange: "",
+    side: "both",
+    qty: 1,
     target_pts: null,
     sl_pts: null,
     trail: { x: 0, y: 0 },
@@ -355,6 +392,178 @@ function LegCard({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Signal-mode leg card (slice 8). Multi-symbol leg builder - each leg picks
+// its own symbol+exchange, side (long/short/both), and absolute qty.
+// ---------------------------------------------------------------------------
+
+interface SignalLegCardProps {
+  leg: Leg;
+  tab: UniverseTab;
+  index: number;
+  underlyings: Array<{ symbol: string; name: string; exchange: string }>;
+  strategyType: StrategyType;
+  onChange: (next: Leg) => void;
+  onRemove: () => void;
+  removable: boolean;
+}
+
+function SignalLegCard({
+  leg,
+  tab,
+  index,
+  underlyings,
+  strategyType,
+  onChange,
+  onRemove,
+  removable,
+}: SignalLegCardProps) {
+  const segments: Segment[] = tab === "mcx" ? ["futures"] : ["cash", "futures"];
+
+  const update = <K extends keyof Leg>(key: K, value: Leg[K]) => {
+    onChange({ ...leg, [key]: value });
+  };
+
+  const onSymbolChange = (sym: string) => {
+    // When picking from the dropdown, the matching entry's exchange is
+    // also populated so the user doesn't have to type it. Free-text
+    // edits (typing a symbol not in the list) leave exchange untouched.
+    const match = underlyings.find((u) => u.symbol === sym);
+    onChange({
+      ...leg,
+      symbol: sym,
+      exchange: match ? match.exchange : leg.exchange ?? "",
+    });
+  };
+
+  const qtyLabel =
+    leg.segment === "cash" ? "Quantity (shares)" : "Quantity (units)";
+
+  return (
+    <Card className="border-dashed bg-muted/30">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+        <CardTitle className="text-base">Leg {index + 1}</CardTitle>
+        {removable && (
+          <Button size="sm" variant="ghost" onClick={onRemove}>
+            Remove
+          </Button>
+        )}
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label className="text-xs uppercase">Symbol</Label>
+            <Input
+              list={`signal-symbols-${leg.id}`}
+              value={leg.symbol ?? ""}
+              onChange={(e) => onSymbolChange(e.target.value.toUpperCase())}
+              placeholder="e.g. RELIANCE"
+              className="h-9 font-mono"
+            />
+            <datalist id={`signal-symbols-${leg.id}`}>
+              {underlyings.map((u) => (
+                <option key={u.symbol} value={u.symbol}>
+                  {u.name}
+                </option>
+              ))}
+            </datalist>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs uppercase">Exchange</Label>
+            <Input
+              value={leg.exchange ?? ""}
+              onChange={(e) =>
+                update("exchange", e.target.value.toUpperCase())
+              }
+              placeholder={tab === "mcx" ? "MCX" : "NSE"}
+              className="h-9 font-mono"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="space-y-1.5">
+            <Label className="text-xs uppercase">Segment</Label>
+            <select
+              value={leg.segment}
+              onChange={(e) => {
+                const seg = e.target.value as Segment;
+                onChange({
+                  ...leg,
+                  segment: seg,
+                  expiry: seg === "futures" ? "current" : null,
+                });
+              }}
+              className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+            >
+              {segments.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {leg.segment === "futures" && (
+            <div className="space-y-1.5">
+              <Label className="text-xs uppercase">Expiry</Label>
+              <select
+                value={leg.expiry ?? "current"}
+                onChange={(e) => update("expiry", e.target.value as ExpiryRank)}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+              >
+                {(["current", "next"] as ExpiryRank[]).map((e) => (
+                  <option key={e} value={e}>
+                    {e}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <Label className="text-xs uppercase">Side</Label>
+            <select
+              value={leg.side ?? "both"}
+              onChange={(e) => update("side", e.target.value as LegSide)}
+              className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+            >
+              {(["long", "short", "both"] as LegSide[]).map((s) => (
+                <option key={s} value={s}>
+                  {LEG_SIDE_LABELS[s]}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs uppercase">{qtyLabel}</Label>
+            <Input
+              type="number"
+              min={1}
+              max={1000000}
+              value={leg.qty ?? 1}
+              onChange={(e) =>
+                update("qty", Math.max(1, parseInt(e.target.value || "1", 10)))
+              }
+              className="h-9"
+            />
+          </div>
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          Product for this leg:{" "}
+          <span className="font-mono">
+            {defaultProductForSignal(strategyType, leg.segment)}
+          </span>{" "}
+          (auto-picked from strategy type and segment).
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 interface StrikePickerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -469,9 +678,21 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
   const navigate = useNavigate();
   const isEdit = editing != null;
 
+  // ---- Section 0: strategy kind + direction (slice 8) ----
+  // Kind is locked once a strategy is created (backend forbids the
+  // strategy_kind field on PATCH per slice 2). The UI mirrors that
+  // by making the toggle read-only in edit mode.
+  const initialKind: StrategyKind =
+    (editing?.strategy_kind as StrategyKind) ?? "batch";
+  const [kind, setKind] = useState<StrategyKind>(initialKind);
+  const [direction, setDirection] = useState<StrategyDirection>(
+    (editing?.direction as StrategyDirection) ?? "both",
+  );
+  const isSignal = kind === "signal";
+
   // ---- Section A: tab + index + timings ----
   const [tab, setTab] = useState<UniverseTab>(
-    editing?.universe_tab ?? "weekly_monthly",
+    editing?.universe_tab ?? (isSignal ? "stocks_fno" : "weekly_monthly"),
   );
   const [name, setName] = useState(editing?.name ?? "");
   const [underlying, setUnderlying] = useState<string>(
@@ -507,11 +728,11 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
   );
 
   // ---- Section B: legs ----
-  const [legs, setLegs] = useState<Leg[]>(
-    editing && editing.legs.length > 0
-      ? editing.legs
-      : [freshLeg(1, editing?.universe_tab ?? "weekly_monthly")],
-  );
+  const [legs, setLegs] = useState<Leg[]>(() => {
+    if (editing && editing.legs.length > 0) return editing.legs;
+    const startTab = editing?.universe_tab ?? (isSignal ? "stocks_fno" : "weekly_monthly");
+    return [isSignal ? freshSignalLeg(1, startTab) : freshLeg(1, startTab)];
+  });
 
   // ---- Strike picker state (open one at a time, scoped to a leg index) ----
   const [strikePickerLegIndex, setStrikePickerLegIndex] = useState<number | null>(
@@ -564,8 +785,20 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
     // Seed-pick a sensible default; the API fetch will overwrite shortly.
     const seed = TAB_DEFAULT_UNDERLYINGS[next];
     if (seed.length > 0) setUnderlying(seed[0].symbol);
-    // Reset legs to one fresh leg with valid expiry/segment for the new tab
-    setLegs([freshLeg(1, next)]);
+    // Reset legs to one fresh leg with the right shape for the kind+tab.
+    setLegs([isSignal ? freshSignalLeg(1, next) : freshLeg(1, next)]);
+  };
+
+  const onKindChange = (next: StrategyKind) => {
+    if (isEdit) return; // immutable post-create
+    setKind(next);
+    // Pick a tab valid for the new kind (signal-mode hides options tabs).
+    const nextTab: UniverseTab =
+      next === "signal" && !SIGNAL_MODE_ALLOWED_TABS.includes(tab)
+        ? SIGNAL_MODE_ALLOWED_TABS[0]
+        : tab;
+    setTab(nextTab);
+    setLegs([next === "signal" ? freshSignalLeg(1, nextTab) : freshLeg(1, nextTab)]);
   };
 
   const addLeg = () => {
@@ -574,7 +807,10 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
       return;
     }
     const nextId = (legs.at(-1)?.id ?? 0) + 1;
-    setLegs([...legs, freshLeg(nextId, tab)]);
+    setLegs([
+      ...legs,
+      isSignal ? freshSignalLeg(nextId, tab) : freshLeg(nextId, tab),
+    ]);
   };
 
   const updateLeg = (i: number, next: Leg) => {
@@ -632,11 +868,44 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
       return;
     }
 
+    // Per-kind preflight validation. Backend Pydantic does this too,
+    // but catching here gives a clearer error in the toast.
+    if (isSignal) {
+      for (const leg of legs) {
+        if (!leg.symbol?.trim()) {
+          toast.error(`Leg ${leg.id}: symbol is required`);
+          return;
+        }
+        if (!leg.exchange?.trim()) {
+          toast.error(`Leg ${leg.id}: exchange is required`);
+          return;
+        }
+        if (!leg.qty || leg.qty < 1) {
+          toast.error(`Leg ${leg.id}: quantity must be at least 1`);
+          return;
+        }
+      }
+    }
+
+    // For signal-mode strategies the strategy-row underlying / exchange
+    // are nominal (each leg carries its own symbol). Pick the first
+    // leg's symbol as a stand-in so the existing detail-page header
+    // and list view have something meaningful to display.
+    const firstSignalLeg = isSignal ? legs[0] : null;
+    const submittedUnderlying = isSignal
+      ? (firstSignalLeg?.symbol?.toUpperCase() || "MULTI")
+      : underlying.toUpperCase();
+    const submittedExchange = isSignal
+      ? (firstSignalLeg?.exchange?.toUpperCase() || "NSE")
+      : underlyingExchange;
+
     const payload: StrategyCreate = {
       name: name.trim(),
+      strategy_kind: kind,
+      direction,
       universe_tab: tab,
-      underlying: underlying.toUpperCase(),
-      underlying_exchange: underlyingExchange,
+      underlying: submittedUnderlying,
+      underlying_exchange: submittedExchange,
       strategy_type: strategyType,
       entry_time: strategyType === "intraday" ? entryTime : null,
       exit_time: strategyType === "intraday" ? exitTime : null,
@@ -672,7 +941,11 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
     };
 
     if (isEdit) {
-      updateMutation.mutate(payload);
+      // strategy_kind is immutable post-create; the backend's
+      // StrategyUpdate schema forbids it. Strip before sending.
+      const { strategy_kind: _kind, ...updatePayload } = payload;
+      void _kind;
+      updateMutation.mutate(updatePayload as StrategyUpdate);
     } else {
       createMutation.mutate(payload);
     }
@@ -693,31 +966,114 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
         </p>
       </div>
 
-      {/* Universe tabs */}
+      {/* Strategy kind picker - slice 8. Immutable after create per
+       * backend Pydantic; UI grays out the unchosen kind in edit mode. */}
       <Card>
-        <CardContent className="p-4">
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            {TABS.map((t) => (
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Strategy kind</CardTitle>
+          <CardDescription>
+            {isEdit
+              ? "Kind is locked after the strategy is created."
+              : "Pick how the strategy is driven. This cannot be changed later."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-4 pt-0">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {(["batch", "signal"] as StrategyKind[]).map((k) => (
               <button
-                key={t}
+                key={k}
                 type="button"
-                onClick={() => onTabChange(t)}
+                disabled={isEdit && k !== kind}
+                onClick={() => onKindChange(k)}
                 className={cn(
                   "rounded-md border p-3 text-left transition-colors",
-                  tab === t
+                  kind === k
                     ? "border-primary bg-primary/10"
                     : "border-border hover:bg-muted/50",
+                  isEdit && k !== kind && "cursor-not-allowed opacity-40",
                 )}
               >
-                <div className="text-sm font-medium">{UNIVERSE_TAB_LABELS[t]}</div>
+                <div className="text-sm font-medium">
+                  {STRATEGY_KIND_LABELS[k]}
+                </div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  {UNIVERSE_TAB_HINT[t]}
+                  {STRATEGY_KIND_HINT[k]}
                 </div>
               </button>
             ))}
           </div>
         </CardContent>
       </Card>
+
+      {/* Universe tabs */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {TABS.map((t) => {
+              const disabledForKind =
+                isSignal && !SIGNAL_MODE_ALLOWED_TABS.includes(t);
+              return (
+                <button
+                  key={t}
+                  type="button"
+                  disabled={disabledForKind}
+                  onClick={() => !disabledForKind && onTabChange(t)}
+                  className={cn(
+                    "rounded-md border p-3 text-left transition-colors",
+                    tab === t
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:bg-muted/50",
+                    disabledForKind && "cursor-not-allowed opacity-40",
+                  )}
+                >
+                  <div className="text-sm font-medium">{UNIVERSE_TAB_LABELS[t]}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {UNIVERSE_TAB_HINT[t]}
+                  </div>
+                  {disabledForKind && (
+                    <div className="mt-1 text-[10px] uppercase text-muted-foreground">
+                      not available in signal mode
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Direction picker (signal mode only) */}
+      {isSignal && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Direction filter</CardTitle>
+            <CardDescription>
+              Restricts which signals the engine accepts. Long-only ignores
+              short_entry / short_exit signals; short-only ignores the
+              long ones. Both accepts all four.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-4 pt-0">
+            <div className="flex overflow-hidden rounded-md border border-input">
+              {(["both", "long_only", "short_only"] as StrategyDirection[]).map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => setDirection(d)}
+                  className={cn(
+                    "flex-1 px-3 py-2 text-sm font-medium transition-colors",
+                    direction === d
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-background hover:bg-muted",
+                  )}
+                >
+                  {STRATEGY_DIRECTION_LABELS[d]}
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Index and Timings */}
       <Card>
@@ -740,24 +1096,32 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
               />
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="underlying">Underlying</Label>
-              <select
-                id="underlying"
-                value={underlying}
-                onChange={(e) => setUnderlying(e.target.value)}
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-              >
-                {underlyings.map((u) => (
-                  <option key={u.symbol} value={u.symbol}>
-                    {u.symbol} — {u.name}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-muted-foreground">
-                Exchange: <span className="font-mono">{underlyingExchange}</span>
-              </p>
-            </div>
+            {!isSignal && (
+              <div className="space-y-1.5">
+                <Label htmlFor="underlying">Underlying</Label>
+                <select
+                  id="underlying"
+                  value={underlying}
+                  onChange={(e) => setUnderlying(e.target.value)}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {underlyings.map((u) => (
+                    <option key={u.symbol} value={u.symbol}>
+                      {u.symbol} — {u.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Exchange: <span className="font-mono">{underlyingExchange}</span>
+                </p>
+              </div>
+            )}
+            {isSignal && (
+              <div className="space-y-1.5 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground sm:col-span-1">
+                Signal mode: each leg picks its own symbol. The strategy row
+                shows the first leg's symbol as a label.
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -848,20 +1212,34 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
           </Button>
         </CardHeader>
         <CardContent className="space-y-4">
-          {legs.map((leg, i) => (
-            <LegCard
-              key={leg.id}
-              leg={leg}
-              tab={tab}
-              index={i}
-              underlying={underlying}
-              underlyingExchange={underlyingExchange}
-              onChange={(next) => updateLeg(i, next)}
-              onRemove={() => removeLeg(i)}
-              onOpenStrikePicker={() => setStrikePickerLegIndex(i)}
-              removable={legs.length > 1}
-            />
-          ))}
+          {legs.map((leg, i) =>
+            isSignal ? (
+              <SignalLegCard
+                key={leg.id}
+                leg={leg}
+                tab={tab}
+                index={i}
+                underlyings={underlyings}
+                strategyType={strategyType}
+                onChange={(next) => updateLeg(i, next)}
+                onRemove={() => removeLeg(i)}
+                removable={legs.length > 1}
+              />
+            ) : (
+              <LegCard
+                key={leg.id}
+                leg={leg}
+                tab={tab}
+                index={i}
+                underlying={underlying}
+                underlyingExchange={underlyingExchange}
+                onChange={(next) => updateLeg(i, next)}
+                onRemove={() => removeLeg(i)}
+                onOpenStrikePicker={() => setStrikePickerLegIndex(i)}
+                removable={legs.length > 1}
+              />
+            ),
+          )}
         </CardContent>
       </Card>
 
