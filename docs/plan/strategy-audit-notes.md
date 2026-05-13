@@ -11,6 +11,72 @@ Conventions:
 
 ---
 
+## Iteration 3 — WebSocket subscribe / push / reconnect / dedupe
+
+### CLEAN — Frontend WS reconnect behaviour
+- `frontend/src/hooks/useStrategyWebSocket.ts`: exponential backoff 1s,
+  2s, 4s, 8s, capped at 30s (matches plan §3.3); retry counter resets
+  on a successful `snapshot` frame (line 154); 30s server-side heartbeat
+  via ``{"type": "ping"}`` keeps proxies and half-open sockets in check;
+  `enabled=false` cleanly tears down (line 201) without leaking timers.
+
+### CLEAN — Push throttle and per-strategy queue isolation
+- `backend/strategy/broadcast.py`: `DELTA_THROTTLE_MS=100` matches plan
+  §2's "WS broadcast throttle: at most 10 messages/sec/strategy".
+  Events are unthrottled (correct — operators must see SL hits live).
+  `push_terminal` drops the throttle reservation so a terminal frame
+  always wins. Queue size 200 + `put_nowait` drops on overflow with
+  the snapshot-on-reconnect repair contract documented inline.
+
+### CLEAN — Event topic / subscriber wiring
+- `backend/subscribers/__init__.py` enumerates 24 strategy topics and
+  registers each on both audit and ws subscribers. Cross-referenced
+  every published event class in `backend/events/strategy_events.py`
+  (LegSlHitEvent, OverallSlHitEvent, LockProfit*, etc.) — every emitted
+  topic is in the subscribed set. Plan §4.1's enum lists additional
+  kinds (`eod_squareoff`, `expiry_squareoff`, `tick_source_*`,
+  `recovery_*`, `run_paused/resumed`, `close_all_manual`) but no Event
+  class is defined for them, so the subscriber gap is plan-internal
+  and not a code bug (feature-scope choice).
+
+### FLAG (minor, self-healing) — Snapshot-then-register race
+- `backend/strategy/ws.py:159-162`: builds the snapshot from Redis
+  state, sends it, then calls `broadcast.register`. If the tick
+  processor publishes a delta between Redis-read and queue-register,
+  that delta hits `_broadcast_nowait` with zero subscribers and is
+  dropped. The client's snapshot is one tick stale.
+- Why self-healing: subsequent ticks include full strategy-level P&L
+  + per-leg LTP/MTM overwrites, so steady-state ticking heals the gap
+  within one tick. Per-leg `effective_sl`/`trail_active` advances
+  during the race window stay stale until the next tick on that leg.
+- Why not fixed: minimum-scope fix requires registering BEFORE
+  snapshot and either (a) accepting a partial-merge race against the
+  snapshot base or (b) draining queue once after sending snapshot.
+  Either choice trades one race for another. The current behaviour
+  is benign — flag for awareness, not action.
+
+### FLAG (cosmetic but worth noting) — `event_id: None` placeholder
+- `backend/subscribers/strategy_ws_subscriber.py:26`: WS event frames
+  carry `"event_id": None` with a comment "Phase 6: not paired with
+  the DB row id; Phase 7+". Phase 7+ shipped. Pairing the WS frame
+  with the persisted `sm_strategy_event.id` would let the UI
+  deduplicate WS-pushed events against REST-loaded ones. Currently
+  the UI dedupes by `(kind, ts)` approximate key — works but is
+  hashier than an id match.
+- Not fixed: closing this requires either changing the publish
+  interface to carry the persisted id back, OR a second event after
+  DB write — both are architecture changes.
+
+### FLAG — Module-level asyncio.Lock in `broadcast.py`
+- `backend/strategy/broadcast.py:31`: `_lock = asyncio.Lock()` at
+  import time. On Python 3.10+ this lazily binds to the running loop
+  on first acquire, so works in single-loop apps. Multi-loop or
+  process-fork scenarios (e.g. uvicorn with multiple workers) may
+  produce loop-binding issues — not currently exercised but worth a
+  note when the deployment topology changes.
+
+---
+
 ## Iteration 2 — Symbol-format consistency (scheduler / webhook / tick / services)
 
 ### FIX — Recovery does not re-subscribe ticks for open legs
@@ -137,9 +203,9 @@ Conventions:
 
 ## Areas remaining (rotate next iterations)
 
-1. ~~Order constants misuse~~ — done (this iteration)
-2. Symbol format consistency (scheduler/webhook/tick-processor ↔ services)
-3. WebSocket subscribe/mode-1/2/3 parsing + reconnect + dedupe
+1. ~~Order constants misuse~~ — done (iteration 1)
+2. ~~Symbol format consistency~~ — done (iteration 2)
+3. ~~WebSocket subscribe / push / reconnect / dedupe~~ — done (iteration 3)
 4. Service-layer contract drift (modify/cancel signatures, response shape)
 5. Lot-size resolution end-to-end (partially done — re-verify after fix)
 6. Time-zone handling (UTC store / IST wire / APScheduler `Asia/Kolkata`)
