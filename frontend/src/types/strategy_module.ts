@@ -8,8 +8,7 @@ export type UniverseTab =
   | "weekly_monthly"
   | "monthly_only"
   | "stocks_fno"
-  | "mcx"
-  | "delta";
+  | "mcx";
 
 export type StrategyType = "intraday" | "positional";
 export type StrategyStatus = "stopped" | "running" | "paused" | "errored";
@@ -138,7 +137,6 @@ export const UNIVERSE_TAB_LABELS: Record<UniverseTab, string> = {
   monthly_only: "Monthly Only Expiry",
   stocks_fno: "Stocks – Cash / F&O",
   mcx: "Commodities (MCX)",
-  delta: "Delta Exchange",
 };
 
 export const UNIVERSE_TAB_HINT: Record<UniverseTab, string> = {
@@ -146,7 +144,6 @@ export const UNIVERSE_TAB_HINT: Record<UniverseTab, string> = {
   monthly_only: "MIDCPNIFTY, BANKNIFTY, FINNIFTY, BANKEX",
   stocks_fno: "All NIFTY 500 stocks",
   mcx: "CRUDEOIL, NATURALGAS, GOLD, SILVER, …",
-  delta: "BTCUSD, ETHUSD",
 };
 
 /**
@@ -158,7 +155,6 @@ export const TAB_EXPIRIES: Record<UniverseTab, ExpiryRank[]> = {
   monthly_only: ["monthly"],
   stocks_fno: ["monthly"],
   mcx: ["current", "next"],
-  delta: ["current", "next"],
 };
 
 /** What segments are allowed per tab. */
@@ -167,7 +163,6 @@ export const TAB_SEGMENTS: Record<UniverseTab, Segment[]> = {
   monthly_only: ["futures", "options"],
   stocks_fno: ["cash", "futures", "options"],
   mcx: ["futures", "options"],
-  delta: ["futures", "options"],
 };
 
 /**
@@ -200,10 +195,6 @@ export const TAB_DEFAULT_UNDERLYINGS: Record<
     { symbol: "NATURALGAS", name: "Natural Gas", exchange: "MCX" },
     { symbol: "GOLD", name: "Gold", exchange: "MCX" },
     { symbol: "SILVER", name: "Silver", exchange: "MCX" },
-  ],
-  delta: [
-    { symbol: "BTCUSD", name: "Bitcoin / USD", exchange: "DELTA" },
-    { symbol: "ETHUSD", name: "Ethereum / USD", exchange: "DELTA" },
   ],
 };
 

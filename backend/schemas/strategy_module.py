@@ -125,7 +125,7 @@ class WebhookIpAllowlistEntry(BaseModel):
 
 
 _STRATEGY_TYPE = Literal["intraday", "positional"]
-_UNIVERSE_TAB = Literal["weekly_monthly", "monthly_only", "stocks_fno", "mcx", "delta"]
+_UNIVERSE_TAB = Literal["weekly_monthly", "monthly_only", "stocks_fno", "mcx"]
 _PRODUCT = Literal["NRML", "MIS", "CNC"]
 _PRICETYPE = Literal["MARKET", "LIMIT"]
 

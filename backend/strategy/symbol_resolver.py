@@ -284,10 +284,6 @@ def list_underlyings_for_tab(universe_tab: str) -> tuple[bool, dict[str, Any], i
             ],
         }, 200
 
-    if universe_tab == "delta":
-        # v1 — UI shell only, no integration.
-        return True, {"status": "success", "underlyings": []}, 200
-
     return False, {
         "status": "error",
         "message": f"Unknown universe_tab: {universe_tab}",

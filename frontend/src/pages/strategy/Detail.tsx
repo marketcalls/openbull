@@ -1218,7 +1218,8 @@ export default function StrategyDetail() {
             </div>
             {startMode === "live" && !strategy.live_enabled && (
               <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
-                Strategy isn't live-enabled. Re-auth flow ships in Phase 7+.
+                Strategy isn't live-enabled. Use "Enable LIVE" on the detail
+                page to re-authenticate and unlock live mode.
               </p>
             )}
           </div>

@@ -35,7 +35,7 @@ This is greenfield — it must not modify the existing `strategy_builder_service
 
 - AlgoTest's "advanced strategy creation" (custom condition trees, multi-stage entries)
 - Backtesting
-- Crypto / Delta Exchange wiring (UI shell stays disabled)
+- Crypto / Delta Exchange (no plans — not in scope)
 - Multi-broker fan-out for a single strategy
 - Strategy templates, marketplace, sharing
 - Simple Momentum entry filter (UI stub only — not evaluated by engine in v1)
@@ -82,7 +82,6 @@ The list view shows per-strategy summary with three explicit P&L columns — **R
   ORDER BY underlying
   ```
   where `base_symbol()` strips the trailing `{DDMMMYY}FUT` from the OpenAlgo symbol. This auto-includes whatever the broker carries (CRUDEOIL, NATURALGAS, GOLD, SILVER, COPPER, ZINC, ALUMINIUM, NICKEL, LEAD, MENTHAOIL, COTTON, etc.) without any code change when MCX adds/removes contracts.
-- Delta Exchange: BTCUSD, ETHUSD (disabled in v1, shows "coming soon" badge)
 
 **Section A: Index and Timings**
 - Index dropdown (searchable, filtered by tab)

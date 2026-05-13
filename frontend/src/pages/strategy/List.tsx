@@ -98,9 +98,9 @@ export default function StrategyList() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Strategies</h1>
           <p className="text-sm text-muted-foreground">
-            Multi-leg options strategies with risk management. Phase 1 is
-            config-only — engine, scheduler, and webhook receiver come in
-            later phases.
+            Multi-leg options strategies with end-to-end risk management.
+            Sandbox by default; live mode requires explicit per-strategy
+            opt-in with re-auth.
           </p>
         </div>
         <Button onClick={() => navigate("/strategy/new")}>+ New strategy</Button>
@@ -110,8 +110,9 @@ export default function StrategyList() {
         <CardHeader>
           <CardTitle>Saved strategies</CardTitle>
           <CardDescription>
-            Live P&L columns are zero placeholders until Phase 6 wires the
-            engine. Status reflects whether a run is active.
+            P&L columns are live for running strategies and reflect the
+            last-run snapshot for stopped strategies. Status shows whether
+            a run is currently active.
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -50,7 +50,6 @@ const TABS: UniverseTab[] = [
   "monthly_only",
   "stocks_fno",
   "mcx",
-  "delta",
 ];
 
 function freshLeg(id: number, tab: UniverseTab): Leg {
@@ -626,32 +625,23 @@ export default function StrategyWizard() {
       {/* Universe tabs */}
       <Card>
         <CardContent className="p-4">
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {TABS.map((t) => (
               <button
                 key={t}
                 type="button"
-                disabled={t === "delta"}
                 onClick={() => onTabChange(t)}
                 className={cn(
                   "rounded-md border p-3 text-left transition-colors",
                   tab === t
                     ? "border-primary bg-primary/10"
                     : "border-border hover:bg-muted/50",
-                  t === "delta" && "cursor-not-allowed opacity-40",
                 )}
               >
                 <div className="text-sm font-medium">{UNIVERSE_TAB_LABELS[t]}</div>
                 <div className="mt-1 text-xs text-muted-foreground">
                   {UNIVERSE_TAB_HINT[t]}
                 </div>
-                {t === "delta" && (
-                  <div className="mt-1">
-                    <Badge variant="outline" className="text-[10px]">
-                      coming soon
-                    </Badge>
-                  </div>
-                )}
               </button>
             ))}
           </div>
@@ -935,8 +925,8 @@ export default function StrategyWizard() {
         <CardHeader>
           <CardTitle>Scheduler</CardTitle>
           <CardDescription>
-            Optional cron-based start. Mon–Fri default. Phase 8 will wire
-            APScheduler — for now this is config-only.
+            Optional cron-based start. Mon–Fri default. Times are interpreted
+            in IST (Asia/Kolkata).
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
