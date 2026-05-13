@@ -229,8 +229,8 @@ When `signal` is picked:
 | 3 | Webhook handler — signal actions + leg lookup | `95a1899` | done |
 | 4 | Engine — `enter_leg` / `exit_leg_by_signal` | `a8d6b90` | done |
 | 5 | Engine — direction gating | `dc2e204` | done |
-| 6 | Engine — intraday window enforcement | (this commit) | done |
-| 7 | Frontend types | — | pending |
+| 6 | Engine — intraday window enforcement | `622512c` | done |
+| 7 | Frontend types | (this commit) | done |
 | 8 | Frontend wizard — kind toggle + signal-mode leg builder | — | pending |
 | 9 | Frontend detail — kind-aware Setup tab + webhook examples | — | pending |
 | 10 | E2E sanity — curl examples, sandbox dispatch verified | — | pending |

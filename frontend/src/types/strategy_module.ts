@@ -22,6 +22,38 @@ export type ExpiryRank = "weekly" | "monthly" | "current" | "next";
 export type StrikeMode = "atm" | "strike";
 export type Weekday = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN";
 
+/**
+ * Signal-mode discriminator. 'batch' = multi-leg options spread (existing).
+ * 'signal' = TradingView-style per-leg long/short entry/exit signals.
+ * Default 'batch' for backwards compatibility with rows created before the
+ * signal-mode schema migration (slice 2).
+ */
+export type StrategyKind = "batch" | "signal";
+
+/**
+ * Direction filter for signal-mode strategies. Ignored for batch-mode.
+ * The engine and webhook handler both gate incoming signals against this
+ * (slices 3 and 5). 'both' = no filtering.
+ */
+export type StrategyDirection = "long_only" | "short_only" | "both";
+
+/**
+ * Per-leg side declaration for signal-mode legs. Determines which signal
+ * actions a leg accepts:
+ *   - 'long'  -> long_entry + long_exit
+ *   - 'short' -> short_entry + short_exit
+ *   - 'both'  -> all four actions
+ * Unrelated to batch-mode's per-leg `position` (B/S).
+ */
+export type LegSide = "long" | "short" | "both";
+
+/** The four TradingView-style signal actions for signal-mode webhooks. */
+export type SignalAction =
+  | "long_entry"
+  | "long_exit"
+  | "short_entry"
+  | "short_exit";
+
 export interface TrailConfig {
   x: number;
   y: number;
@@ -30,13 +62,29 @@ export interface TrailConfig {
 export interface Leg {
   id: number;
   segment: Segment;
-  expiry: ExpiryRank;
+  // Optional in signal mode (cash legs have no expiry; futures use
+  // 'current' | 'next'). Required for batch-mode F&O legs - the backend
+  // Pydantic validator enforces this per-kind.
+  expiry?: ExpiryRank | null;
+  // Batch-mode lot count multiplied by symtoken.lotsize at runtime.
+  // Default 1 for backwards compat with rows that don't set it.
   lots: number;
   position: Position;
   option_type?: OptionType | null;
   strike_mode?: StrikeMode | null;
   atm_offset?: string | null;
   strike_value?: number | null;
+
+  // --- Signal-mode fields (null/undefined for batch-mode legs) ---
+  symbol?: string | null;
+  exchange?: string | null;
+  side?: LegSide | null;
+  /** Absolute order quantity for signal-mode legs (shares for cash,
+   *  lot-multiple for futures - the wizard handles the multiplication
+   *  at form-submit time). Replaces `lots` as the quantity authority
+   *  for signal-mode strategies. */
+  qty?: number | null;
+
   target_pts?: number | null;
   sl_pts?: number | null;
   trail: TrailConfig;
@@ -65,6 +113,14 @@ export interface WebhookIpAllowlistEntry {
 
 export interface StrategyCreate {
   name: string;
+  /** 'batch' (default) keeps the existing multi-leg options spread flow.
+   *  'signal' opts in to the TradingView per-leg signal flow. The
+   *  backend's strategy_kind column defaults to 'batch' so omitting
+   *  this field preserves current wizard behaviour. */
+  strategy_kind?: StrategyKind;
+  /** Signal-mode direction filter. Ignored for batch-mode strategies
+   *  but always sent so the wire format is consistent. */
+  direction?: StrategyDirection;
   universe_tab: UniverseTab;
   underlying: string;
   underlying_exchange: string;
@@ -83,11 +139,18 @@ export interface StrategyCreate {
   daily_loss_limit_inr?: number | null;
 }
 
-export type StrategyUpdate = Partial<StrategyCreate>;
+/** Partial update for PATCH /web/strategy/{id}.
+ *  Note: strategy_kind is intentionally omitted - the backend Pydantic
+ *  schema also forbids it (immutable post-create per slice 2 design).
+ *  Direction can be patched freely. */
+export type StrategyUpdate = Partial<Omit<StrategyCreate, "strategy_kind">>;
 
 export interface Strategy {
   id: number;
   name: string;
+  /** Defaults to 'batch' when the server didn't ship the field (old DB row). */
+  strategy_kind: StrategyKind;
+  direction: StrategyDirection;
   universe_tab: UniverseTab;
   underlying: string;
   underlying_exchange: string;
@@ -115,6 +178,8 @@ export interface Strategy {
 export interface StrategyListItem {
   id: number;
   name: string;
+  strategy_kind: StrategyKind;
+  direction: StrategyDirection;
   universe_tab: UniverseTab;
   underlying: string;
   strategy_type: StrategyType;
@@ -212,3 +277,56 @@ export const ATM_OFFSETS: string[] = [
   "OTM4",
   "OTM5",
 ];
+
+// ---------------------------------------------------------------------------
+// Signal-mode UX constants (slice 7)
+// ---------------------------------------------------------------------------
+
+/** Human-readable labels for the strategy-kind picker at the top of the
+ *  wizard (design section 6.1). */
+export const STRATEGY_KIND_LABELS: Record<StrategyKind, string> = {
+  batch: "Multi-leg (batch)",
+  signal: "Signal-driven (TradingView)",
+};
+
+/** One-line hint shown under the kind picker so the user knows which
+ *  is which without diving into docs. */
+export const STRATEGY_KIND_HINT: Record<StrategyKind, string> = {
+  batch:
+    "All legs entered together on start; exited together on stop. Best for option spreads.",
+  signal:
+    "Each leg reacts to long_entry / long_exit / short_entry / short_exit signals.",
+};
+
+/** Labels for the direction radio. */
+export const STRATEGY_DIRECTION_LABELS: Record<StrategyDirection, string> = {
+  long_only: "Long only",
+  short_only: "Short only",
+  both: "Both",
+};
+
+/** Labels for the per-leg side selector in the signal-mode wizard. */
+export const LEG_SIDE_LABELS: Record<LegSide, string> = {
+  long: "Long",
+  short: "Short",
+  both: "Both",
+};
+
+/** Universe tabs allowed when the strategy is signal-mode. Options-only
+ *  tabs are excluded because signal mode doesn't support option spreads
+ *  in v1 (backend Pydantic validator also rejects options legs for
+ *  signal-mode strategies - see slice 2). */
+export const SIGNAL_MODE_ALLOWED_TABS: UniverseTab[] = ["stocks_fno", "mcx"];
+
+/** Default product per (strategy_type, segment) for signal-mode legs.
+ *  Wizard auto-picks unless the user overrides. */
+export function defaultProductForSignal(
+  strategyType: StrategyType,
+  segment: Segment,
+): Product {
+  if (segment === "cash") {
+    return strategyType === "intraday" ? "MIS" : "CNC";
+  }
+  // futures: MIS for intraday, NRML for positional
+  return strategyType === "intraday" ? "MIS" : "NRML";
+}
