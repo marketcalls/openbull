@@ -59,7 +59,16 @@ MAX_BODY_BYTES = 8 * 1024            # 8 KB — webhook payloads are tiny
 DEDUPE_TTL_SEC = 60                  # plan 14.4
 COOLING_OFF_SEC = 30                 # post-stop quiet window
 RATE_LIMIT_PER_MIN = 60              # per-strategy
-ALLOWED_ACTIONS = frozenset({"start", "stop"})
+
+# Per-kind action allowlists. The webhook router validates the incoming
+# action against the strategy's kind so a batch strategy can't accidentally
+# accept a long_entry alert and a signal strategy can't be start/stop'd
+# via a copy-pasted TV alert from a batch setup. See
+# docs/plan/strategy-signal-mode.md section 4.2.
+BATCH_ACTIONS = frozenset({"start", "stop"})
+SIGNAL_ACTIONS = frozenset({"long_entry", "long_exit", "short_entry", "short_exit"})
+ENTRY_SIGNALS = frozenset({"long_entry", "short_entry"})
+EXIT_SIGNALS = frozenset({"long_exit", "short_exit"})
 ALLOWED_MODES = frozenset({"live", "sandbox"})
 
 
@@ -141,6 +150,84 @@ def _dedupe_key(strategy_id: int, action: str, mode: Optional[str]) -> str:
     return f"webhook:dedupe:{strategy_id}:{action}:{mode or '_'}"
 
 
+def _resolve_signal_leg(
+    strategy: SmStrategy,
+    payload: dict[str, Any],
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """Pick the leg targeted by a signal-mode webhook.
+
+    Resolution precedence per docs/plan/strategy-signal-mode.md section 4.1:
+      1. ``leg_id`` (integer) - exact match on the strategy's legs[].id
+      2. fallback: ``(symbol, exchange)`` lookup against legs[]
+
+    Returns ``(leg_dict, None)`` on success or ``(None, error_message)`` on
+    miss. The legs jsonb is a list of dicts (already validated by Pydantic
+    at create/update time).
+    """
+    legs = strategy.legs or []
+    leg_id = payload.get("leg_id")
+    if leg_id is not None:
+        try:
+            leg_id_int = int(leg_id)
+        except (TypeError, ValueError):
+            return None, f"leg_id must be an integer, got {leg_id!r}"
+        for leg in legs:
+            if int(leg.get("id", -1)) == leg_id_int:
+                return leg, None
+        return None, f"No leg with id={leg_id_int} on this strategy"
+
+    sym = payload.get("symbol")
+    exch = payload.get("exchange")
+    if sym and exch:
+        sym_u = str(sym).strip().upper()
+        exch_u = str(exch).strip().upper()
+        for leg in legs:
+            leg_sym = (leg.get("symbol") or "").upper()
+            leg_exch = (leg.get("exchange") or "").upper()
+            if leg_sym == sym_u and leg_exch == exch_u:
+                return leg, None
+        return None, f"No leg matching symbol={sym_u} exchange={exch_u}"
+
+    return None, "Signal webhook must carry either 'leg_id' or ('symbol','exchange')"
+
+
+def _direction_allows(strategy_direction: str, action: str) -> bool:
+    """True when the strategy's direction filter permits the incoming signal.
+
+    direction=both     -> all 4 signal actions allowed
+    direction=long_only  -> only long_entry / long_exit
+    direction=short_only -> only short_entry / short_exit
+
+    Exit signals are gated symmetrically so a long_only strategy can't
+    accidentally process a short_exit aimed at a leg that may have
+    legitimately opened on a previous direction setting.
+    """
+    if strategy_direction == "both":
+        return True
+    if strategy_direction == "long_only":
+        return action in ("long_entry", "long_exit")
+    if strategy_direction == "short_only":
+        return action in ("short_entry", "short_exit")
+    # Unknown direction value - fail closed.
+    return False
+
+
+def _leg_side_allows(leg_side: Optional[str], action: str) -> bool:
+    """True when a leg's side declaration permits the signal action.
+
+    side='both'   -> any of the four actions
+    side='long'   -> long_entry / long_exit only
+    side='short'  -> short_entry / short_exit only
+    """
+    if not leg_side or leg_side == "both":
+        return True
+    if leg_side == "long":
+        return action in ("long_entry", "long_exit")
+    if leg_side == "short":
+        return action in ("short_entry", "short_exit")
+    return False
+
+
 async def _dedupe_seen(strategy_id: int, action: str, mode: Optional[str]) -> bool:
     """Returns True if the same (strategy, action, mode) was seen in
     the last DEDUPE_TTL_SEC seconds; also records this hit for next time."""
@@ -218,6 +305,204 @@ async def _record_event(
     await db.commit()
     await db.refresh(row)
     return row
+
+
+# ---------------------------------------------------------------------------
+# Signal-mode dispatch
+# ---------------------------------------------------------------------------
+
+
+def _signal_dedupe_key(strategy_id: int, action: str, leg_id: int) -> str:
+    """Per-leg dedupe key for signal-mode webhooks. Different from the batch
+    key so the two modes' dedupe windows don't collide."""
+    return f"webhook:dedupe:signal:{strategy_id}:{action}:leg:{leg_id}"
+
+
+async def _signal_dedupe_seen(strategy_id: int, action: str, leg_id: int) -> bool:
+    key = _signal_dedupe_key(strategy_id, action, leg_id)
+    seen = await cache_get_json(key)
+    if seen is not None:
+        return True
+    await cache_set_json(key, 1, ttl_seconds=DEDUPE_TTL_SEC)
+    return False
+
+
+async def _signal_dedupe_release(strategy_id: int, action: str, leg_id: int) -> None:
+    try:
+        await cache_delete(_signal_dedupe_key(strategy_id, action, leg_id))
+    except Exception:
+        logger.warning(
+            "Failed to release signal dedupe key for strategy %d leg %d",
+            strategy_id, leg_id,
+        )
+
+
+async def _handle_signal_webhook(
+    *,
+    strategy: SmStrategy,
+    action: str,
+    payload: dict[str, Any],
+    ip: Optional[str],
+    user_agent: Optional[str],
+) -> WebhookOutcome:
+    """Validate and dispatch a signal-mode webhook.
+
+    Steps:
+      1. Direction gate (strategy-level long_only / short_only / both)
+      2. Leg lookup (leg_id first, then symbol+exchange fallback)
+      3. Leg-side gate (the leg's own side='long'|'short'|'both')
+      4. Optional mode validation (payload-supplied 'mode', defaults sandbox)
+      5. Dedupe (per-leg key with 60s TTL)
+      6. Engine dispatch -- slice 4 wires this; for now returns 501 so
+         operators see an explicit "not implemented yet" instead of
+         half-running signal flow.
+    """
+    strategy_id = strategy.id
+    mode = payload.get("mode") or "sandbox"
+
+    # Step 1 - direction gate.
+    strategy_direction = getattr(strategy, "direction", "both") or "both"
+    if not _direction_allows(strategy_direction, action):
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_direction_blocked",
+                error=f"direction={strategy_direction}",
+            )
+        return WebhookOutcome(
+            status_code=403,
+            body={
+                "status": "error",
+                "message": (
+                    f"Signal {action!r} blocked by strategy direction "
+                    f"{strategy_direction!r}"
+                ),
+            },
+            result_label="rejected_direction_blocked",
+            error=f"direction={strategy_direction}",
+        )
+
+    # Step 2 - leg lookup.
+    leg, err = _resolve_signal_leg(strategy, payload)
+    if leg is None:
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_no_leg",
+                error=err,
+            )
+        return WebhookOutcome(
+            status_code=400,
+            body={"status": "error", "message": err},
+            result_label="rejected_no_leg",
+            error=err,
+        )
+    leg_id = int(leg["id"])
+
+    # Step 3 - leg-side gate.
+    if not _leg_side_allows(leg.get("side"), action):
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_side_mismatch",
+                error=f"leg_side={leg.get('side')!r}",
+            )
+        return WebhookOutcome(
+            status_code=400,
+            body={
+                "status": "error",
+                "message": (
+                    f"Leg {leg_id}: side={leg.get('side')!r} does not accept "
+                    f"action={action!r}"
+                ),
+            },
+            result_label="rejected_side_mismatch",
+            error=f"leg_side={leg.get('side')!r}",
+        )
+
+    # Step 4 - mode validation. Signal mode treats `mode` as optional in the
+    # payload and defaults to sandbox. Live mode still requires the explicit
+    # per-strategy live_enabled opt-in.
+    if mode not in ALLOWED_MODES:
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=str(mode),
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_invalid_mode",
+            )
+        return WebhookOutcome(
+            status_code=400,
+            body={"status": "error", "message": "mode must be 'live' or 'sandbox'"},
+            result_label="rejected_invalid_mode",
+        )
+    if mode == "live" and not strategy.live_enabled:
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_live_disabled",
+            )
+        return WebhookOutcome(
+            status_code=403,
+            body={"status": "error", "message": "Live mode is not enabled on this strategy"},
+            result_label="rejected_live_disabled",
+        )
+
+    # Step 5 - per-leg dedupe.
+    if await _signal_dedupe_seen(strategy_id, action, leg_id):
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_dedupe",
+                error=f"leg_id={leg_id}",
+            )
+        return WebhookOutcome(
+            status_code=200,
+            body={
+                "status": "ok",
+                "note": (
+                    f"duplicate {action} on leg {leg_id} within "
+                    f"{DEDUPE_TTL_SEC}s - ignored"
+                ),
+            },
+            result_label="rejected_dedupe",
+        )
+
+    # Step 6 - engine dispatch. Slice 4 will fill this in with the actual
+    # enter_leg / exit_leg_by_signal calls plus the Redis-state-based
+    # mismatched-signal silent no-op. Until then, record the would-be
+    # dispatch and surface a 501 so operators don't think the signal ran.
+    async with async_session() as db:
+        await _record_event(
+            db, strategy_id=strategy_id, action=action, mode=mode,
+            payload=payload, ip=ip, user_agent=user_agent,
+            result_label="rejected_engine_error",
+            error="signal_engine_not_implemented_yet",
+        )
+    # Release dedupe so the operator can retry once slice 4 lands.
+    await _signal_dedupe_release(strategy_id, action, leg_id)
+    return WebhookOutcome(
+        status_code=501,
+        body={
+            "status": "error",
+            "message": (
+                "Signal-mode engine dispatch is not yet wired (slice 4). "
+                "Webhook validation succeeded; the request was accepted "
+                "and audited but no order was placed."
+            ),
+            "leg_id": leg_id,
+            "leg_symbol": leg.get("symbol"),
+            "leg_exchange": leg.get("exchange"),
+            "action": action,
+            "mode": mode,
+        },
+        result_label="rejected_engine_error",
+        error="signal_engine_not_implemented_yet",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -317,8 +602,10 @@ async def handle_webhook(
             result_label="rate_limited",
         )
 
-    # 6. action validation
-    if action not in ALLOWED_ACTIONS:
+    # 6. action validation - per-kind allowlist
+    strategy_kind = getattr(strategy, "strategy_kind", "batch") or "batch"
+    allowed_for_kind = SIGNAL_ACTIONS if strategy_kind == "signal" else BATCH_ACTIONS
+    if action not in allowed_for_kind:
         async with async_session() as db:
             await _record_event(
                 db, strategy_id=strategy.id, action=str(action) if action else None,
@@ -327,8 +614,28 @@ async def handle_webhook(
             )
         return WebhookOutcome(
             status_code=400,
-            body={"status": "error", "message": "action must be 'start' or 'stop'"},
+            body={
+                "status": "error",
+                "message": (
+                    f"action {action!r} not valid for {strategy_kind}-mode "
+                    f"strategy. Allowed: {sorted(allowed_for_kind)}"
+                ),
+            },
             result_label="rejected_invalid_action",
+        )
+
+    # ------------------------------------------------------------------
+    # Signal-mode branch: leg-targeted entry/exit signals.
+    # Validation order: direction gate -> leg lookup -> leg-side gate ->
+    # dedupe (per-leg key) -> dispatch (slice-4 engine entry point).
+    # ------------------------------------------------------------------
+    if strategy_kind == "signal":
+        return await _handle_signal_webhook(
+            strategy=strategy,
+            action=action,
+            payload=parsed,
+            ip=ip,
+            user_agent=user_agent,
         )
 
     # 7. mode validation (start only)
