@@ -11,6 +11,43 @@ Conventions:
 
 ---
 
+## Iteration 5 — Lot-size resolution end-to-end (re-verification)
+
+### CLEAN — Strategy module lot-size path is consistent after iteration 1's fix
+- Source of truth: symtoken via `option_symbol_service._lookup_option_in_db`
+  for both futures (engine.py:118) and options (symbol_resolver.py:171 via
+  `get_option_symbol` line 276). Cash equity correctly uses an explicit
+  `lotsize=1` (engine.py:75) - correct for 1-share NSE/BSE cash units.
+- Iteration 1's `engine.py:232-252` guard raises EngineError when an
+  options/futures leg's resolved lotsize is missing or non-positive,
+  blocking the silent 1-unit-order anti-pattern.
+- `qty = int(r["lots"]) * int(r["lotsize"])` (engine.py:275) is the only
+  quantity computation in the engine path. Result is stored on the
+  `sm_strategy_order` row at placement.
+- Exit path uses `entry.qty` (engine.py:462) so exit qty == entry qty
+  by construction - no second multiplication, no re-derivation from
+  potentially-stale lotsize.
+- Redis state stores absolute `qty` only (state.py:65), not lots +
+  lotsize separately, so a symtoken-row change mid-run cannot poison
+  the in-flight state.
+- `repository.py`, `risk_evaluator.py`, `checkpoint.py` contain zero
+  lotsize references - they consume `qty` only.
+- Frontend wizard collects `lots` (count) only; backend multiplies by
+  symtoken lotsize. The `StartRunResponse.legs[].lotsize` echoed back
+  is display-only - no client-side qty math against it.
+
+### FLAG (out of scope - sandbox layer, not strategy module)
+- `backend/sandbox/symbol_info.py:84` has `lot_size=int(row.lotsize or 1)`,
+  the same anti-pattern iteration 1 fixed in the strategy engine. It
+  drives the sandbox layer's "qty is a lot multiple" validation. Today
+  the strategy module sends post-multiplied qty to sandbox so the
+  validation only fails if symtoken is broken AND a non-lot-multiple
+  qty reaches sandbox via some other surface (manual API, basket order
+  service, etc.). Not a strategy-module bug per the audit scope, but
+  flagging as a related observation worth a separate fix if you choose.
+
+---
+
 ## Iteration 4 — Service-layer contract drift
 
 ### FIX — `_reconcile_live_order` mis-unpacks broker plugin response
@@ -259,7 +296,7 @@ Conventions:
 2. ~~Symbol format consistency~~ — done (iteration 2)
 3. ~~WebSocket subscribe / push / reconnect / dedupe~~ — done (iteration 3)
 4. ~~Service-layer contract drift~~ — done (iteration 4)
-5. Lot-size resolution end-to-end (partially done — re-verify after fix)
+5. ~~Lot-size resolution end-to-end~~ — done (iteration 5; re-verified post-fix)
 6. Time-zone handling (UTC store / IST wire / APScheduler `Asia/Kolkata`)
 7. Concurrent webhook + scheduler start idempotency
 8. Live-mode auth (BrokerAuth fetched FRESH per auto-exit, not cached)
