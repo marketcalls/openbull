@@ -1,9 +1,11 @@
 # Signal-Mode Strategies — Design
 
-**Status:** design only; build in progress
+**Status:** v1 shipped — all 10 slices on `main` (local-only commits per build instruction)
 **Owner:** rajandran
 **Coexists with:** the batch-mode strategy module (`docs/plan/strategy-module.md`)
 **Initiated:** 2026-05-13
+**Operator playbook:** [`docs/design/signal-webhook-examples.md`](../design/signal-webhook-examples.md)
+**Deferred-v2 items:** fill propagation (per-leg SL/Target/Trail), opposite-direction signal flip
 
 ---
 
@@ -232,20 +234,26 @@ When `signal` is picked:
 | 6 | Engine — intraday window enforcement | `622512c` | done |
 | 7 | Frontend types | `e3f1aa2` | done |
 | 8 | Frontend wizard — kind toggle + signal-mode leg builder | `badf2c1` | done |
-| 9 | Frontend detail — kind-aware Setup tab + webhook examples | (this commit) | done |
-| 10 | E2E sanity — curl examples, sandbox dispatch verified | — | pending |
+| 9 | Frontend detail — kind-aware Setup tab + webhook examples | `a8eab0a` | done |
+| 10 | E2E sanity — curl examples, sandbox dispatch verified | (this commit) | done |
 
 ---
 
-## 9. Open questions
+## 9. Open questions — all resolved
 
-(Resolve here before the slice that needs the answer.)
+All slice-driven questions have been answered. Items marked
+**DEFERRED-V2** are intentionally out of scope for v1 and tracked
+elsewhere (commit messages, separate design doc) for future work.
 
 - **Multi-symbol intraday auto-exit** — RESOLVED in slice 6. Sequential. Rationale: preserves audit ordering (each exit's `leg_exit_placed` event lands before the next exit fires), keeps the broker-side request rate under the typical 10/sec cap even with 10 legs, and lets one leg's failure surface in the log adjacent to the right leg rather than collated across N concurrent attempts. The ~50-200ms slowdown per leg is irrelevant at end-of-day when the market window is already over. Implementation: `engine.signal_auto_square` loops legs and awaits `exit_leg_by_signal` per leg, re-acquiring the row lock between iterations (each `exit_leg_by_signal` commits a transaction and releases the lock).
-- **Sandbox mode and per-leg symbol** — sandbox's `place_order` validates symbol/lot/tick. For signal-mode cash legs the symbol differs per leg; need to confirm each leg's symbol resolves in `symtoken` before the strategy is allowed to save. Decision needed in slice 8 (wizard validation).
-- **Fill-propagation gap** — the iteration-9 audit finding (entry_avg never populated, so SL/Target/Trail never fire) applies to signal mode too. Slice 4 ships with the same limitation: signal-mode legs will have `entry_avg=None` after the entry order, so any configured per-leg SL/Target/Trail will not fire. **For v1, signal mode is expected to be driven exclusively by user-fired exit signals** (long_exit, short_exit). The SL/Target/Trail fields on signal-mode legs are accepted by the schema but inert until fill propagation lands.
-- **Opposite-direction signal flip (deferred)** — design §4.4 describes a two-step flip when a `long_entry` arrives on a short leg (side=both, direction=both): exit short, open long. Slice 4 v1 refuses this with `outcome="position_conflict"` (HTTP 409) so the operator must explicitly exit first. Implementing the atomic flip requires careful failure handling (the close fails, do we still open the new side?) and is deferred to a follow-up slice once production usage validates the simpler two-call workflow.
-- **`run.webhook_event_id` stamping** — batch-mode runs are stamped with the originating webhook event id for forensic linking (`webhook_handler.py:485`). Signal-mode runs span many webhook events per day, so the FK doesn't have a natural single value. Slice 4 leaves it null. Each signal still writes its own `sm_webhook_event` row and the `sm_strategy_order` row carries the run_id, so the audit chain is complete via order timestamps.
+
+- **Sandbox mode and per-leg symbol** — RESOLVED in slice 8 + slice 10. Wizard validation enforces non-empty symbol/exchange/qty at form-submit time (slice 8). Per-symbol existence in `symtoken` is **deferred to runtime** — the first signal targeting an unknown symbol gets a clean rejection from `sandbox_service.place_order` (or the broker plugin for live mode), which the engine surfaces as `outcome="rejected"` with the broker's reject reason. Adding a symtoken pre-check at strategy-create time was considered but deferred: it would block the create path on a `symtoken` lookup, and the same validation lives on the order-placement path where it actually matters. Cost of the deferred check: one wasted signal per typo, audit-logged with the broker's reject reason.
+
+- **Fill-propagation gap** — DEFERRED-V2. The iteration-9 batch-mode audit finding (entry_avg never populated, so SL/Target/Trail never fire) applies to signal mode too. Slice 4 ships with the same limitation: signal-mode legs will have `entry_avg=None` after the entry order, so any configured per-leg SL/Target/Trail will not fire. **For v1, signal mode is expected to be driven exclusively by user-fired exit signals** (long_exit, short_exit). The SL/Target/Trail fields on signal-mode legs are accepted by the schema but inert until fill propagation lands. Closing this is a single cross-cutting feature: a sandbox/broker fill-detection mechanism that backfills `sm_strategy_order.avg_fill_price` and updates Redis state's `leg.entry_avg`. Once done, every existing per-leg risk rule (slices 4-6) starts firing for free on signal-mode legs.
+
+- **Opposite-direction signal flip** — DEFERRED-V2. Design §4.4 describes a two-step flip when a `long_entry` arrives on a short leg (side=both, direction=both): exit short, open long. Slice 4 v1 refuses this with `outcome="position_conflict"` (HTTP 409) so the operator must explicitly exit first. Implementing the atomic flip requires careful failure handling (the close fails, do we still open the new side? What if the close partially fills?) and is deferred to a follow-up slice once production usage validates the simpler two-call workflow.
+
+- **`run.webhook_event_id` stamping** — RESOLVED in slice 4 (left null intentionally). Batch-mode runs are stamped with the originating webhook event id for forensic linking. Signal-mode runs span many webhook events per day, so the FK doesn't have a natural single value. Each signal writes its own `sm_webhook_event` row and the `sm_strategy_order` row carries the run_id, so the audit chain is complete via order timestamps even without the FK.
 
 ---
 
