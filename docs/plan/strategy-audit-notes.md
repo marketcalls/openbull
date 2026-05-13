@@ -11,6 +11,47 @@ Conventions:
 
 ---
 
+## Iteration 6 — Time-zone handling
+
+### CLEAN — End-to-end time-zone hygiene matches plan section 4.4
+- **Storage**: every timestamp column on `sm_strategy*` tables is
+  `DateTime(timezone=True)` (Postgres `timestamptz`). Verified across
+  `sm_strategy`, `sm_strategy_run`, `sm_strategy_order`,
+  `sm_strategy_checkpoint`, `sm_strategy_event`, `sm_webhook_event`.
+- **Server clock**: `backend/strategy/time_utils.now_utc()` returns
+  `datetime.now(timezone.utc)`. Every server-side timestamp assignment
+  in `backend/strategy/*` uses `now_utc()` - `repository.run.stopped_at`,
+  `recovery.order.filled_at`, `webhook_handler` cooling-off window,
+  `tick_processor` WS frames, `ws.py` snapshot frames. Zero naive
+  `datetime.now()` or deprecated `datetime.utcnow()` calls anywhere in
+  the strategy module.
+- **API rendering**: `format_ist()` wraps every timestamp on the way
+  out - `created_at`, `updated_at`, `placed_at`, `filled_at`,
+  `started_at`, `stopped_at`, audit event `ts`, webhook `received_at`
+  (all verified in `routers/strategy_module.py`). Output is ISO 8601
+  with explicit `+05:30` offset, sub-second precision via
+  `isoformat(timespec="milliseconds")`.
+- **WS payloads**: `tick_processor._broadcast_delta`,
+  `ws._build_snapshot`, `strategy_ws_subscriber.push_event` all emit
+  both `ts_ist` (IST ISO string) and `ts_ms_utc` (epoch ms) - matches
+  plan section 4.4 dual-field design for high-frequency frames.
+- **APScheduler**: `scheduler.py:60` initializes
+  `AsyncIOScheduler(timezone=IST_TZ)` where `IST_TZ = "Asia/Kolkata"`;
+  every `CronTrigger` (start + auto-stop) also passes
+  `timezone=IST_TZ`. Defense-in-depth - if APScheduler's process-level
+  default ever drifts, the per-trigger override is authoritative.
+- **Frontend**: `Detail.tsx:formatIst` and `List.tsx:formatIst` both
+  force `timeZone: "Asia/Kolkata"` on `toLocaleString("en-IN", ...)`
+  and append a literal `IST` suffix. The backend already sends
+  IST-offset strings, so the frontend essentially round-trips the
+  timezone for display formatting only - no UTC ever reaches the UI.
+- **Defensive fallback** in `format_ist`: naive input is assumed UTC
+  via `dt.replace(tzinfo=timezone.utc)`. Effectively dead code given
+  PG `timestamptz` always returns aware datetimes through SQLAlchemy
+  `DateTime(timezone=True)`, but harmless.
+
+---
+
 ## Iteration 5 — Lot-size resolution end-to-end (re-verification)
 
 ### CLEAN — Strategy module lot-size path is consistent after iteration 1's fix
@@ -297,7 +338,7 @@ Conventions:
 3. ~~WebSocket subscribe / push / reconnect / dedupe~~ — done (iteration 3)
 4. ~~Service-layer contract drift~~ — done (iteration 4)
 5. ~~Lot-size resolution end-to-end~~ — done (iteration 5; re-verified post-fix)
-6. Time-zone handling (UTC store / IST wire / APScheduler `Asia/Kolkata`)
+6. ~~Time-zone handling~~ — done (iteration 6; clean)
 7. Concurrent webhook + scheduler start idempotency
 8. Live-mode auth (BrokerAuth fetched FRESH per auto-exit, not cached)
 9. Auto-exit / SL / TP trigger correctness (off-by-one, races, double-firing)
