@@ -46,7 +46,7 @@ from backend.models.strategy_module import (
 )
 from backend.strategy.security import hash_webhook_token, redact_payload
 from backend.strategy.time_utils import now_utc
-from backend.utils.redis_client import cache_get_json, cache_set_json
+from backend.utils.redis_client import cache_delete, cache_get_json, cache_set_json
 
 logger = logging.getLogger(__name__)
 
@@ -137,15 +137,31 @@ async def _rate_limited(strategy_id: int) -> bool:
         return False
 
 
+def _dedupe_key(strategy_id: int, action: str, mode: Optional[str]) -> str:
+    return f"webhook:dedupe:{strategy_id}:{action}:{mode or '_'}"
+
+
 async def _dedupe_seen(strategy_id: int, action: str, mode: Optional[str]) -> bool:
     """Returns True if the same (strategy, action, mode) was seen in
     the last DEDUPE_TTL_SEC seconds; also records this hit for next time."""
-    key = f"webhook:dedupe:{strategy_id}:{action}:{mode or '_'}"
+    key = _dedupe_key(strategy_id, action, mode)
     seen = await cache_get_json(key)
     if seen is not None:
         return True
     await cache_set_json(key, 1, ttl_seconds=DEDUPE_TTL_SEC)
     return False
+
+
+async def _dedupe_release(strategy_id: int, action: str, mode: Optional[str]) -> None:
+    """Drop the dedupe key. Used on engine-side failure so the next retry
+    within the window is allowed to reach the engine instead of being
+    silently swallowed as a duplicate of a request that never actually ran."""
+    try:
+        await cache_delete(_dedupe_key(strategy_id, action, mode))
+    except Exception:
+        logger.warning(
+            "Failed to release webhook dedupe key for strategy %d", strategy_id,
+        )
 
 
 async def _cooling_off_active(db: AsyncSession, strategy_id: int) -> bool:
@@ -424,6 +440,7 @@ async def handle_webhook(
                             result_label="rejected_engine_error",
                             error="no_active_broker",
                         )
+                        await _dedupe_release(strategy.id, action, mode)
                         return WebhookOutcome(
                             status_code=403,
                             body={"status": "error", "message": "No active broker for live mode"},
@@ -447,6 +464,7 @@ async def handle_webhook(
                             result_label="rejected_engine_error",
                             error="broker_session_expired",
                         )
+                        await _dedupe_release(strategy.id, action, mode)
                         return WebhookOutcome(
                             status_code=403,
                             body={"status": "error", "message": "Broker session expired or revoked"},
@@ -494,6 +512,10 @@ async def handle_webhook(
                             db, user_id=strategy_fresh.user_id, broker=run.broker,
                         )
                         if ctx is None:
+                            # Stop's dedupe key uses mode=None (only start
+                            # carries mode in the key); release it so the
+                            # operator can re-fire stop once auth recovers.
+                            await _dedupe_release(strategy.id, action, None)
                             return WebhookOutcome(
                                 status_code=403,
                                 body={"status": "error", "message": "Broker session expired"},
@@ -523,6 +545,12 @@ async def handle_webhook(
                 payload=parsed, ip=ip, user_agent=user_agent,
                 result_label="rejected_engine_error", error=str(e),
             )
+            # Engine-side failure means the request never produced a real
+            # action - drop the dedupe reservation so the user can retry
+            # within the 60s window without seeing a stale "duplicate" reply.
+            await _dedupe_release(
+                strategy.id, action, mode if action == "start" else None,
+            )
             return WebhookOutcome(
                 status_code=200,
                 body={"status": "error", "message": str(e)},
@@ -539,6 +567,9 @@ async def handle_webhook(
                     )
             except Exception:
                 pass
+            await _dedupe_release(
+                strategy.id, action, mode if action == "start" else None,
+            )
             return WebhookOutcome(
                 status_code=500,
                 body={"status": "error", "message": "Internal error"},
