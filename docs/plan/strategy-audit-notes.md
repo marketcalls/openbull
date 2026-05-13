@@ -11,6 +11,77 @@ Conventions:
 
 ---
 
+## Iteration 9 — Auto-exit / SL / TP trigger correctness — LOOP STOPPED
+
+### CRITICAL FINDING (needs user decision) — `entry_avg` is never populated during normal runtime, so SL / Target / Trail / Overall-SL / Lock-Profit never fire on a freshly-started run
+
+**Trace:**
+1. `engine.start_run` calls `dispatch_order` for each entry leg. The
+   response is `{status: "success", orderid: "..."}` - no fill price.
+2. `repo.record_order` writes the `sm_strategy_order` row with
+   `status="open"` and `avg_fill_price=None`.
+3. `state.init_run_state` -> `_build_initial_state` (`state.py:60-80`)
+   sets `entry_avg=None` for every leg.
+4. Tick processor receives ticks. For each leg,
+   `tick_processor.py:165-169` reads `entry_avg`, finds `None`, and
+   does `continue` - the risk evaluator is never invoked for that leg.
+5. There is NO code path that updates `entry_avg` after init:
+     * No call to `state.update_leg_state` from outside `mark_leg_closed`.
+     * No `LegEntryFilledEvent` is published anywhere
+       (`subscribers/__init__.py` lists the topic; no publisher exists).
+     * No background poller of broker / sandbox orderbook.
+     * No order-update WS subscriber.
+     * `recovery._reconcile_run_orders` updates `entry_avg` from
+       `avg_fill_price`, but only on FastAPI startup - never for a run
+       started in the current process.
+
+**Net effect:** for any run started fresh (no crash + recovery cycle in
+between), every leg's `entry_avg` stays `None`. The risk evaluator's
+gate at `tick_processor.py:165-169` short-circuits on every tick.
+Per-leg SL/Target/Trail never fire. Strategy-level rules also never
+fire because `compute_strategy_mtm` sums leg `mtm` which is 0 for legs
+that never had `entry_avg` set (no `evaluate_leg` ever ran). Lock-
+profit, Overall-SL, Overall-Target - all dormant.
+
+**Why this likely went unnoticed:**
+- Phase 6's integration test almost certainly hydrates state directly
+  (calls `state.update_leg_state(run_id, leg_id, {"entry_avg": ...})`
+  via test code) or restarts the engine to trigger
+  `recovery._reconcile_run_orders`. The test passes but the
+  production code path doesn't.
+- Sandbox order rows DO get filled (the sandbox's own
+  `_try_fill_order` runs synchronously inside
+  `sandbox_service.place_order`), but the resulting `average_price`
+  never crosses back into `sm_strategy_order.avg_fill_price` or Redis
+  state.
+
+**Why the fix is not minimum-scope and needs your decision:**
+- Sandbox path: after each `dispatch_order` for `mode='sandbox'`,
+  query `backend.sandbox.order_manager.get_order(user_id, orderid)`,
+  extract `average_price`, and write to (a) the just-recorded
+  `sm_strategy_order` row, (b) Redis state's `leg[lid].entry_avg`.
+  Reasonable but introduces a new sandbox-aware step in the engine.
+- Live path: no synchronous fill data available. Needs either
+  (a) periodic broker orderbook poller, (b) broker order-update WS
+  subscriber, or (c) post-placement `time.sleep` + orderbook fetch.
+  Each is a new background task / external dependency. The plan
+  section 5.5 forbids polling ("event-driven, never polling") so
+  the contractually-correct choice is (b) but no plugin currently
+  exposes order-update events to a strategy subscriber.
+
+**Recommendation:** confirm whether v1 intentionally deferred live
+fill detection (matching plan section 5.5's "event-driven" mandate
+suggests the plan assumed a WS-driven fill stream that wasn't
+built). If yes, document the limitation in the plan and ship the
+sandbox-only fill propagation as a follow-up. If no, decide between
+the periodic poller and the order-update WS subscriber.
+
+**Audit loop status:** stopped at iteration 9. Cron `9381886c`
+deleted. Resume requires a decision on this finding because the
+fix is architectural, not a one-line patch.
+
+---
+
 ## Iteration 8 — Live-mode auth (BrokerAuth fetched FRESH per auto-exit)
 
 ### CLEAN — Zero token caching, every live action resolves auth from DB
