@@ -76,6 +76,8 @@ async def create_strategy(
     row = SmStrategy(
         user_id=user_id,
         name=payload["name"].strip(),
+        strategy_kind=payload.get("strategy_kind", "batch"),
+        direction=payload.get("direction", "both"),
         universe_tab=payload["universe_tab"],
         underlying=payload["underlying"].strip().upper(),
         underlying_exchange=payload["underlying_exchange"].strip().upper(),

@@ -70,6 +70,8 @@ def _strategy_out(row: SmStrategy, *, webhook_url: str) -> StrategyOut:
     return StrategyOut(
         id=row.id,
         name=row.name,
+        strategy_kind=getattr(row, "strategy_kind", "batch") or "batch",
+        direction=getattr(row, "direction", "both") or "both",
         universe_tab=row.universe_tab,
         underlying=row.underlying,
         underlying_exchange=row.underlying_exchange,
@@ -99,6 +101,8 @@ def _strategy_list_item(row: SmStrategy) -> StrategyListItem:
     return StrategyListItem(
         id=row.id,
         name=row.name,
+        strategy_kind=getattr(row, "strategy_kind", "batch") or "batch",
+        direction=getattr(row, "direction", "both") or "both",
         universe_tab=row.universe_tab,
         underlying=row.underlying,
         strategy_type=row.strategy_type,

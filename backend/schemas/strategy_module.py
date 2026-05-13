@@ -31,22 +31,38 @@ class TrailConfig(BaseModel):
 class Leg(BaseModel):
     """One leg in a strategy.
 
-    Validation rules per the plan (Section 4.1.1):
+    Validation rules per the plan (Section 4.1.1) plus the signal-mode
+    extension (docs/plan/strategy-signal-mode.md):
 
-    * ``segment="options"`` requires ``option_type`` and ``strike_mode``.
-    * ``strike_mode="atm"`` requires ``atm_offset``.
-    * ``strike_mode="strike"`` requires ``strike_value``.
-    * ``expiry`` value is gated by the parent strategy's ``universe_tab`` —
-      enforced at the strategy level, not here, so a leg validates standalone.
+    Batch mode legs (parent ``strategy_kind="batch"``):
+      * ``segment="options"`` requires ``option_type`` and ``strike_mode``.
+      * ``strike_mode="atm"`` requires ``atm_offset``.
+      * ``strike_mode="strike"`` requires ``strike_value``.
+
+    Signal mode legs (parent ``strategy_kind="signal"``):
+      * Each leg carries its own ``symbol`` + ``exchange``.
+      * ``side`` declares which signals are accepted.
+      * ``qty`` is the absolute order quantity (lotsize already multiplied
+        for FUT; raw shares for cash).
+      * ``segment`` must be ``"cash"`` or ``"futures"`` (no options in v1).
+      * Options-only fields (``option_type``, ``strike_*``) must be unset.
+
+    ``expiry`` is optional - required only for futures (signal mode) and
+    F&O batch legs. Cash legs leave it None.
+
+    Per-kind validation is enforced at the parent StrategyCreate /
+    StrategyUpdate level so a Leg validates standalone in any context.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     id: int = Field(..., ge=1, description="1-indexed leg number, unique within strategy")
     segment: Literal["options", "futures", "cash"]
-    expiry: Literal["weekly", "monthly", "current", "next"]
-    lots: int = Field(..., gt=0, le=50)
-    position: Literal["B", "S"]
+    expiry: Optional[Literal["weekly", "monthly", "current", "next"]] = None
+    # Batch-mode lot count (multiplied by symtoken.lotsize at runtime). For
+    # signal-mode legs ``qty`` carries the absolute order quantity instead.
+    lots: int = Field(1, gt=0, le=10000)
+    position: Literal["B", "S"] = "B"
 
     option_type: Optional[Literal["CE", "PE"]] = None
     strike_mode: Optional[Literal["atm", "strike"]] = None
@@ -57,6 +73,12 @@ class Leg(BaseModel):
     )
     strike_value: Optional[float] = Field(None, gt=0)
 
+    # --- Signal-mode fields (None for batch-mode legs) ---
+    symbol: Optional[str] = Field(None, min_length=1, max_length=50)
+    exchange: Optional[str] = Field(None, min_length=1, max_length=20)
+    side: Optional[Literal["long", "short", "both"]] = None
+    qty: Optional[int] = Field(None, gt=0, le=1_000_000)
+
     target_pts: Optional[float] = Field(None, ge=0)
     sl_pts: Optional[float] = Field(None, ge=0)
     trail: TrailConfig = Field(default_factory=TrailConfig)
@@ -66,6 +88,8 @@ class Leg(BaseModel):
     @model_validator(mode="after")
     def _validate_segment_fields(self) -> "Leg":
         if self.segment == "options":
+            # Options legs are batch-mode only - signal-mode rejects this at
+            # the strategy validator.
             if self.option_type is None:
                 raise ValueError("option_type required when segment='options'")
             if self.strike_mode is None:
@@ -128,12 +152,65 @@ _STRATEGY_TYPE = Literal["intraday", "positional"]
 _UNIVERSE_TAB = Literal["weekly_monthly", "monthly_only", "stocks_fno", "mcx"]
 _PRODUCT = Literal["NRML", "MIS", "CNC"]
 _PRICETYPE = Literal["MARKET", "LIMIT"]
+_STRATEGY_KIND = Literal["batch", "signal"]
+_DIRECTION = Literal["long_only", "short_only", "both"]
+
+
+def _validate_legs_for_kind(kind: str, legs: List[Leg]) -> None:
+    """Per-kind leg validation. Called from StrategyCreate and StrategyUpdate.
+
+    Batch mode: legs must NOT carry signal-mode fields (``symbol``,
+    ``exchange``, ``side``, ``qty``). Options legs are allowed.
+
+    Signal mode: each leg MUST carry ``symbol``, ``exchange``, ``side``,
+    ``qty``. ``segment`` must be ``cash`` or ``futures`` (no options).
+    Options-only fields must be absent (enforced by Leg._validate_segment_fields
+    plus an explicit reject here).
+    """
+    if kind == "signal":
+        for leg in legs:
+            if leg.segment == "options":
+                raise ValueError(
+                    f"Leg {leg.id}: signal-mode strategies cannot contain "
+                    f"options legs. Use 'cash' or 'futures'."
+                )
+            if not leg.symbol:
+                raise ValueError(f"Leg {leg.id}: signal-mode legs require 'symbol'")
+            if not leg.exchange:
+                raise ValueError(f"Leg {leg.id}: signal-mode legs require 'exchange'")
+            if leg.side is None:
+                raise ValueError(
+                    f"Leg {leg.id}: signal-mode legs require 'side' "
+                    f"(long / short / both)"
+                )
+            if leg.qty is None:
+                raise ValueError(f"Leg {leg.id}: signal-mode legs require 'qty'")
+            if leg.segment == "futures" and leg.expiry not in ("current", "next"):
+                raise ValueError(
+                    f"Leg {leg.id}: futures legs in signal mode need expiry "
+                    f"'current' or 'next'"
+                )
+    else:  # batch
+        for leg in legs:
+            for field in ("symbol", "exchange", "side", "qty"):
+                if getattr(leg, field) is not None:
+                    raise ValueError(
+                        f"Leg {leg.id}: '{field}' is only valid for "
+                        f"signal-mode strategies"
+                    )
+            if leg.expiry is None and leg.segment != "cash":
+                raise ValueError(
+                    f"Leg {leg.id}: batch-mode F&O legs require 'expiry'"
+                )
 
 
 class StrategyCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=200)
+    strategy_kind: _STRATEGY_KIND = "batch"
+    direction: _DIRECTION = "both"
+
     universe_tab: _UNIVERSE_TAB
     underlying: str = Field(..., min_length=1, max_length=50)
     underlying_exchange: str = Field(..., min_length=1, max_length=20)
@@ -166,6 +243,11 @@ class StrategyCreate(BaseModel):
                 raise ValueError("entry_time must be before exit_time")
         return self
 
+    @model_validator(mode="after")
+    def _validate_legs_per_kind(self) -> "StrategyCreate":
+        _validate_legs_for_kind(self.strategy_kind, self.legs)
+        return self
+
     @field_validator("legs")
     @classmethod
     def _unique_leg_ids(cls, legs: List[Leg]) -> List[Leg]:
@@ -182,11 +264,16 @@ class StrategyUpdate(BaseModel):
     Mass-assignment of internal fields like ``webhook_token_hash``, ``user_id``,
     ``status``, ``current_run_id`` is impossible because they're not in this
     schema (Pydantic strict mode rejects them).
+
+    Note: ``strategy_kind`` cannot be changed after creation - flipping a
+    live strategy from batch to signal (or back) would invalidate the legs
+    array and the webhook payload contract. The router enforces this.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: Optional[str] = Field(None, min_length=1, max_length=200)
+    direction: Optional[_DIRECTION] = None
     universe_tab: Optional[_UNIVERSE_TAB] = None
     underlying: Optional[str] = Field(None, min_length=1, max_length=50)
     underlying_exchange: Optional[str] = Field(None, min_length=1, max_length=20)
@@ -240,6 +327,8 @@ class StrategyOut(BaseModel):
 
     id: int
     name: str
+    strategy_kind: str = "batch"
+    direction: str = "both"
     universe_tab: str
     underlying: str
     underlying_exchange: str
@@ -279,6 +368,8 @@ class StrategyListItem(BaseModel):
 
     id: int
     name: str
+    strategy_kind: str = "batch"
+    direction: str = "both"
     universe_tab: str
     underlying: str
     strategy_type: str

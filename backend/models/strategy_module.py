@@ -66,7 +66,22 @@ class SmStrategy(Base):
 
     name = Column(String(200), nullable=False)
 
+    # Coexistence discriminator. 'batch' = the original multi-leg options
+    # spread mode (start/stop webhook actions). 'signal' = TradingView-style
+    # per-leg signals (long_entry/long_exit/short_entry/short_exit). Default
+    # 'batch' so every existing row stays semantically unchanged.
+    # See docs/plan/strategy-signal-mode.md section 3.1.
+    strategy_kind = Column(String(20), nullable=False, default="batch")
+
+    # Signal-mode direction filter (long_only / short_only / both). Ignored
+    # for batch-mode strategies. Default 'both' = no filtering.
+    direction = Column(String(20), nullable=False, default="both")
+
     universe_tab = Column(String(30), nullable=False)
+    # For signal-mode strategies the underlying / underlying_exchange are
+    # nominal - each leg carries its own symbol/exchange. Kept non-null for
+    # backwards compatibility with batch-mode rows; signal-mode wizard sets
+    # them from the first leg or to a sentinel like 'MULTI'.
     underlying = Column(String(50), nullable=False)
     underlying_exchange = Column(String(20), nullable=False)
 

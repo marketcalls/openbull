@@ -224,8 +224,8 @@ When `signal` is picked:
 
 | # | Slice | Commit | Status |
 |---|---|---|---|
-| 1 | Design doc | (this commit) | done |
-| 2 | Backend schema + migration + Pydantic | — | pending |
+| 1 | Design doc | `d6d8909` | done |
+| 2 | Backend schema + migration + Pydantic | (this commit) | done |
 | 3 | Webhook handler — signal actions + leg lookup | — | pending |
 | 4 | Engine — `enter_leg` / `exit_leg_by_signal` | — | pending |
 | 5 | Engine — direction gating | — | pending |
