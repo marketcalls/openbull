@@ -115,11 +115,20 @@ def resolve_atm(
 
     Wraps the existing service. Engine (Phase 4+) calls into this so all
     strategy-module symbol resolution flows through one boundary.
+
+    Expiry normalization: callers pass the DB-format ``DD-MMM-YY`` (from
+    ``list_expiries`` / ``get_expiry_dates``). The downstream
+    ``get_option_symbol`` and its ``_fetch_available_strikes`` lookup
+    both expect the symbol-embedded compact format ``DDMMMYY`` (no
+    hyphens) - the legacy strategy-builder always passed compact, so
+    that's the contract. Strip the hyphens here, mirroring what
+    ``resolve_direct_strike`` already does below.
     """
+    expiry_compact = expiry_date.replace("-", "").upper()
     return get_option_symbol(
         underlying=underlying,
         exchange=underlying_exchange,
-        expiry_date=expiry_date,
+        expiry_date=expiry_compact,
         offset=atm_offset,
         option_type=option_type,
         auth_token=auth_token,
