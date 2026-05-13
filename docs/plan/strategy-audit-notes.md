@@ -11,6 +11,58 @@ Conventions:
 
 ---
 
+## Iteration 4 — Service-layer contract drift
+
+### FIX — `_reconcile_live_order` mis-unpacks broker plugin response
+- File: `backend/strategy/recovery.py:101` (now line ~100 after fix)
+- Symptom: `ok, response = get_book(auth_token)` unpacks two values from
+  what every broker plugin (Zerodha, Upstox, Angel, Dhan, Fyers) returns
+  as a single `dict` — `get_order_book(auth) -> dict`. The unpack iterates
+  the dict's keys; whatever happens next (`response.get("data")` on a
+  string-keyed local) raises AttributeError and lands in the outer
+  `except`, silently swallowing the result and returning None. Live
+  recovery reconciliation would never work once enabled.
+- Why it didn't bite yet: `_reconcile_run_orders` currently short-circuits
+  the live branch with a comment ("recovery doesn't have a session
+  token"), so `_reconcile_live_order` is dead code today. But it's
+  invoked the moment that branch is wired (Phase 10 contract is for
+  live recovery per plan §5.4 step 2.c).
+- Fix: route through the documented service entry point
+  `orderbook_service.get_orderbook_with_auth(auth_token, broker)` which
+  returns the canonical `(success, response, status)` tuple with
+  per-broker mapping/transform applied. Switch the field-lookup order
+  to prefer `order_status` (the documented post-transform key) over
+  `status`. user_id intentionally omitted so the call always hits the
+  broker, never sandbox.
+
+### CLEAN — `dispatch_order` consumer-side response handling
+- `engine.start_run` / `engine._exit_legs` extract `response.get("orderid")`
+  for the broker order id. Matches the contract on both sandbox
+  (`{"status": "success", "orderid": row.orderid, "mode": "sandbox"}`)
+  and live (`{"status": "success", "orderid": order_id}`). On failure
+  both surfaces produce `{"status": "error", "message": ...}` and the
+  engine correctly stores `broker_order_id=None`, `status="rejected"`,
+  `reject_reason=response["message"]`.
+
+### CLEAN — No modify/cancel surface drift
+- Strategy module never calls `modify_order_service` or
+  `cancel_order_service`. Exit orders are placed as fresh MARKET orders
+  via `dispatch_order` rather than modifying or cancelling pending
+  entry orders. So modify/cancel contract drift is moot today.
+
+### CLEAN — All service imports use documented entry points
+- `dispatch_order` -> `sandbox_service.place_order` + `order_service.
+  place_order_with_auth` (canonical).
+- `symbol_resolver` -> `market_data_service.get_expiry_dates`,
+  `option_symbol_service.{get_option_symbol, _lookup_option_in_db,
+  _format_strike, _option_exchange_for, _fetch_available_strikes,
+  _run_query}` (existing helpers, audited iteration 2).
+- `tick_feed` -> `market_data_cache.subscribe_critical` (audited
+  iteration 2).
+- `recovery` (after this fix) -> `orderbook_service.get_orderbook_with_auth`.
+
+---
+
 ## Iteration 3 — WebSocket subscribe / push / reconnect / dedupe
 
 ### CLEAN — Frontend WS reconnect behaviour
@@ -206,7 +258,7 @@ Conventions:
 1. ~~Order constants misuse~~ — done (iteration 1)
 2. ~~Symbol format consistency~~ — done (iteration 2)
 3. ~~WebSocket subscribe / push / reconnect / dedupe~~ — done (iteration 3)
-4. Service-layer contract drift (modify/cancel signatures, response shape)
+4. ~~Service-layer contract drift~~ — done (iteration 4)
 5. Lot-size resolution end-to-end (partially done — re-verify after fix)
 6. Time-zone handling (UTC store / IST wire / APScheduler `Asia/Kolkata`)
 7. Concurrent webhook + scheduler start idempotency

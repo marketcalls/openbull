@@ -84,30 +84,32 @@ def _reconcile_sandbox_order(
 def _reconcile_live_order(
     db_order: SmStrategyOrder, broker: str, auth_token: str,
 ) -> dict[str, Any] | None:
-    """Live-mode reconciliation — query broker orderbook for our orderid.
+    """Live-mode reconciliation - query the normalized orderbook for our orderid.
 
-    Phase 5 ships a best-effort lookup that's wired but not exercised
-    until Phase 10. The broker-side endpoint name varies; we use the
-    generic ``get_order_book`` helper that every adapter exposes.
+    Routes through ``orderbook_service.get_orderbook_with_auth`` rather
+    than the broker plugin's raw ``get_order_book``. The plugin returns a
+    raw broker-shaped dict; the service layer applies the per-broker
+    mapping/transform so we get the canonical OpenBull shape documented
+    in SERVICES.md (``{"status": "success", "data": {"orders": [...]}}``)
+    regardless of which broker is configured. user_id is intentionally
+    omitted so the call always hits the broker (not sandbox).
     """
     if not db_order.broker_order_id:
         return None
     try:
-        import importlib
-        api = importlib.import_module(f"backend.broker.{broker}.api.order_api")
-        get_book = getattr(api, "get_order_book", None)
-        if get_book is None:
+        from backend.services.orderbook_service import get_orderbook_with_auth
+
+        ok, response, _status = get_orderbook_with_auth(auth_token, broker)
+        if not ok or not isinstance(response, dict):
             return None
-        ok, response = get_book(auth_token)
-        if not ok:
-            return None
-        rows = response.get("data") if isinstance(response, dict) else None
+        data = response.get("data")
+        rows = data.get("orders") if isinstance(data, dict) else None
         if not rows:
             return None
         for row in rows:
             if str(row.get("orderid")) == str(db_order.broker_order_id):
                 return {
-                    "status": row.get("status") or row.get("order_status"),
+                    "status": row.get("order_status") or row.get("status"),
                     "avg_fill_price": row.get("average_price")
                         or row.get("avg_fill_price"),
                     "filled_qty": row.get("filled_quantity")
