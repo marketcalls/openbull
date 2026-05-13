@@ -229,13 +229,27 @@ async def start_run(
             )
         except EngineError as e:
             raise EngineError(f"Leg {leg.get('id', '?')} resolution failed: {e}") from e
+        resolved_lotsize = r["lotsize"]
+        segment = leg.get("segment")
+        if segment in ("options", "futures"):
+            try:
+                resolved_lotsize_int = int(resolved_lotsize) if resolved_lotsize is not None else 0
+            except (TypeError, ValueError):
+                resolved_lotsize_int = 0
+            if resolved_lotsize_int <= 0:
+                raise EngineError(
+                    f"Leg {leg.get('id', '?')} ({r['symbol']}): lotsize missing or "
+                    f"non-positive in symtoken (got {resolved_lotsize!r}). Refusing to "
+                    f"place order — would default to 1 unit instead of the correct lot."
+                )
+            resolved_lotsize = resolved_lotsize_int
         resolved_legs.append({
             "leg_id": leg["id"],
             "position": leg["position"],
             "lots": leg["lots"],
             "symbol": r["symbol"],
             "exchange": r["exchange"],
-            "lotsize": r["lotsize"] or 1,
+            "lotsize": resolved_lotsize,
             "tick_size": r["tick_size"],
             "strike": r.get("strike"),
             "expiry": r.get("expiry"),
