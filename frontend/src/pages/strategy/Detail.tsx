@@ -621,6 +621,150 @@ function EventsTab({
 }
 
 // ---------------------------------------------------------------------------
+// Setup tab — read-only summary of the strategy's full configuration
+// ---------------------------------------------------------------------------
+
+function SetupTab({ strategy }: { strategy: Strategy }) {
+  const navigate = useNavigate();
+  const isStopped = strategy.status === "stopped";
+  const sched = strategy.scheduler;
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader className="flex flex-row items-start justify-between gap-3">
+          <div>
+            <CardTitle>Strategy setup</CardTitle>
+            <CardDescription>
+              Full configuration as last saved. Edit when stopped.
+            </CardDescription>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!isStopped}
+            title={!isStopped ? `Cannot edit while ${strategy.status}` : undefined}
+            onClick={() => navigate(`/strategy/${strategy.id}/edit`)}
+          >
+            Edit
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <RiskRow label="Name" value={strategy.name} />
+          <RiskRow
+            label="Universe"
+            value={UNIVERSE_TAB_LABELS[strategy.universe_tab]}
+          />
+          <RiskRow
+            label="Underlying"
+            value={`${strategy.underlying} (${strategy.underlying_exchange})`}
+          />
+          <RiskRow label="Type" value={strategy.strategy_type} />
+          {strategy.strategy_type === "intraday" && (
+            <>
+              <RiskRow label="Entry time" value={strategy.entry_time ?? "—"} />
+              <RiskRow label="Exit time" value={strategy.exit_time ?? "—"} />
+            </>
+          )}
+          <RiskRow label="Product" value={strategy.product} />
+          <RiskRow label="Pricetype" value={strategy.pricetype} />
+          <RiskRow
+            label="Daily loss limit"
+            value={
+              strategy.daily_loss_limit_inr != null
+                ? `₹${strategy.daily_loss_limit_inr.toFixed(2)}`
+                : "off"
+            }
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Legs</CardTitle>
+          <CardDescription>
+            {strategy.legs.length} leg{strategy.legs.length === 1 ? "" : "s"} configured.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  <th className="px-2 py-1 text-left">#</th>
+                  <th className="px-2 py-1 text-left">Segment</th>
+                  <th className="px-2 py-1 text-left">Pos</th>
+                  <th className="px-2 py-1 text-right">Lots</th>
+                  <th className="px-2 py-1 text-left">Expiry</th>
+                  <th className="px-2 py-1 text-left">Type</th>
+                  <th className="px-2 py-1 text-left">Strike</th>
+                </tr>
+              </thead>
+              <tbody>
+                {strategy.legs.map((leg) => {
+                  const strikeText =
+                    leg.segment !== "options"
+                      ? "—"
+                      : leg.strike_mode === "strike"
+                        ? leg.strike_value != null
+                          ? `${leg.strike_value}`
+                          : "—"
+                        : `ATM (${leg.atm_offset ?? "ATM"})`;
+                  return (
+                    <tr key={leg.id} className="border-t">
+                      <td className="px-2 py-1.5 font-mono">{leg.id}</td>
+                      <td className="px-2 py-1.5">{leg.segment}</td>
+                      <td className="px-2 py-1.5">
+                        <Badge variant="outline" className="text-xs">
+                          {leg.position}
+                        </Badge>
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-mono">
+                        {leg.lots}
+                      </td>
+                      <td className="px-2 py-1.5">{leg.expiry}</td>
+                      <td className="px-2 py-1.5">
+                        {leg.option_type ?? "—"}
+                      </td>
+                      <td className="px-2 py-1.5 font-mono">{strikeText}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Scheduler</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {sched?.enabled ? (
+            <>
+              <RiskRow label="Enabled" value="yes" />
+              <RiskRow label="Days" value={sched.days.join(", ")} />
+              <RiskRow label="Start time (IST)" value={sched.start_time} />
+              <RiskRow
+                label="Auto-stop time (IST)"
+                value={sched.auto_stop_time ?? "—"}
+              />
+              <RiskRow label="Default mode" value={sched.default_mode} />
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Scheduler is off. Strategy can still be started manually or via
+              the webhook.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Risk tab (unchanged from Phase 2)
 // ---------------------------------------------------------------------------
 
@@ -1061,6 +1205,14 @@ export default function StrategyDetail() {
               {disableLiveMutation.isPending ? "Disabling…" : "Disable LIVE"}
             </Button>
           )}
+          <Button
+            variant="outline"
+            disabled={!isStopped}
+            title={!isStopped ? `Cannot edit while ${strategy.status}` : undefined}
+            onClick={() => navigate(`/strategy/${strategy.id}/edit`)}
+          >
+            Edit
+          </Button>
           <Button variant="outline" onClick={() => navigate("/strategy")}>
             Back
           </Button>
@@ -1086,6 +1238,7 @@ export default function StrategyDetail() {
       <Tabs defaultValue="live">
         <TabsList className="flex flex-wrap gap-1 bg-transparent" variant="line">
           <TabsTrigger value="live">Live</TabsTrigger>
+          <TabsTrigger value="setup">Setup</TabsTrigger>
           <TabsTrigger value="orders">Orders</TabsTrigger>
           <TabsTrigger value="events">Events</TabsTrigger>
           <TabsTrigger value="risk">Risk</TabsTrigger>
@@ -1105,6 +1258,9 @@ export default function StrategyDetail() {
             liveState={liveState}
             wsStatus={wsStatus}
           />
+        </TabsContent>
+        <TabsContent value="setup" className="mt-4">
+          <SetupTab strategy={strategy} />
         </TabsContent>
         <TabsContent value="orders" className="mt-4">
           <OrdersTab orders={orders} />

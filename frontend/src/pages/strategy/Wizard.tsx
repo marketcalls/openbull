@@ -25,6 +25,7 @@ import {
   createStrategy,
   listStrikes,
   listUnderlyings,
+  updateStrategy,
   type UnderlyingChoice,
 } from "@/api/strategy_module";
 import {
@@ -39,8 +40,10 @@ import {
   type Position,
   type Product,
   type Segment,
+  type Strategy,
   type StrategyCreate,
   type StrategyType,
+  type StrategyUpdate,
   type UniverseTab,
 } from "@/types/strategy_module";
 import { cn } from "@/lib/utils";
@@ -456,19 +459,34 @@ function StrikePickerDialog({
   );
 }
 
-export default function StrategyWizard() {
+interface StrategyWizardProps {
+  /** When provided, the form pre-fills from this strategy and saves via
+   *  PATCH instead of POST. Used by the /strategy/:id/edit route. */
+  editing?: Strategy;
+}
+
+export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
   const navigate = useNavigate();
+  const isEdit = editing != null;
 
   // ---- Section A: tab + index + timings ----
-  const [tab, setTab] = useState<UniverseTab>("weekly_monthly");
-  const [name, setName] = useState("");
-  const [underlying, setUnderlying] = useState<string>(
-    TAB_DEFAULT_UNDERLYINGS.weekly_monthly[0].symbol,
+  const [tab, setTab] = useState<UniverseTab>(
+    editing?.universe_tab ?? "weekly_monthly",
   );
-  const [strategyType, setStrategyType] = useState<StrategyType>("intraday");
-  const [entryTime, setEntryTime] = useState("09:35");
-  const [exitTime, setExitTime] = useState("15:15");
-  const [product, setProduct] = useState<Product>("NRML");
+  const [name, setName] = useState(editing?.name ?? "");
+  const [underlying, setUnderlying] = useState<string>(
+    editing?.underlying ?? TAB_DEFAULT_UNDERLYINGS.weekly_monthly[0].symbol,
+  );
+  const [strategyType, setStrategyType] = useState<StrategyType>(
+    editing?.strategy_type ?? "intraday",
+  );
+  const [entryTime, setEntryTime] = useState(
+    editing?.entry_time ?? "09:35",
+  );
+  const [exitTime, setExitTime] = useState(
+    editing?.exit_time ?? "15:15",
+  );
+  const [product, setProduct] = useState<Product>(editing?.product ?? "NRML");
 
   // Underlyings come from the API now (dynamic for stocks_fno and mcx).
   // The hardcoded TAB_DEFAULT_UNDERLYINGS is the seed shown until the
@@ -489,7 +507,11 @@ export default function StrategyWizard() {
   );
 
   // ---- Section B: legs ----
-  const [legs, setLegs] = useState<Leg[]>([freshLeg(1, "weekly_monthly")]);
+  const [legs, setLegs] = useState<Leg[]>(
+    editing && editing.legs.length > 0
+      ? editing.legs
+      : [freshLeg(1, editing?.universe_tab ?? "weekly_monthly")],
+  );
 
   // ---- Strike picker state (open one at a time, scoped to a leg index) ----
   const [strikePickerLegIndex, setStrikePickerLegIndex] = useState<number | null>(
@@ -497,19 +519,45 @@ export default function StrategyWizard() {
   );
 
   // ---- Section C: overall risk ----
-  const [overallSl, setOverallSl] = useState<string>("");
-  const [overallTarget, setOverallTarget] = useState<string>("");
-  const [trailToEntry, setTrailToEntry] = useState(false);
-  const [lockEnabled, setLockEnabled] = useState(false);
-  const [lockMode, setLockMode] = useState<"lock" | "lock_and_trail">("lock");
-  const [lockProfitReaches, setLockProfitReaches] = useState<string>("");
-  const [lockProfitFloor, setLockProfitFloor] = useState<string>("");
-  const [lockTrailStep, setLockTrailStep] = useState<string>("");
+  const [overallSl, setOverallSl] = useState<string>(
+    editing?.overall_sl_mtm != null ? String(editing.overall_sl_mtm) : "",
+  );
+  const [overallTarget, setOverallTarget] = useState<string>(
+    editing?.overall_target_mtm != null ? String(editing.overall_target_mtm) : "",
+  );
+  const [trailToEntry, setTrailToEntry] = useState(
+    editing?.trail_sl_to_entry ?? false,
+  );
+  const [lockEnabled, setLockEnabled] = useState(editing?.lock_profit != null);
+  const [lockMode, setLockMode] = useState<"lock" | "lock_and_trail">(
+    editing?.lock_profit?.mode ?? "lock",
+  );
+  const [lockProfitReaches, setLockProfitReaches] = useState<string>(
+    editing?.lock_profit?.if_profit_reaches != null
+      ? String(editing.lock_profit.if_profit_reaches)
+      : "",
+  );
+  const [lockProfitFloor, setLockProfitFloor] = useState<string>(
+    editing?.lock_profit?.lock_profit != null
+      ? String(editing.lock_profit.lock_profit)
+      : "",
+  );
+  const [lockTrailStep, setLockTrailStep] = useState<string>(
+    editing?.lock_profit?.trail_step != null
+      ? String(editing.lock_profit.trail_step)
+      : "",
+  );
 
   // ---- Section D: scheduler ----
-  const [schedulerEnabled, setSchedulerEnabled] = useState(false);
-  const [schedulerStart, setSchedulerStart] = useState("09:15");
-  const [schedulerStop, setSchedulerStop] = useState<string>("");
+  const [schedulerEnabled, setSchedulerEnabled] = useState(
+    editing?.scheduler?.enabled ?? false,
+  );
+  const [schedulerStart, setSchedulerStart] = useState(
+    editing?.scheduler?.start_time ?? "09:15",
+  );
+  const [schedulerStop, setSchedulerStop] = useState<string>(
+    editing?.scheduler?.auto_stop_time ?? "",
+  );
 
   const onTabChange = (next: UniverseTab) => {
     setTab(next);
@@ -564,6 +612,20 @@ export default function StrategyWizard() {
     },
   });
 
+  const updateMutation = useMutation({
+    mutationFn: (payload: StrategyUpdate) => updateStrategy(editing!.id, payload),
+    onSuccess: (updated) => {
+      toast.success("Strategy updated");
+      navigate(`/strategy/${updated.id}`);
+    },
+    onError: (err: unknown) => {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } }).response?.data
+          ?.detail ?? "Failed to update strategy";
+      toast.error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    },
+  });
+
   const submit = () => {
     if (!name.trim()) {
       toast.error("Name is required");
@@ -609,16 +671,25 @@ export default function StrategyWizard() {
       daily_loss_limit_inr: null,
     };
 
-    createMutation.mutate(payload);
+    if (isEdit) {
+      updateMutation.mutate(payload);
+    } else {
+      createMutation.mutate(payload);
+    }
   };
+
+  const submitting = isEdit ? updateMutation.isPending : createMutation.isPending;
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">New strategy</h1>
+        <h1 className="text-2xl font-bold tracking-tight">
+          {isEdit ? `Edit "${editing!.name}"` : "New strategy"}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          Configure legs and risk. Sandbox-only until you explicitly enable
-          live mode on the detail page.
+          {isEdit
+            ? "Edits are committed immediately. The webhook token is preserved - rotate it from the Webhook tab if needed."
+            : "Configure legs and risk. Sandbox-only until you explicitly enable live mode on the detail page."}
         </p>
       </div>
 
@@ -966,11 +1037,20 @@ export default function StrategyWizard() {
       </Card>
 
       <div className="flex items-center justify-end gap-3">
-        <Button variant="outline" onClick={() => navigate("/strategy")}>
+        <Button
+          variant="outline"
+          onClick={() =>
+            navigate(isEdit ? `/strategy/${editing!.id}` : "/strategy")
+          }
+        >
           Cancel
         </Button>
-        <Button onClick={submit} disabled={createMutation.isPending}>
-          {createMutation.isPending ? "Saving…" : "Save and Continue"}
+        <Button onClick={submit} disabled={submitting}>
+          {submitting
+            ? "Saving…"
+            : isEdit
+              ? "Save changes"
+              : "Save and Continue"}
         </Button>
       </div>
 
