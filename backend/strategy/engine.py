@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.strategy_module import (
@@ -206,8 +207,28 @@ async def start_run(
             "Strategy is not enabled for live mode. Enable live in the detail "
             "page after re-authenticating, or start in sandbox mode."
         )
-    if strategy.status != "stopped":
-        raise EngineError(f"Cannot start — strategy is currently '{strategy.status}'")
+
+    # Acquire a row-level lock on the strategy row and re-read its status
+    # from under the lock. Plan section 16 requires idempotency between
+    # concurrent triggers (webhook + scheduler, manual + webhook, multiple
+    # workers). Without the lock, two callers could both observe
+    # status='stopped' on a stale in-memory copy, both pass this gate,
+    # both resolve legs, both place entry orders - producing duplicate
+    # broker orders and overwriting current_run_id with the second commit.
+    locked = (await db.execute(
+        select(SmStrategy)
+        .where(SmStrategy.id == strategy.id)
+        .with_for_update()
+    )).scalar_one_or_none()
+    if locked is None:
+        raise EngineError(f"Strategy {strategy.id} not found")
+    if locked.status != "stopped":
+        raise EngineError(
+            f"Cannot start - strategy is currently '{locked.status}'"
+        )
+    # The caller's `strategy` may be stale relative to what the lock now
+    # sees in the DB. Use the locked row from here onwards.
+    strategy = locked
 
     legs = strategy.legs or []
     if not legs:

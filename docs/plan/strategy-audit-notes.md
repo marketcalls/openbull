@@ -11,6 +11,55 @@ Conventions:
 
 ---
 
+## Iteration 7 — Concurrent webhook + scheduler-start idempotency
+
+### FIX — `engine.start_run` had a TOCTOU race between status check and commit
+- File: `backend/strategy/engine.py` line 209 (pre-fix) / 211+ (post-fix)
+- Symptom: two concurrent triggers (webhook + scheduler at the same
+  minute, manual UI + webhook, or just two workers in a multi-process
+  deployment) could both observe `strategy.status='stopped'` on their
+  own stale in-memory copies, both pass the gate at line 209, both
+  proceed to resolve legs and place entry orders. Only the second's
+  `repo.start_run` commit would win - the result is duplicate broker
+  orders against a single strategy, and `current_run_id` pointing only
+  at the second run while the first run row is orphaned but with real
+  filled orders attached.
+- Plan section 16 explicitly lists this as a resolved invariant:
+  "Concurrent webhook + scheduler start: idempotency lands at two
+  layers - engine.start_run refuses when strategy.status='running'..."
+  The check existed but was not atomic.
+- Webhook 60s dedupe protects webhook-vs-webhook with the same
+  action+mode. It does NOT cover webhook+scheduler, manual+webhook,
+  or scheduler+scheduler (APScheduler misfires).
+- Fix: at the top of `engine.start_run`, run
+  `SELECT * FROM sm_strategy WHERE id=:id FOR UPDATE` and use the
+  freshly-locked row's status (not the caller's stale copy). The lock
+  is held until `repo.start_run` commits (which flips status to
+  'running'), at which point any blocked concurrent caller wakes up,
+  reads the new status, and raises EngineError. Postgres row locks
+  work across processes, so multi-worker deployments are covered too.
+- The lock is acquired before leg resolution and order placement, so
+  no broker calls happen for a losing-race invocation. Side-effect
+  free rejection.
+
+### FLAG — `engine.stop_run` has the symmetric race (not fixed this iteration)
+- File: `backend/strategy/engine.py` line 512
+- Symptom: parallel `stop_run` calls (manual Stop + webhook stop +
+  scheduler auto-stop firing within the same window) both pass the
+  `status != "running"` gate, both call `_exit_legs`, both call
+  `repo.finalize_run`. The `legs_with_exits` guard in `_exit_legs`
+  catches duplicate exits at the leg level, but `finalize_run` is
+  called twice - the second commit overwrites the first's
+  `stopped_at` / `stop_reason` / `pnl_realized`. Less destructive
+  than the start race (no duplicate broker orders), but the audit
+  trail "why did this run stop" becomes incorrect.
+- Not fixed this iteration: plan section 16 only lists the start
+  race; stop concurrency is a different scope. Same `with_for_update`
+  pattern would fix it - flagging for a later iteration or your
+  product decision on whether the messy audit trail is worth a fix.
+
+---
+
 ## Iteration 6 — Time-zone handling
 
 ### CLEAN — End-to-end time-zone hygiene matches plan section 4.4
@@ -339,7 +388,7 @@ Conventions:
 4. ~~Service-layer contract drift~~ — done (iteration 4)
 5. ~~Lot-size resolution end-to-end~~ — done (iteration 5; re-verified post-fix)
 6. ~~Time-zone handling~~ — done (iteration 6; clean)
-7. Concurrent webhook + scheduler start idempotency
+7. ~~Concurrent webhook + scheduler start idempotency~~ — done (iteration 7)
 8. Live-mode auth (BrokerAuth fetched FRESH per auto-exit, not cached)
 9. Auto-exit / SL / TP trigger correctness (off-by-one, races, double-firing)
 10. DB transaction boundaries around state transitions
