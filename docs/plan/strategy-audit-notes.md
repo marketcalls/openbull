@@ -11,6 +11,50 @@ Conventions:
 
 ---
 
+## Iteration 8 — Live-mode auth (BrokerAuth fetched FRESH per auto-exit)
+
+### CLEAN — Zero token caching, every live action resolves auth from DB
+- `backend/strategy/live_auth.resolve_live_auth` is the single entry
+  point. It always issues a fresh
+  `SELECT * FROM broker_auth WHERE user_id=:u AND is_revoked=False
+  [AND broker_name=:b]` per call. No `@lru_cache`, no global dict, no
+  Redis mirror. Decrypts `access_token` and `BrokerConfig` keys on
+  every invocation.
+- Six call sites verified - all pass `broker=` explicitly and call
+  fresh, no caching upstream:
+    * `webhook_handler.py:440` (webhook start, live)
+    * `webhook_handler.py:493` (webhook stop, live)
+    * `tick_processor.py:448` (auto-exit on per-leg risk)
+    * `tick_processor.py:495` (auto-stop on strategy risk)
+    * `scheduler.py:296` (scheduler start, live)
+    * `scheduler.py:349` (scheduler auto-stop, live)
+- Two callers have explicit "tokens are never cached in strategy
+  state (plan section 14.8)" comments inline (`tick_processor.py:442`,
+  `scheduler.py:291`).
+- Token expiry beyond the DB-level `is_revoked` flag is determined by
+  the broker rejecting the order - correct, since the broker is the
+  source of truth for token validity. Failed orders flow through the
+  normal `dispatch_order` rejection path and the run continues with
+  the leg open (operator must square off manually).
+- `None` return is consistently handled: callers either return 403
+  (webhook), log warning + return early (auto-exit/auto-stop), or
+  skip the cron fire (scheduler). No fall-through to a cached token.
+
+### FLAG (latent, unreachable today) — `scalar_one_or_none` on `broker=None` branch
+- `live_auth.py:55`: `scalar_one_or_none()` raises `MultipleResultsFound`
+  if more than one row matches. When `broker=None` and a user has
+  multiple non-revoked `BrokerAuth` rows (configured both Zerodha
+  and Upstox, say), this would crash. The docstring claims
+  "picks any non-revoked BrokerAuth for the user" - the actual
+  behaviour is a crash.
+- Unreachable today because every call site passes a specific broker
+  (resolved via `_resolve_user_broker` from `BrokerConfig.is_active`).
+  Worth either replacing with `.first()` or documenting the actual
+  invariant ("require broker to be specified"). Not fixed - waiting
+  on your call.
+
+---
+
 ## Iteration 7 — Concurrent webhook + scheduler-start idempotency
 
 ### FIX — `engine.start_run` had a TOCTOU race between status check and commit
@@ -389,7 +433,7 @@ Conventions:
 5. ~~Lot-size resolution end-to-end~~ — done (iteration 5; re-verified post-fix)
 6. ~~Time-zone handling~~ — done (iteration 6; clean)
 7. ~~Concurrent webhook + scheduler start idempotency~~ — done (iteration 7)
-8. Live-mode auth (BrokerAuth fetched FRESH per auto-exit, not cached)
+8. ~~Live-mode auth fresh per call~~ — done (iteration 8; clean)
 9. Auto-exit / SL / TP trigger correctness (off-by-one, races, double-firing)
 10. DB transaction boundaries around state transitions
 11. Silent exception-swallow paths leaving the strategy inconsistent
