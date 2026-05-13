@@ -227,8 +227,8 @@ When `signal` is picked:
 | 1 | Design doc | `d6d8909` | done |
 | 2 | Backend schema + migration + Pydantic | `e6c6191` | done |
 | 3 | Webhook handler — signal actions + leg lookup | `95a1899` | done |
-| 4 | Engine — `enter_leg` / `exit_leg_by_signal` | (this commit) | done |
-| 5 | Engine — direction gating | — | pending |
+| 4 | Engine — `enter_leg` / `exit_leg_by_signal` | `a8d6b90` | done |
+| 5 | Engine — direction gating | (this commit) | done |
 | 6 | Engine — intraday window enforcement | — | pending |
 | 7 | Frontend types | — | pending |
 | 8 | Frontend wizard — kind toggle + signal-mode leg builder | — | pending |

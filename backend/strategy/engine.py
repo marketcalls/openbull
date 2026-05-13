@@ -727,6 +727,29 @@ async def _signal_lock_strategy(
     )).scalar_one_or_none()
 
 
+def _direction_admits_entry(direction: str, action: str) -> bool:
+    """Defense-in-depth direction check at the engine layer.
+
+    The webhook handler already runs the same gate before dispatching,
+    but the engine entry points (enter_leg / exit_leg_by_signal) are
+    public functions that any caller could invoke - scheduler-fired
+    auto-exits, internal management endpoints, future programmatic
+    APIs. Re-checking here means a `direction=short_only` strategy
+    can't accept a long_entry no matter who calls the engine.
+
+    Returns True when the action is admitted by the strategy's
+    direction filter. Mirrors webhook_handler._direction_allows but
+    re-implemented here to avoid a backend->backend module dependency.
+    """
+    if direction == "both":
+        return True
+    if direction == "long_only":
+        return action in ("long_entry", "long_exit")
+    if direction == "short_only":
+        return action in ("short_entry", "short_exit")
+    return False  # unknown direction value -> fail closed
+
+
 async def enter_leg(
     db: AsyncSession,
     *,
@@ -763,6 +786,34 @@ async def enter_leg(
     if locked is None:
         raise EngineError(f"Strategy {strategy.id} not found")
     strategy = locked
+
+    # Defense-in-depth direction gate. The webhook handler already runs
+    # this check upstream; the engine re-checks for any caller that
+    # bypasses the webhook (scheduler auto-exits, internal management
+    # endpoints, future programmatic APIs). Records a leg_entry_rejected
+    # event before returning so the audit trail captures attempted
+    # entries that were filtered out.
+    strategy_direction = getattr(strategy, "direction", "both") or "both"
+    if not _direction_admits_entry(strategy_direction, action):
+        repo.emit_leg_entry_rejected(
+            user_id=strategy.user_id,
+            strategy_id=strategy.id,
+            run_id=strategy.current_run_id,
+            leg_id=leg_id,
+            reason=f"direction={strategy_direction} blocks {action}",
+            payload={
+                "action": action,
+                "direction": strategy_direction,
+                "leg_symbol": leg_config.get("symbol"),
+                "leg_exchange": leg_config.get("exchange"),
+            },
+        )
+        return {
+            "outcome": "direction_blocked",
+            "note": f"strategy direction={strategy_direction!r} blocks {action!r}",
+            "leg_id": leg_id,
+            "direction": strategy_direction,
+        }
 
     # Ensure there is an active run.
     run = await _get_or_create_signal_run(
@@ -920,6 +971,19 @@ async def exit_leg_by_signal(
     if locked is None:
         raise EngineError(f"Strategy {strategy.id} not found")
     strategy = locked
+
+    # Defense-in-depth direction gate (same rationale as enter_leg).
+    # Exit signals are gated symmetrically so a short_only strategy
+    # can't process a long_exit aimed at a leg that may have opened
+    # under a previous direction setting before it was tightened.
+    strategy_direction = getattr(strategy, "direction", "both") or "both"
+    if not _direction_admits_entry(strategy_direction, action):
+        return {
+            "outcome": "direction_blocked",
+            "note": f"strategy direction={strategy_direction!r} blocks {action!r}",
+            "leg_id": leg_id,
+            "direction": strategy_direction,
+        }
 
     # No active run = nothing to exit. Silent no-op.
     if strategy.current_run_id is None:

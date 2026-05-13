@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.events.strategy_events import (
     LegEntryPlacedEvent,
+    LegEntryRejectedEvent,
     LegExitPlacedEvent,
     RunStartedEvent,
     RunStoppedEvent,
@@ -525,4 +526,22 @@ def emit_leg_exit_placed(
             "symbol": symbol, "action": action, "qty": qty,
             "exit_kind": kind, "broker_order_id": broker_order_id,
         },
+    ))
+
+
+def emit_leg_entry_rejected(
+    *, user_id: int, strategy_id: int, run_id: Optional[int], leg_id: int,
+    reason: str, payload: Optional[dict] = None,
+) -> None:
+    """Publish a leg_entry_rejected event - used by the engine when a
+    direction filter or other pre-dispatch gate refuses a signal.
+
+    run_id is optional because direction-blocked signals may arrive
+    before any run exists for the strategy that day.
+    """
+    bus.publish(LegEntryRejectedEvent(
+        user_id=user_id, strategy_id=strategy_id, run_id=run_id, leg_id=leg_id,
+        severity="warn",
+        message=f"Leg {leg_id} entry rejected: {reason}",
+        payload={"reason": reason, **(payload or {})},
     ))

@@ -647,6 +647,29 @@ async def _handle_signal_webhook(
             },
             result_label="rejected_position_conflict",
         )
+    if outcome == "direction_blocked":
+        # The webhook handler's own direction gate (step 1) should have
+        # caught this before we ever called the engine. Reaching here
+        # means either the gate logic drifted or the strategy.direction
+        # changed between gate and dispatch (race window). Audit and
+        # surface 403 either way.
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy_id, action=action, mode=mode,
+                payload=payload, ip=ip, user_agent=user_agent,
+                result_label="rejected_direction_blocked",
+                error=result.get("note"),
+            )
+        await _signal_dedupe_release(strategy_id, action, leg_id)
+        return WebhookOutcome(
+            status_code=403,
+            body={
+                "status": "error",
+                "message": result.get("note") or "direction blocked",
+                "leg_id": leg_id,
+            },
+            result_label="rejected_direction_blocked",
+        )
     # outcome == "rejected" - broker/sandbox refused the order.
     async with async_session() as db:
         await _record_event(
