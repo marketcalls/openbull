@@ -231,8 +231,8 @@ When `signal` is picked:
 | 5 | Engine — direction gating | `dc2e204` | done |
 | 6 | Engine — intraday window enforcement | `622512c` | done |
 | 7 | Frontend types | `e3f1aa2` | done |
-| 8 | Frontend wizard — kind toggle + signal-mode leg builder | (this commit) | done |
-| 9 | Frontend detail — kind-aware Setup tab + webhook examples | — | pending |
+| 8 | Frontend wizard — kind toggle + signal-mode leg builder | `badf2c1` | done |
+| 9 | Frontend detail — kind-aware Setup tab + webhook examples | (this commit) | done |
 | 10 | E2E sanity — curl examples, sandbox dispatch verified | — | pending |
 
 ---

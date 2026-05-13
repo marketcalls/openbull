@@ -688,50 +688,91 @@ function SetupTab({ strategy }: { strategy: Strategy }) {
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-xs text-muted-foreground">
-                <tr>
-                  <th className="px-2 py-1 text-left">#</th>
-                  <th className="px-2 py-1 text-left">Segment</th>
-                  <th className="px-2 py-1 text-left">Pos</th>
-                  <th className="px-2 py-1 text-right">Lots</th>
-                  <th className="px-2 py-1 text-left">Expiry</th>
-                  <th className="px-2 py-1 text-left">Type</th>
-                  <th className="px-2 py-1 text-left">Strike</th>
-                </tr>
-              </thead>
-              <tbody>
-                {strategy.legs.map((leg) => {
-                  const strikeText =
-                    leg.segment !== "options"
-                      ? "—"
-                      : leg.strike_mode === "strike"
-                        ? leg.strike_value != null
-                          ? `${leg.strike_value}`
-                          : "—"
-                        : `ATM (${leg.atm_offset ?? "ATM"})`;
-                  return (
+            {strategy.strategy_kind === "signal" ? (
+              // Signal-mode legs - each row carries its own symbol+exchange,
+              // a side (which signal actions it accepts), and an absolute
+              // quantity. Distinct table from the batch-mode option-spread
+              // view because the schema is shaped differently per kind.
+              <table className="w-full text-sm">
+                <thead className="text-xs text-muted-foreground">
+                  <tr>
+                    <th className="px-2 py-1 text-left">#</th>
+                    <th className="px-2 py-1 text-left">Symbol</th>
+                    <th className="px-2 py-1 text-left">Exchange</th>
+                    <th className="px-2 py-1 text-left">Segment</th>
+                    <th className="px-2 py-1 text-left">Side</th>
+                    <th className="px-2 py-1 text-right">Qty</th>
+                    <th className="px-2 py-1 text-left">Expiry</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {strategy.legs.map((leg) => (
                     <tr key={leg.id} className="border-t">
                       <td className="px-2 py-1.5 font-mono">{leg.id}</td>
+                      <td className="px-2 py-1.5 font-mono">{leg.symbol ?? "—"}</td>
+                      <td className="px-2 py-1.5 font-mono">{leg.exchange ?? "—"}</td>
                       <td className="px-2 py-1.5">{leg.segment}</td>
                       <td className="px-2 py-1.5">
                         <Badge variant="outline" className="text-xs">
-                          {leg.position}
+                          {leg.side ?? "both"}
                         </Badge>
                       </td>
                       <td className="px-2 py-1.5 text-right font-mono">
-                        {leg.lots}
+                        {leg.qty ?? "—"}
                       </td>
-                      <td className="px-2 py-1.5">{leg.expiry}</td>
                       <td className="px-2 py-1.5">
-                        {leg.option_type ?? "—"}
+                        {leg.segment === "futures" ? (leg.expiry ?? "—") : "—"}
                       </td>
-                      <td className="px-2 py-1.5 font-mono">{strikeText}</td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="text-xs text-muted-foreground">
+                  <tr>
+                    <th className="px-2 py-1 text-left">#</th>
+                    <th className="px-2 py-1 text-left">Segment</th>
+                    <th className="px-2 py-1 text-left">Pos</th>
+                    <th className="px-2 py-1 text-right">Lots</th>
+                    <th className="px-2 py-1 text-left">Expiry</th>
+                    <th className="px-2 py-1 text-left">Type</th>
+                    <th className="px-2 py-1 text-left">Strike</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {strategy.legs.map((leg) => {
+                    const strikeText =
+                      leg.segment !== "options"
+                        ? "—"
+                        : leg.strike_mode === "strike"
+                          ? leg.strike_value != null
+                            ? `${leg.strike_value}`
+                            : "—"
+                          : `ATM (${leg.atm_offset ?? "ATM"})`;
+                    return (
+                      <tr key={leg.id} className="border-t">
+                        <td className="px-2 py-1.5 font-mono">{leg.id}</td>
+                        <td className="px-2 py-1.5">{leg.segment}</td>
+                        <td className="px-2 py-1.5">
+                          <Badge variant="outline" className="text-xs">
+                            {leg.position}
+                          </Badge>
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono">
+                          {leg.lots}
+                        </td>
+                        <td className="px-2 py-1.5">{leg.expiry ?? "—"}</td>
+                        <td className="px-2 py-1.5">
+                          {leg.option_type ?? "—"}
+                        </td>
+                        <td className="px-2 py-1.5 font-mono">{strikeText}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -897,6 +938,9 @@ function WebhookTab({
   onRotate: () => void;
   rotating: boolean;
 }) {
+  const isSignal = strategy.strategy_kind === "signal";
+  const sampleLegId = strategy.legs[0]?.id ?? 1;
+
   return (
     <div className="space-y-4">
       <Card>
@@ -912,12 +956,76 @@ function WebhookTab({
             <Label>Webhook URL (token redacted)</Label>
             <Input readOnly value={strategy.webhook_url} className="font-mono text-xs" />
           </div>
-          <div className="space-y-1.5">
-            <Label>TradingView alert message body</Label>
-            <pre className="rounded-md bg-muted p-3 text-xs">
+
+          {isSignal ? (
+            <>
+              <div className="space-y-1.5">
+                <Label>TradingView alert payloads (one per signal action)</Label>
+                <p className="text-xs text-muted-foreground">
+                  Each TradingView alert sends one of the four payloads below.
+                  Use <span className="font-mono">leg_id</span> when you know
+                  it; otherwise the engine falls back to{" "}
+                  <span className="font-mono">(symbol, exchange)</span> lookup.
+                  Mismatched signals (e.g. <span className="font-mono">long_exit</span>{" "}
+                  on a flat leg) are silent no-ops - safe for repeat alerts.
+                </p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label className="text-xs uppercase text-green-700 dark:text-green-400">
+                    Long entry
+                  </Label>
+                  <pre className="rounded-md bg-muted p-3 text-xs">
+{`{"action":"long_entry","leg_id":${sampleLegId}}`}
+                  </pre>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs uppercase text-amber-700 dark:text-amber-400">
+                    Long exit
+                  </Label>
+                  <pre className="rounded-md bg-muted p-3 text-xs">
+{`{"action":"long_exit","leg_id":${sampleLegId}}`}
+                  </pre>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs uppercase text-red-700 dark:text-red-400">
+                    Short entry
+                  </Label>
+                  <pre className="rounded-md bg-muted p-3 text-xs">
+{`{"action":"short_entry","leg_id":${sampleLegId}}`}
+                  </pre>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs uppercase text-amber-700 dark:text-amber-400">
+                    Short exit
+                  </Label>
+                  <pre className="rounded-md bg-muted p-3 text-xs">
+{`{"action":"short_exit","leg_id":${sampleLegId}}`}
+                  </pre>
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs uppercase">
+                  Symbol-keyed fallback (when leg_id unknown)
+                </Label>
+                <pre className="rounded-md bg-muted p-3 text-xs">
+{`{"action":"long_entry","symbol":"${strategy.legs[0]?.symbol ?? "RELIANCE"}","exchange":"${strategy.legs[0]?.exchange ?? "NSE"}"}`}
+                </pre>
+              </div>
+            </>
+          ) : (
+            <div className="space-y-1.5">
+              <Label>TradingView alert message body</Label>
+              <pre className="rounded-md bg-muted p-3 text-xs">
 {`{"action":"start","mode":"sandbox"}`}
-            </pre>
-          </div>
+              </pre>
+              <p className="text-xs text-muted-foreground">
+                Send <span className="font-mono">{`{"action":"stop"}`}</span> to
+                square off and finalize the run.
+              </p>
+            </div>
+          )}
+
           <div className="flex justify-end">
             <Button variant="outline" onClick={onRotate} disabled={rotating}>
               {rotating ? "Rotating…" : "Rotate token"}
@@ -1157,10 +1265,25 @@ export default function StrategyDetail() {
             <Badge variant={strategy.live_enabled ? "destructive" : "secondary"}>
               {strategy.live_enabled ? "LIVE-enabled" : "SANDBOX-only"}
             </Badge>
+            {strategy.strategy_kind === "signal" && (
+              <Badge variant="default" className="bg-blue-600 hover:bg-blue-600">
+                Signal mode
+              </Badge>
+            )}
             <Badge variant="outline">{strategy.strategy_type}</Badge>
-            <Badge variant="outline">
-              {strategy.underlying} · {strategy.underlying_exchange}
-            </Badge>
+            {strategy.strategy_kind === "signal" ? (
+              <Badge variant="outline">
+                {strategy.direction === "both"
+                  ? "Long+Short"
+                  : strategy.direction === "long_only"
+                    ? "Long only"
+                    : "Short only"}
+              </Badge>
+            ) : (
+              <Badge variant="outline">
+                {strategy.underlying} · {strategy.underlying_exchange}
+              </Badge>
+            )}
             <Badge variant="outline">{strategy.product}</Badge>
           </div>
         </div>
