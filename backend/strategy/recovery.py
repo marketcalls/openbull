@@ -35,7 +35,7 @@ from backend.models.strategy_module import (
     SmStrategyOrder,
     SmStrategyRun,
 )
-from backend.strategy import repository as repo, state as state_module
+from backend.strategy import repository as repo, state as state_module, tick_feed
 from backend.strategy.time_utils import now_utc
 
 logger = logging.getLogger(__name__)
@@ -276,10 +276,34 @@ async def _recover_run(db: AsyncSession, run: SmStrategyRun) -> None:
         strategy=strategy, run=run, orders=orders, checkpoint=checkpoint,
     )
     await state_module.hydrate_run_state(run.id, state)
+
+    # Plan section 5.4 step 3.h: "Re-subscribe to ZMQ ticks for each open
+    # leg." Without this the local tick-feed interest index stays empty
+    # after a restart and the tick processor will silently ignore every
+    # tick for this run's symbols (SL/Target/Trail never fire). Only open
+    # legs need ticks; rejected/closed legs are terminal.
+    open_leg_symbols: list[tuple[str, str]] = []
+    for leg in state.get("legs", {}).values():
+        if leg.get("status") != "open":
+            continue
+        sym = leg.get("symbol")
+        exch = leg.get("exchange")
+        if sym and exch:
+            open_leg_symbols.append((exch, sym))
+    if open_leg_symbols:
+        try:
+            tick_feed.add_run_subscriptions(run.id, open_leg_symbols)
+        except Exception:
+            logger.exception(
+                "Recovery: failed to re-register tick subscriptions for run %d",
+                run.id,
+            )
+
     logger.info(
-        "Recovered run %d (strategy %d, mode=%s) — %d legs hydrated "
-        "(checkpoint=%s)",
+        "Recovered run %d (strategy %d, mode=%s) - %d legs hydrated, "
+        "%d open legs re-subscribed (checkpoint=%s)",
         run.id, strategy.id, run.mode, len(state["legs"]),
+        len(open_leg_symbols),
         "yes" if checkpoint else "no",
     )
 

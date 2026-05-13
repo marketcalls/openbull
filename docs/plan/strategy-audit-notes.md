@@ -11,6 +11,82 @@ Conventions:
 
 ---
 
+## Iteration 2 — Symbol-format consistency (scheduler / webhook / tick / services)
+
+### FIX — Recovery does not re-subscribe ticks for open legs
+- File: `backend/strategy/recovery.py` (`_recover_run`)
+- Symptom: after a crash + restart, recovery rebuilds Redis state from DB
+  + latest checkpoint but never calls `tick_feed.add_run_subscriptions`.
+  The local `_index` in `tick_feed` stays empty for the recovered run, so
+  even if broker ticks are arriving on the cache, the strategy tick
+  processor's interest filter (`_index.get((exchange, symbol))`) returns
+  empty and the tick is dropped. Net effect: SL / Target / Trail / Overall
+  rules never fire for any recovered run.
+- Plan §5.4 step 3.h: "Re-subscribe to ZMQ ticks for each open leg."
+- Fix: at the end of `_recover_run`, collect every leg with
+  `status == "open"` and call `tick_feed.add_run_subscriptions(run.id,
+  [(exchange, symbol), ...])` once. Rejected/closed legs are terminal so
+  they're correctly omitted.
+
+### FLAG — No internal broker WS subscribe path from the strategy module
+- Files: `backend/strategy/engine.py` `start_run` line 373 calls
+  `tick_feed.add_run_subscriptions(...)` but NOTHING in the strategy
+  module calls `_adapter.subscribe(symbols, mode)` on the WS proxy.
+  `_adapter.subscribe` is only invoked from `backend/websocket_proxy/
+  server.py:299`, exclusively when an external WS client sends a
+  `{"action": "subscribe"}` frame.
+- Symptom: a strategy run started while no human-driven UI client happens
+  to be subscribed to the leg's broker WS feed receives zero ticks. Most
+  exposed: scheduler-fired runs (cron triggers at 09:15 IST, no human
+  online). The plan §5.2 explicitly says "subscribe to ZMQ ticks for each
+  leg's symbol" — the implementation only updates the local interest map.
+- Why ambiguous / not fixed in this iteration: closing this requires
+  either (a) a new public function on `websocket_proxy.server` for
+  internal subscribers, or (b) the strategy module reaching into
+  `_adapter` (private) — both are architecture-scope changes, not
+  single-file fixes. User decision needed.
+
+### FLAG — MarketDataCache event_type filter drops mode-2 / mode-3 ticks
+- File: `backend/services/market_data_cache.py` `_broadcast` line 478-490
+- The cache fires CRITICAL subscribers only when broadcast `event_type`
+  matches the subscriber's filter. `tick_feed.init` registers via
+  `subscribe_critical(...)` which hardcodes `event_type="ltp"`. The
+  broadcast maps `mode=1→"ltp"`, `mode=2→"quote"`, `mode=3→"depth"`.
+- Symptom: if any concurrent UI client subscribes the same symbol in
+  Quote or Depth mode, the broker WS adapter may push only mode-2 or
+  mode-3 frames (some adapters consolidate to highest mode). LTP is
+  still inside those frames, but the strategy subscriber is filtered out
+  by the event_type check and gets nothing.
+- Why ambiguous: this might be intentional given the plan's "LTP-first"
+  framing, and may not happen in practice depending on each broker
+  adapter's subscription consolidation rules. Surface for user.
+
+### CLEAN — Symbol/exchange canonicalization across layers
+- Engine resolver returns OpenBull canonical (`{base}{DDMMMYY}{strike}{CE|PE}`
+  for options, `{base}{DDMMMYY}FUT` for futures, plain ticker for cash)
+  via `_lookup_option_in_db` and `option_symbol_service`. Exchanges land
+  as `NFO`/`BFO`/`MCX`/`NSE`/`BSE` per `_option_exchange_for`.
+- `MarketDataCache` keys by `f"{exchange}:{symbol}"`; `tick_feed`
+  indexes by `(exchange, symbol)` tuple — same form.
+- `tick_processor` matches legs by strict `leg["symbol"] == symbol and
+  leg["exchange"] == exchange` — fine given upstream canonicalization.
+- Webhook handler and scheduler do not touch symbols directly; they
+  route by `strategy_id`.
+
+### FLAG — `stop_reason="webhook"` is not in the plan's documented enum
+- File: `backend/strategy/webhook_handler.py:509` passes
+  `stop_reason="webhook"` to `engine.stop_run`. The plan §4.1 lists
+  allowed values: `manual` / `scheduler` / `overall_sl` / `overall_target`
+  / `lock_profit` / `eod` / `expiry` / `daily_loss_limit` / `tick_stale`
+  / `recovery_failed` / `error`. "webhook" is not in that list.
+- `_exit_kind_for_stop` falls back to `exit_close_all` (line 556), so
+  the order audit is fine — but the `stop_reason` text persisted to
+  `sm_strategy_run.stop_reason` is a value the plan/UI doesn't enumerate.
+- Why ambiguous: trivial to add "webhook" to the plan, OR map to
+  "manual". Behavioural choice — flag.
+
+---
+
 ## Iteration 1 — Order dispatch + lot-size handling
 
 ### FIX — Silent lot-size fallback to 1 masks bad/missing symtoken data
