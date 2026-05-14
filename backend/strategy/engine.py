@@ -334,6 +334,21 @@ async def start_run(
             status="open" if ok else "rejected",
             reject_reason=None if ok else response.get("message", "rejected"),
         )
+        # Reconcile against sandbox/broker immediately so the order's
+        # actual fill price + status are on the row before the engine
+        # emits the audit event. Without this the orderbook UI sticks
+        # at 'open' and Live P&L has nothing to compute against.
+        if ok:
+            try:
+                await reconcile_order_fill(
+                    db, order_row=order_row, mode=mode,
+                    user_id=strategy.user_id,
+                    broker=broker, auth_token=auth_token,
+                )
+            except Exception:
+                logger.exception(
+                    "Fill recon failed for entry order %s", order_row.id,
+                )
         repo.emit_leg_entry_placed(
             user_id=strategy.user_id,
             strategy_id=strategy.id,
@@ -386,6 +401,28 @@ async def start_run(
         )
     except Exception:
         logger.exception("Failed to init Redis state for run %d", run.id)
+
+    # Push reconciled fill prices into Redis state so the Live P&L card
+    # has entry_avg to compute MTM against. Reads back the order rows
+    # we just reconciled above and mirrors avg_fill_price -> entry_avg.
+    try:
+        for ls in leg_summaries:
+            if ls.get("status") == "rejected":
+                continue
+            # Look up the freshly-reconciled order row by id.
+            order_row = await db.get(SmStrategyOrder, ls["order_id"])
+            if order_row is None or order_row.avg_fill_price is None:
+                continue
+            await _apply_fill_to_state(
+                run.id,
+                leg_id=ls["leg_id"],
+                order_kind="entry",
+                avg_fill_price=float(order_row.avg_fill_price),
+                filled_qty=int(order_row.filled_qty or order_row.qty),
+                strategy_legs=strategy.legs or [],
+            )
+    except Exception:
+        logger.exception("Failed to apply entry fills to state for run %d", run.id)
 
     # Subscribe to ticks for every leg that placed successfully — Phase 6
     # risk evaluator runs on these ticks.
@@ -505,6 +542,27 @@ async def _exit_legs(
             status="open" if ok else "rejected",
             reject_reason=None if ok else response.get("message", "rejected"),
         )
+        # Reconcile the exit so realized P&L lands in state immediately.
+        if ok:
+            try:
+                await reconcile_order_fill(
+                    db, order_row=order_row, mode=run.mode,
+                    user_id=strategy.user_id,
+                    broker=broker, auth_token=auth_token,
+                )
+                if order_row.avg_fill_price is not None:
+                    await _apply_fill_to_state(
+                        run.id,
+                        leg_id=leg_id,
+                        order_kind=exit_kind,
+                        avg_fill_price=float(order_row.avg_fill_price),
+                        filled_qty=int(order_row.filled_qty or order_row.qty),
+                        strategy_legs=strategy.legs or [],
+                    )
+            except Exception:
+                logger.exception(
+                    "Fill recon failed for exit order %s", order_row.id,
+                )
         repo.emit_leg_exit_placed(
             user_id=strategy.user_id,
             strategy_id=strategy.id,
@@ -957,6 +1015,21 @@ async def enter_leg(
         reject_reason=None if ok else (response.get("message") if isinstance(response, dict) else "rejected"),
     )
 
+    # Reconcile against sandbox/broker fill so the row carries the real
+    # status + executed price. Drives the orderbook UI off 'open' onto
+    # 'complete' immediately and puts entry_avg in Redis state.
+    if ok:
+        try:
+            await reconcile_order_fill(
+                db, order_row=order_row, mode=mode,
+                user_id=strategy.user_id,
+                broker=broker, auth_token=auth_token,
+            )
+        except Exception:
+            logger.exception(
+                "Fill recon failed for signal entry order %s", order_row.id,
+            )
+
     # Audit event + leg state update.
     repo.emit_leg_entry_placed(
         user_id=strategy.user_id,
@@ -976,11 +1049,30 @@ async def enter_leg(
         leg_state["entry_order_id"] = order_row.id
         leg_state["status"] = "open"
         leg_state["exit_order_id"] = None
+        if order_row.avg_fill_price is not None:
+            leg_state["entry_avg"] = float(order_row.avg_fill_price)
     else:
         # Order rejected at broker/sandbox. Leg stays flat. Surface the
         # reject_reason so the operator can investigate from the UI.
         leg_state["status"] = "rejected"
     await state_module.hydrate_run_state(run.id, state)
+
+    # Recompute strategy aggregates after the state mutation above.
+    if ok and order_row.avg_fill_price is not None:
+        try:
+            await _apply_fill_to_state(
+                run.id,
+                leg_id=leg_id,
+                order_kind="entry",
+                avg_fill_price=float(order_row.avg_fill_price),
+                filled_qty=int(order_row.filled_qty or qty),
+                strategy_legs=strategy.legs or [],
+            )
+        except Exception:
+            logger.exception(
+                "Failed to apply signal-entry fill to state for run %d leg %d",
+                run.id, leg_id,
+            )
 
     # Tick subscription for risk eval - same pattern as batch start_run.
     if ok:
@@ -1136,6 +1228,28 @@ async def exit_leg_by_signal(
         status="open" if ok else "rejected",
         reject_reason=None if ok else (response.get("message") if isinstance(response, dict) else "rejected"),
     )
+    # Reconcile fill + compute realized P&L. Exit avg price drives the
+    # realized column on the Live P&L card and on the Positions view.
+    if ok:
+        try:
+            await reconcile_order_fill(
+                db, order_row=order_row, mode=mode,
+                user_id=strategy.user_id,
+                broker=broker, auth_token=auth_token,
+            )
+            if order_row.avg_fill_price is not None:
+                await _apply_fill_to_state(
+                    run.id,
+                    leg_id=leg_id,
+                    order_kind="exit_signal",
+                    avg_fill_price=float(order_row.avg_fill_price),
+                    filled_qty=int(order_row.filled_qty or qty),
+                    strategy_legs=strategy.legs or [],
+                )
+        except Exception:
+            logger.exception(
+                "Fill recon failed for signal exit order %s", order_row.id,
+            )
     repo.emit_leg_exit_placed(
         user_id=strategy.user_id,
         strategy_id=strategy.id,
@@ -1513,3 +1627,254 @@ async def unlock_webhook(
         payload={"unlock_method": "manual"},
     ))
     return {"strategy_id": strategy.id, "webhook_locked": False, "noop": False}
+
+
+# ---------------------------------------------------------------------------
+# Fill reconciliation (slice A - fixes trader-experience gaps 1, 3, 4, 6)
+#
+# Without this, sm_strategy_order rows stay at status='open' / avg_fill_price=
+# None forever even though the sandbox/broker has already filled the order
+# at a real price. Result: the Live P&L card never gets entry_avg, the
+# orderbook UI never flips from open->complete, and there's no executed
+# price column to render in Positions.
+#
+# Sandbox path: re-read the order from backend.sandbox.order_manager and
+# copy the truth into the strategy order row + Redis state. Synchronous -
+# the sandbox already executed the fill inside sandbox_service.place_order
+# (opportunistic fill at LTP, see sandbox_service.py:217).
+#
+# Live path: hit orderstatus_service.get_orderstatus_with_auth, which goes
+# through the documented service surface. Async fills may not be ready
+# immediately - the periodic poller (deferred slice D) handles those.
+# ---------------------------------------------------------------------------
+
+
+_CANONICAL_ORDER_STATUSES = {"open", "complete", "cancelled", "rejected", "trigger_pending"}
+
+
+def _canonical_status(raw: Optional[str]) -> Optional[str]:
+    """Normalize broker / sandbox status text to OpenBull's canonical set.
+
+    Different brokers return different spellings - 'COMPLETED', 'filled',
+    'EXECUTED' etc. - all of which mean the same thing. Map them so the
+    orderbook UI sees a consistent vocabulary.
+    """
+    if not raw:
+        return None
+    s = str(raw).strip().lower()
+    if s in ("complete", "completed", "filled", "executed"):
+        return "complete"
+    if s in ("rejected", "reject"):
+        return "rejected"
+    if s in ("cancelled", "canceled"):
+        return "cancelled"
+    if s in ("open", "pending", "submitted"):
+        return "open"
+    if s in ("trigger_pending", "trigger pending", "modified"):
+        return "trigger_pending"
+    return s if s in _CANONICAL_ORDER_STATUSES else None
+
+
+def _reconcile_sandbox_order(
+    user_id: int, order_row: SmStrategyOrder,
+) -> bool:
+    """Pull the truth from the sandbox row and copy it onto sm_strategy_order.
+
+    Returns True when the row was updated. Idempotent - reading the same
+    sandbox row twice is fine.
+    """
+    if not order_row.broker_order_id:
+        return False
+    try:
+        from backend.sandbox import order_manager as sbx_orders
+        sbx = sbx_orders.get_order(user_id, order_row.broker_order_id)
+    except Exception:
+        logger.exception(
+            "fill-recon: sandbox lookup failed for order %s",
+            order_row.broker_order_id,
+        )
+        return False
+    if sbx is None:
+        return False
+    new_status = _canonical_status(getattr(sbx, "status", None))
+    avg_price = getattr(sbx, "average_price", None)
+    filled_qty = getattr(sbx, "filled_quantity", None)
+    timestamp = getattr(sbx, "order_timestamp", None)
+
+    changed = False
+    if new_status and new_status != order_row.status:
+        order_row.status = new_status
+        changed = True
+    if avg_price is not None and float(avg_price) > 0:
+        if order_row.avg_fill_price is None or float(order_row.avg_fill_price) != float(avg_price):
+            order_row.avg_fill_price = float(avg_price)
+            changed = True
+    if filled_qty is not None and (order_row.filled_qty or 0) != int(filled_qty):
+        order_row.filled_qty = int(filled_qty)
+        changed = True
+    if new_status == "complete" and order_row.filled_at is None and timestamp is not None:
+        # Sandbox order_timestamp is timezone-naive in some places; coerce
+        # to UTC to match the column's timestamptz semantics.
+        from backend.strategy.time_utils import now_utc
+        order_row.filled_at = (
+            timestamp if getattr(timestamp, "tzinfo", None) is not None else now_utc()
+        )
+        changed = True
+    return changed
+
+
+def _reconcile_live_order_via_service(
+    order_row: SmStrategyOrder,
+    *,
+    broker: str,
+    auth_token: str,
+) -> bool:
+    """Live-mode reconciliation through the documented orderstatus service.
+
+    Same shape contract as the sandbox path. Failures are isolated so a
+    transient broker-API blip doesn't abort the run lifecycle.
+    """
+    if not order_row.broker_order_id:
+        return False
+    try:
+        from backend.services.orderstatus_service import (
+            get_orderstatus_with_auth,
+        )
+        ok, response, _status = get_orderstatus_with_auth(
+            order_row.broker_order_id, auth_token, broker,
+        )
+    except Exception:
+        logger.exception(
+            "fill-recon: live status fetch raised for order %s on %s",
+            order_row.broker_order_id, broker,
+        )
+        return False
+    if not ok or not isinstance(response, dict):
+        return False
+    data = response.get("data") or {}
+    new_status = _canonical_status(data.get("order_status") or data.get("status"))
+    avg_price = data.get("average_price")
+    filled_qty = data.get("filled_quantity") or data.get("filledqty")
+
+    changed = False
+    if new_status and new_status != order_row.status:
+        order_row.status = new_status
+        changed = True
+    try:
+        if avg_price is not None and float(avg_price) > 0:
+            if order_row.avg_fill_price is None or float(order_row.avg_fill_price) != float(avg_price):
+                order_row.avg_fill_price = float(avg_price)
+                changed = True
+    except (TypeError, ValueError):
+        pass
+    try:
+        if filled_qty is not None and (order_row.filled_qty or 0) != int(filled_qty):
+            order_row.filled_qty = int(filled_qty)
+            changed = True
+    except (TypeError, ValueError):
+        pass
+    if new_status == "complete" and order_row.filled_at is None:
+        from backend.strategy.time_utils import now_utc
+        order_row.filled_at = now_utc()
+        changed = True
+    return changed
+
+
+async def reconcile_order_fill(
+    db: AsyncSession,
+    *,
+    order_row: SmStrategyOrder,
+    mode: str,
+    user_id: int,
+    broker: Optional[str] = None,
+    auth_token: Optional[str] = None,
+) -> bool:
+    """Reconcile a single sm_strategy_order row against the live truth.
+
+    Commits the change when something was updated. Idempotent - calling
+    multiple times is safe.
+    """
+    if mode == "sandbox":
+        changed = _reconcile_sandbox_order(user_id, order_row)
+    elif mode == "live" and broker and auth_token:
+        changed = _reconcile_live_order_via_service(
+            order_row, broker=broker, auth_token=auth_token,
+        )
+    else:
+        return False
+    if changed:
+        await db.commit()
+        await db.refresh(order_row)
+    return changed
+
+
+async def _apply_fill_to_state(
+    run_id: int,
+    *,
+    leg_id: int,
+    order_kind: str,
+    avg_fill_price: float,
+    filled_qty: int,
+    strategy_legs: list[dict[str, Any]],
+) -> None:
+    """Mirror a filled order's price/qty into Redis run state.
+
+    Entry fills set ``leg.entry_avg`` and bump ``status='open'``. Exit
+    fills compute realized P&L = ``(exit - entry) * qty * sign(side)``,
+    clear current_side, and set ``status='closed'``. Strategy-level
+    aggregates ``pnl_realized`` / ``pnl_unrealized`` are recomputed from
+    the per-leg numbers so the Live P&L card has real data to render.
+    """
+    state = await state_module.get_run_state(run_id)
+    if state is None:
+        return
+    legs = state.setdefault("legs", {})
+    key = str(leg_id)
+    leg = legs.get(key)
+    if leg is None:
+        leg = {"leg_id": leg_id, "status": "open"}
+        legs[key] = leg
+
+    if order_kind == "entry":
+        leg["entry_avg"] = avg_fill_price
+        leg["qty"] = filled_qty
+        leg["status"] = "open"
+        # For signal-mode legs the current_side has already been set by
+        # enter_leg before the dispatch; for batch-mode legs we look at
+        # the per-leg config's 'position' (B/S) to derive the side.
+        if not leg.get("current_side"):
+            cfg = next(
+                (c for c in strategy_legs if int(c.get("id", -1)) == leg_id),
+                None,
+            )
+            if cfg and cfg.get("position") == "S":
+                leg["current_side"] = "short"
+            elif cfg and cfg.get("position") == "B":
+                leg["current_side"] = "long"
+    else:
+        # Any non-entry kind is treated as an exit for P&L purposes.
+        entry_avg = leg.get("entry_avg")
+        side = leg.get("current_side")
+        if entry_avg is not None and side in ("long", "short"):
+            sign = 1 if side == "long" else -1
+            realized = (float(avg_fill_price) - float(entry_avg)) * filled_qty * sign
+            leg["realized_pnl"] = float(leg.get("realized_pnl") or 0.0) + realized
+        leg["exit_avg"] = avg_fill_price
+        leg["status"] = "closed"
+        leg["current_side"] = None
+        leg["mtm"] = 0.0  # closed legs contribute 0 to unrealized
+
+    # Recompute strategy-level aggregates.
+    realized_total = 0.0
+    unrealized_total = 0.0
+    for lg in legs.values():
+        realized_total += float(lg.get("realized_pnl") or 0.0)
+        if lg.get("status") == "open":
+            unrealized_total += float(lg.get("mtm") or 0.0)
+    state["pnl_realized"] = realized_total
+    state["pnl_unrealized"] = unrealized_total
+    state["pnl_total"] = realized_total + unrealized_total
+    state["pnl_peak"] = max(float(state.get("pnl_peak") or 0.0), state["pnl_total"])
+    state["pnl_trough"] = min(float(state.get("pnl_trough") or 0.0), state["pnl_total"])
+
+    await state_module.hydrate_run_state(run_id, state)
