@@ -104,6 +104,13 @@ function formatIst(iso: string | null | undefined): string {
   }
 }
 
+function formatPnl(value: number | null | undefined): string {
+  if (value == null) return "—";
+  if (value === 0) return "0.00";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}`;
+}
+
 function severityClass(severity: string): string {
   if (severity === "critical") return "text-red-600";
   if (severity === "warn") return "text-amber-600";
