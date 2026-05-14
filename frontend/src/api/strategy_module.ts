@@ -315,6 +315,68 @@ export async function listEvents(
   return response.data.events;
 }
 
+export interface StrategyPosition {
+  symbol: string;
+  exchange: string;
+  product: string;
+  net_qty: number;
+  side: "long" | "short" | "flat";
+  avg_entry_price: number;
+  avg_exit_price: number | null;
+  ltp: number | null;
+  unrealized_pnl: number;
+  realized_pnl: number;
+  last_kind: string;
+}
+
+export interface StrategyPositionsResponse {
+  status: "success";
+  run_id: number | null;
+  positions: StrategyPosition[];
+  summary?: {
+    realized: number;
+    unrealized: number;
+    total: number;
+  };
+}
+
+export async function listPositions(
+  strategy_id: number,
+  run_id?: number,
+): Promise<StrategyPositionsResponse> {
+  const response = await api.get<StrategyPositionsResponse>(
+    `/web/strategy/${strategy_id}/positions`,
+    { params: run_id ? { run_id } : {} },
+  );
+  return response.data;
+}
+
+export interface StrategyTrade {
+  order_id: number;
+  run_id: number;
+  leg_id: number;
+  kind: string;
+  symbol: string;
+  exchange: string;
+  action: string;
+  filled_qty: number;
+  avg_fill_price: number;
+  trade_value: number;
+  broker_order_id: string | null;
+  filled_at: string;
+}
+
+export async function listTrades(
+  strategy_id: number,
+  run_id?: number,
+): Promise<StrategyTrade[]> {
+  const response = await api.get<{ status: "success"; trades: StrategyTrade[] }>(
+    `/web/strategy/${strategy_id}/tradebook`,
+    { params: run_id ? { run_id } : {} },
+  );
+  return response.data.trades;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 10 — live-mode toggles (password re-auth on enable)
 // ---------------------------------------------------------------------------

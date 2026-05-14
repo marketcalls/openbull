@@ -41,14 +41,18 @@ import {
   killSwitch,
   listEvents,
   listOrders,
+  listPositions,
   listRuns,
+  listTrades,
   rotateWebhookToken,
   startRun,
   stopRun,
   unlockWebhook,
   type StrategyEvent,
   type StrategyOrder,
+  type StrategyPosition,
   type StrategyRun,
+  type StrategyTrade,
 } from "@/api/strategy_module";
 import {
   UNIVERSE_TAB_LABELS,
@@ -808,6 +812,268 @@ function SetupTab({ strategy }: { strategy: Strategy }) {
 }
 
 // ---------------------------------------------------------------------------
+// Positions tab - strategy-scoped position book derived from filled orders
+// ---------------------------------------------------------------------------
+
+function PositionsTab({
+  positions,
+  summary,
+  runId,
+  loading,
+}: {
+  positions: StrategyPosition[];
+  summary?: { realized: number; unrealized: number; total: number };
+  runId: number | null;
+  loading: boolean;
+}) {
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Strategy positions</CardTitle>
+          <CardDescription>
+            Net positions derived from this strategy's filled orders.
+            {runId !== null && (
+              <>
+                {" "}Run <span className="font-mono">#{runId}</span>.
+              </>
+            )}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {summary && (
+            <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="rounded-md border p-3">
+                <div className="text-xs uppercase text-muted-foreground">
+                  Realized
+                </div>
+                <div
+                  className={cn(
+                    "font-mono text-xl",
+                    summary.realized > 0 && "text-green-600",
+                    summary.realized < 0 && "text-red-600",
+                  )}
+                >
+                  {formatPnl(summary.realized)}
+                </div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs uppercase text-muted-foreground">
+                  Unrealized
+                </div>
+                <div
+                  className={cn(
+                    "font-mono text-xl",
+                    summary.unrealized > 0 && "text-green-600",
+                    summary.unrealized < 0 && "text-red-600",
+                  )}
+                >
+                  {formatPnl(summary.unrealized)}
+                </div>
+              </div>
+              <div className="rounded-md border-2 p-3">
+                <div className="text-xs uppercase text-muted-foreground">
+                  Total
+                </div>
+                <div
+                  className={cn(
+                    "font-mono text-xl font-bold",
+                    summary.total > 0 && "text-green-600",
+                    summary.total < 0 && "text-red-600",
+                  )}
+                >
+                  {formatPnl(summary.total)}
+                </div>
+              </div>
+            </div>
+          )}
+          {loading ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              Loading…
+            </p>
+          ) : positions.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              No positions for the current run.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Symbol</TableHead>
+                    <TableHead>Exchange</TableHead>
+                    <TableHead>Product</TableHead>
+                    <TableHead>Side</TableHead>
+                    <TableHead className="text-right">Net Qty</TableHead>
+                    <TableHead className="text-right">Avg Entry</TableHead>
+                    <TableHead className="text-right">LTP</TableHead>
+                    <TableHead className="text-right">Unrealized</TableHead>
+                    <TableHead className="text-right">Realized</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {positions.map((p) => (
+                    <TableRow key={`${p.symbol}-${p.exchange}-${p.product}`}>
+                      <TableCell className="font-mono font-medium">
+                        {p.symbol}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {p.exchange}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-xs">
+                          {p.product}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            p.side === "long"
+                              ? "default"
+                              : p.side === "short"
+                                ? "destructive"
+                                : "secondary"
+                          }
+                          className="text-xs"
+                        >
+                          {p.side}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {p.net_qty}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {p.avg_entry_price.toFixed(2)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {p.ltp != null ? p.ltp.toFixed(2) : "—"}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right font-mono",
+                          p.unrealized_pnl > 0 && "text-green-600",
+                          p.unrealized_pnl < 0 && "text-red-600",
+                        )}
+                      >
+                        {formatPnl(p.unrealized_pnl)}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right font-mono",
+                          p.realized_pnl > 0 && "text-green-600",
+                          p.realized_pnl < 0 && "text-red-600",
+                        )}
+                      >
+                        {formatPnl(p.realized_pnl)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Trades tab - strategy-scoped fills (= sm_strategy_order rows with status=complete)
+// ---------------------------------------------------------------------------
+
+function TradesTab({
+  trades,
+  loading,
+}: {
+  trades: StrategyTrade[];
+  loading: boolean;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Strategy tradebook</CardTitle>
+        <CardDescription>
+          Every filled order placed by this strategy. Executed price is
+          the broker/sandbox average fill price.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            Loading…
+          </p>
+        ) : trades.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            No trades yet.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Filled</TableHead>
+                  <TableHead>Run</TableHead>
+                  <TableHead>Kind</TableHead>
+                  <TableHead>Symbol</TableHead>
+                  <TableHead>Exchange</TableHead>
+                  <TableHead>Action</TableHead>
+                  <TableHead className="text-right">Qty</TableHead>
+                  <TableHead className="text-right">Executed Price</TableHead>
+                  <TableHead className="text-right">Trade Value</TableHead>
+                  <TableHead>Order ID</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {trades.map((t) => (
+                  <TableRow key={t.order_id}>
+                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                      {formatIst(t.filled_at)}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs">
+                      #{t.run_id}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="outline" className="text-xs">
+                        {t.kind}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="font-mono">{t.symbol}</TableCell>
+                    <TableCell className="font-mono text-xs">
+                      {t.exchange}
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={t.action === "BUY" ? "default" : "destructive"}
+                        className="text-xs"
+                      >
+                        {t.action}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      {t.filled_qty}
+                    </TableCell>
+                    <TableCell className="text-right font-mono font-medium">
+                      {t.avg_fill_price.toFixed(2)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      {t.trade_value.toFixed(2)}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {t.broker_order_id ?? "—"}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Risk tab (unchanged from Phase 2)
 // ---------------------------------------------------------------------------
 
@@ -1106,11 +1372,29 @@ export default function StrategyDetail() {
       strategyQuery.data?.status === "running" ? 5_000 : false,
   });
 
+  const positionsQuery = useQuery({
+    queryKey: ["strategy-positions", numId],
+    queryFn: () => listPositions(numId),
+    enabled: Number.isFinite(numId) && numId > 0,
+    refetchInterval: (q) =>
+      strategyQuery.data?.status === "running" ? 5_000 : false,
+  });
+
+  const tradesQuery = useQuery({
+    queryKey: ["strategy-trades", numId],
+    queryFn: () => listTrades(numId),
+    enabled: Number.isFinite(numId) && numId > 0,
+    refetchInterval: (q) =>
+      strategyQuery.data?.status === "running" ? 5_000 : false,
+  });
+
   const invalidateAll = () => {
     queryClient.invalidateQueries({ queryKey: ["strategy", numId] });
     queryClient.invalidateQueries({ queryKey: ["strategy-orders", numId] });
     queryClient.invalidateQueries({ queryKey: ["strategy-runs", numId] });
     queryClient.invalidateQueries({ queryKey: ["strategy-events", numId] });
+    queryClient.invalidateQueries({ queryKey: ["strategy-positions", numId] });
+    queryClient.invalidateQueries({ queryKey: ["strategy-trades", numId] });
   };
 
   const startMutation = useMutation({
@@ -1427,7 +1711,9 @@ export default function StrategyDetail() {
         <TabsList className="flex flex-wrap gap-1 bg-transparent" variant="line">
           <TabsTrigger value="live">Live</TabsTrigger>
           <TabsTrigger value="setup">Setup</TabsTrigger>
+          <TabsTrigger value="positions">Positions</TabsTrigger>
           <TabsTrigger value="orders">Orders</TabsTrigger>
+          <TabsTrigger value="trades">Trades</TabsTrigger>
           <TabsTrigger value="events">Events</TabsTrigger>
           <TabsTrigger value="risk">Risk</TabsTrigger>
           <TabsTrigger value="webhook">Webhook</TabsTrigger>
@@ -1450,8 +1736,22 @@ export default function StrategyDetail() {
         <TabsContent value="setup" className="mt-4">
           <SetupTab strategy={strategy} />
         </TabsContent>
+        <TabsContent value="positions" className="mt-4">
+          <PositionsTab
+            positions={positionsQuery.data?.positions ?? []}
+            summary={positionsQuery.data?.summary}
+            runId={positionsQuery.data?.run_id ?? null}
+            loading={positionsQuery.isLoading}
+          />
+        </TabsContent>
         <TabsContent value="orders" className="mt-4">
           <OrdersTab orders={orders} />
+        </TabsContent>
+        <TabsContent value="trades" className="mt-4">
+          <TradesTab
+            trades={tradesQuery.data ?? []}
+            loading={tradesQuery.isLoading}
+          />
         </TabsContent>
         <TabsContent value="events" className="mt-4">
           <EventsTab events={events} wsEvents={wsEvents} />

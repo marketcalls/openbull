@@ -606,6 +606,221 @@ async def get_strategy_orders(
     }
 
 
+@router.get("/{strategy_id}/positions")
+async def get_strategy_positions(
+    strategy_id: int,
+    run_id: Optional[int] = Query(
+        None,
+        description=(
+            "Run to scope positions to. Defaults to current_run_id when "
+            "the strategy is running, latest run otherwise."
+        ),
+    ),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Strategy-scoped positions view.
+
+    Aggregates filled orders for the chosen run into per-symbol
+    positions. ``net_qty`` is signed: positive=long, negative=short,
+    0=flat (still returned so the operator can see the round-trip
+    realized P&L from a fully-exited leg).
+
+    Each position row carries:
+      - ``symbol`` / ``exchange``
+      - ``net_qty``                  signed share/contract count
+      - ``side``                     'long' / 'short' / 'flat'
+      - ``avg_entry_price``          weighted average of entry fills
+      - ``avg_exit_price``           weighted average of exit fills (or
+                                     None if still open)
+      - ``ltp``                      from MarketDataCache when available
+      - ``unrealized_pnl``           (ltp - avg_entry) * net_qty * sign
+      - ``realized_pnl``             locked-in from closed portion
+      - ``product`` / ``last_kind``  for context
+    """
+    try:
+        strategy = await repo.get_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    # Pick the run to scope to.
+    resolved_run_id = run_id
+    if resolved_run_id is None:
+        resolved_run_id = strategy.current_run_id
+    if resolved_run_id is None:
+        # No run ever -> empty positions, not an error.
+        latest = await repo.list_runs(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+        if latest:
+            resolved_run_id = latest[0].id
+    if resolved_run_id is None:
+        return {"status": "success", "run_id": None, "positions": []}
+
+    orders = await repo.list_orders_for_run(
+        db, user_id=user.id, run_id=resolved_run_id,
+    )
+
+    # Aggregate per (symbol, exchange, product).
+    from backend.services.market_data_cache import get_market_data_cache
+    cache = get_market_data_cache()
+
+    aggs: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for o in orders:
+        if (o.status or "").lower() != "complete":
+            continue
+        fill_qty = int(o.filled_qty or o.qty or 0)
+        fill_price = float(o.avg_fill_price or 0)
+        if fill_qty <= 0 or fill_price <= 0:
+            continue
+        key = (o.symbol, o.exchange, strategy.product)
+        a = aggs.setdefault(key, {
+            "symbol": o.symbol,
+            "exchange": o.exchange,
+            "product": strategy.product,
+            "buy_qty": 0,
+            "buy_value": 0.0,
+            "sell_qty": 0,
+            "sell_value": 0.0,
+            "last_kind": o.kind,
+            "last_action_at": o.placed_at,
+        })
+        signed = fill_qty if (o.action or "").upper() == "BUY" else -fill_qty
+        if signed > 0:
+            a["buy_qty"] += fill_qty
+            a["buy_value"] += fill_qty * fill_price
+        else:
+            a["sell_qty"] += fill_qty
+            a["sell_value"] += fill_qty * fill_price
+        if o.placed_at and (a["last_action_at"] is None or o.placed_at > a["last_action_at"]):
+            a["last_kind"] = o.kind
+            a["last_action_at"] = o.placed_at
+
+    positions: list[dict[str, Any]] = []
+    for a in aggs.values():
+        net_qty = a["buy_qty"] - a["sell_qty"]
+        avg_buy = (a["buy_value"] / a["buy_qty"]) if a["buy_qty"] > 0 else 0.0
+        avg_sell = (a["sell_value"] / a["sell_qty"]) if a["sell_qty"] > 0 else 0.0
+        # Closed-portion realized P&L: min(buy_qty, sell_qty) units round-
+        # tripped. For pure-long round-trips: realized = (avg_sell -
+        # avg_buy) * matched_qty. For pure-short: (avg_sell - avg_buy) *
+        # matched_qty with sell as the opener, so the same formula
+        # surfaces the correct sign.
+        matched = min(a["buy_qty"], a["sell_qty"])
+        realized = (avg_sell - avg_buy) * matched if matched > 0 else 0.0
+
+        # LTP from cache - only available when something has subscribed
+        # the symbol on the broker WS feed. The Live tab subscribes via
+        # tick_feed.add_run_subscriptions on each entry, but the broker
+        # WS adapter must also be subscribed for ticks to land here.
+        ltp_entry = cache.get_ltp(a["symbol"], a["exchange"]) or {}
+        ltp_val = ltp_entry.get("value") if isinstance(ltp_entry, dict) else None
+        try:
+            ltp_f = float(ltp_val) if ltp_val is not None else None
+        except (TypeError, ValueError):
+            ltp_f = None
+
+        if net_qty == 0:
+            side = "flat"
+            avg_entry = avg_buy if a["buy_qty"] > 0 else avg_sell
+            unrealized = 0.0
+        elif net_qty > 0:
+            side = "long"
+            avg_entry = avg_buy
+            unrealized = ((ltp_f - avg_entry) * net_qty) if ltp_f else 0.0
+        else:
+            side = "short"
+            avg_entry = avg_sell
+            unrealized = ((avg_entry - ltp_f) * abs(net_qty)) if ltp_f else 0.0
+
+        positions.append({
+            "symbol": a["symbol"],
+            "exchange": a["exchange"],
+            "product": a["product"],
+            "net_qty": net_qty,
+            "side": side,
+            "avg_entry_price": round(avg_entry, 4),
+            "avg_exit_price": round(avg_sell if side == "long" else avg_buy, 4) if matched > 0 else None,
+            "ltp": ltp_f,
+            "unrealized_pnl": round(unrealized, 2),
+            "realized_pnl": round(realized, 2),
+            "last_kind": a["last_kind"],
+        })
+
+    # Strategy-level totals as a convenience.
+    tot_realized = sum(p["realized_pnl"] for p in positions)
+    tot_unrealized = sum(p["unrealized_pnl"] for p in positions)
+    return {
+        "status": "success",
+        "run_id": resolved_run_id,
+        "positions": positions,
+        "summary": {
+            "realized": round(tot_realized, 2),
+            "unrealized": round(tot_unrealized, 2),
+            "total": round(tot_realized + tot_unrealized, 2),
+        },
+    }
+
+
+@router.get("/{strategy_id}/tradebook")
+async def get_strategy_tradebook(
+    strategy_id: int,
+    run_id: Optional[int] = Query(
+        None,
+        description="Filter to a specific run. Default: all runs.",
+    ),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Strategy-scoped tradebook. Returns every filled order as a trade.
+
+    Each row carries Time (IST), Run, Kind, Symbol, Exchange, Action,
+    Filled Qty, Executed Price, Trade Value, Order ID.
+    """
+    try:
+        await repo.get_strategy(db, user_id=user.id, strategy_id=strategy_id)
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    if run_id is not None:
+        orders = await repo.list_orders_for_run(
+            db, user_id=user.id, run_id=run_id,
+        )
+    else:
+        orders = await repo.list_orders_for_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+
+    trades: list[dict[str, Any]] = []
+    for o in orders:
+        if (o.status or "").lower() != "complete":
+            continue
+        fill_qty = int(o.filled_qty or o.qty or 0)
+        fill_price = float(o.avg_fill_price or 0)
+        if fill_qty <= 0 or fill_price <= 0:
+            continue
+        trades.append({
+            "order_id": o.id,
+            "run_id": o.run_id,
+            "leg_id": o.leg_id,
+            "kind": o.kind,
+            "symbol": o.symbol,
+            "exchange": o.exchange,
+            "action": o.action,
+            "filled_qty": fill_qty,
+            "avg_fill_price": round(fill_price, 2),
+            "trade_value": round(fill_qty * fill_price, 2),
+            "broker_order_id": o.broker_order_id,
+            "filled_at": format_ist(o.filled_at) if o.filled_at else format_ist(o.placed_at),
+        })
+
+    # Newest first.
+    trades.sort(key=lambda t: t["filled_at"] or "", reverse=True)
+    return {"status": "success", "trades": trades}
+
+
 @router.get("/{strategy_id}/runs")
 async def get_strategy_runs(
     strategy_id: int,
