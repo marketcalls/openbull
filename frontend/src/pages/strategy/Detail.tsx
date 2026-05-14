@@ -38,12 +38,14 @@ import {
   disableLiveMode,
   enableLiveMode,
   getStrategy,
+  killSwitch,
   listEvents,
   listOrders,
   listRuns,
   rotateWebhookToken,
   startRun,
   stopRun,
+  unlockWebhook,
   type StrategyEvent,
   type StrategyOrder,
   type StrategyRun,
@@ -1049,6 +1051,7 @@ export default function StrategyDetail() {
 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmCloseAll, setConfirmCloseAll] = useState(false);
+  const [confirmKill, setConfirmKill] = useState(false);
   const [startDialogOpen, setStartDialogOpen] = useState(false);
   const [startMode, setStartMode] = useState<StrategyMode>("sandbox");
   const [closingLegId, setClosingLegId] = useState<number | null>(null);
@@ -1216,6 +1219,41 @@ export default function StrategyDetail() {
     },
   });
 
+  const killSwitchMutation = useMutation({
+    mutationFn: () => killSwitch(numId),
+    onSuccess: (resp) => {
+      const cancelledCount = resp.cancelled_orders?.length ?? 0;
+      toast.warning(
+        `Kill switch fired. ${cancelledCount} pending order(s) cancelled; webhook locked.`,
+      );
+      invalidateAll();
+    },
+    onError: (err: unknown) => {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } }).response?.data
+          ?.detail ?? "Kill switch failed";
+      toast.error(detail);
+    },
+  });
+
+  const unlockMutation = useMutation({
+    mutationFn: () => unlockWebhook(numId),
+    onSuccess: (resp) => {
+      if (resp.noop) {
+        toast.info("Webhook was already unlocked");
+      } else {
+        toast.success("Webhook unlocked - signals will be accepted again");
+      }
+      queryClient.invalidateQueries({ queryKey: ["strategy", numId] });
+    },
+    onError: (err: unknown) => {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } }).response?.data
+          ?.detail ?? "Unlock failed";
+      toast.error(detail);
+    },
+  });
+
   const deleteMutation = useMutation({
     mutationFn: () => deleteStrategy(numId),
     onSuccess: () => {
@@ -1265,6 +1303,11 @@ export default function StrategyDetail() {
             <Badge variant={strategy.live_enabled ? "destructive" : "secondary"}>
               {strategy.live_enabled ? "LIVE-enabled" : "SANDBOX-only"}
             </Badge>
+            {strategy.webhook_locked && (
+              <Badge variant="destructive" className="font-semibold">
+                WEBHOOK LOCKED
+              </Badge>
+            )}
             {strategy.strategy_kind === "signal" && (
               <Badge variant="default" className="bg-blue-600 hover:bg-blue-600">
                 Signal mode
@@ -1288,7 +1331,29 @@ export default function StrategyDetail() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {isStopped && (
+          {/* Kill switch is always available (running OR stopped) - the
+              point is to lock the webhook even when nothing is running.
+              Disabled briefly while in flight. */}
+          <Button
+            variant="destructive"
+            className="border-2 border-red-700 bg-red-600 font-bold hover:bg-red-700"
+            disabled={killSwitchMutation.isPending}
+            onClick={() => setConfirmKill(true)}
+            title="Cancel pending orders, flatten positions, and block all webhook signals"
+          >
+            {killSwitchMutation.isPending ? "Killing…" : "KILL SWITCH"}
+          </Button>
+          {strategy.webhook_locked && (
+            <Button
+              variant="outline"
+              disabled={unlockMutation.isPending}
+              onClick={() => unlockMutation.mutate()}
+              title="Resume accepting webhook signals"
+            >
+              {unlockMutation.isPending ? "Unlocking…" : "Unlock webhook"}
+            </Button>
+          )}
+          {isStopped && !strategy.webhook_locked && (
             <Button onClick={() => setStartDialogOpen(true)}>Start run</Button>
           )}
           {isRunning && (
@@ -1539,6 +1604,25 @@ export default function StrategyDetail() {
         variant="destructive"
         loading={deleteMutation.isPending}
         onConfirm={() => deleteMutation.mutate()}
+      />
+
+      <ConfirmDialog
+        open={confirmKill}
+        onOpenChange={setConfirmKill}
+        title="Activate kill switch?"
+        description={
+          "This cancels every pending order, flattens every open " +
+          "position at MARKET, and locks the webhook so external " +
+          "TradingView signals are refused. The strategy stays stopped " +
+          "until you explicitly unlock and start it."
+        }
+        confirmLabel="KILL"
+        variant="destructive"
+        loading={killSwitchMutation.isPending}
+        onConfirm={() => {
+          killSwitchMutation.mutate();
+          setConfirmKill(false);
+        }}
       />
 
       <Dialog

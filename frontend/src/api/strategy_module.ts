@@ -246,6 +246,43 @@ export async function closeLeg(
   return response.data;
 }
 
+export interface KillSwitchResponse {
+  status: "success";
+  strategy_id: number;
+  webhook_locked: true;
+  cancelled_orders: Array<{
+    order_id: number;
+    broker_order_id?: string | null;
+    outcome: string;
+    note?: string | null;
+  }>;
+  flatten: { outcome: string; stop_reason?: string; note?: string };
+  triggered_by: string;
+}
+
+export async function killSwitch(id: number): Promise<KillSwitchResponse> {
+  const response = await api.post<KillSwitchResponse>(
+    `/web/strategy/${id}/kill_switch`,
+  );
+  return response.data;
+}
+
+export interface UnlockWebhookResponse {
+  status: "success";
+  strategy_id: number;
+  webhook_locked: false;
+  noop: boolean;
+}
+
+export async function unlockWebhook(
+  id: number,
+): Promise<UnlockWebhookResponse> {
+  const response = await api.post<UnlockWebhookResponse>(
+    `/web/strategy/${id}/unlock_webhook`,
+  );
+  return response.data;
+}
+
 export async function listOrders(
   strategy_id: number,
   run_id?: number,

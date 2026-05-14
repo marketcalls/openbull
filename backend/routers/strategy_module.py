@@ -89,6 +89,7 @@ def _strategy_out(row: SmStrategy, *, webhook_url: str) -> StrategyOut:
         live_enabled=row.live_enabled,
         webhook_url=webhook_url,
         webhook_ip_allowlist=row.webhook_ip_allowlist,
+        webhook_locked=bool(getattr(row, "webhook_locked", False)),
         daily_loss_limit_inr=float(row.daily_loss_limit_inr) if row.daily_loss_limit_inr is not None else None,
         status=row.status,
         current_run_id=row.current_run_id,
@@ -108,6 +109,7 @@ def _strategy_list_item(row: SmStrategy) -> StrategyListItem:
         strategy_type=row.strategy_type,
         status=row.status,
         live_enabled=row.live_enabled,
+        webhook_locked=bool(getattr(row, "webhook_locked", False)),
         # Phase 1 has no engine yet — P&L surfaces zero. Phase 6 wires live
         # values via Redis state lookup.
         pnl_realized=0.0,
@@ -489,6 +491,62 @@ async def close_all_endpoint(
             broker=broker_ctx.broker_name,
             config=broker_ctx.broker_config,
         )
+    except engine.EngineError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", **result}
+
+
+@router.post("/{strategy_id}/kill_switch")
+async def kill_switch_endpoint(
+    strategy_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    broker_ctx: BrokerContext = Depends(get_broker_context),
+):
+    """Kill switch — cancel pending orders, flatten positions, and lock
+    the webhook so external TradingView signals are refused until the
+    operator explicitly unlocks. Idempotent: re-pressing on an already-
+    killed strategy is a no-op (still emits the audit event).
+    """
+    try:
+        strategy = await repo.get_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    try:
+        result = await engine.kill_strategy(
+            db,
+            strategy=strategy,
+            auth_token=broker_ctx.auth_token,
+            broker=broker_ctx.broker_name,
+            config=broker_ctx.broker_config,
+            triggered_by="manual",
+        )
+    except engine.EngineError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", **result}
+
+
+@router.post("/{strategy_id}/unlock_webhook")
+async def unlock_webhook_endpoint(
+    strategy_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clear the kill-switch lock. Strategy stays stopped - operator must
+    manually press Start to resume entries. Webhook is back online for
+    signal-mode strategies; the lock can be re-applied any time via
+    /kill_switch.
+    """
+    try:
+        strategy = await repo.get_strategy(
+            db, user_id=user.id, strategy_id=strategy_id,
+        )
+    except repo.NotFound:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    try:
+        result = await engine.unlock_webhook(db, strategy=strategy)
     except engine.EngineError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "success", **result}

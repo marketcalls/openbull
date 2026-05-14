@@ -168,6 +168,9 @@ export interface Strategy {
   live_enabled: boolean;
   webhook_url: string;
   webhook_ip_allowlist?: WebhookIpAllowlistEntry[] | null;
+  /** Kill-switch flag. When true, the webhook handler refuses every
+   *  incoming signal until /unlock_webhook is called. */
+  webhook_locked: boolean;
   daily_loss_limit_inr?: number | null;
   status: StrategyStatus;
   current_run_id?: number | null;
@@ -185,6 +188,7 @@ export interface StrategyListItem {
   strategy_type: StrategyType;
   status: StrategyStatus;
   live_enabled: boolean;
+  webhook_locked: boolean;
   pnl_realized: number;
   pnl_unrealized: number;
   pnl_total: number;

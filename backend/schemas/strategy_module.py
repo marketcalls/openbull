@@ -347,6 +347,7 @@ class StrategyOut(BaseModel):
     live_enabled: bool
     webhook_url: str = Field(..., description="Public webhook URL for this strategy (token embedded)")
     webhook_ip_allowlist: Optional[List[WebhookIpAllowlistEntry]]
+    webhook_locked: bool = False
     daily_loss_limit_inr: Optional[float]
 
     status: str
@@ -375,6 +376,7 @@ class StrategyListItem(BaseModel):
     strategy_type: str
     status: str
     live_enabled: bool
+    webhook_locked: bool = False
 
     pnl_realized: float = 0.0
     pnl_unrealized: float = 0.0

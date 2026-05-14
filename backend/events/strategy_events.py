@@ -170,3 +170,21 @@ class LockProfitTriggeredEvent(StrategyConfigEvent):
 @dataclass
 class TrailToEntryActivatedEvent(StrategyConfigEvent):
     topic: str = "strategy.trail_to_entry_activated"
+
+
+# --- Kill-switch events ---------------------------------------------------
+
+@dataclass
+class KillSwitchActivatedEvent(StrategyConfigEvent):
+    """Operator pressed the kill switch (or it auto-triggered). The engine
+    has already cancelled pending orders, flattened positions, and set
+    webhook_locked=True before this event fires."""
+    topic: str = "strategy.kill_switch_activated"
+
+
+@dataclass
+class WebhookUnlockedEvent(StrategyConfigEvent):
+    """Operator explicitly cleared the kill-switch lock - webhooks are
+    now accepted again (but the strategy still has to be manually
+    started to resume entries)."""
+    topic: str = "strategy.webhook_unlocked"

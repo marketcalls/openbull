@@ -811,6 +811,31 @@ async def handle_webhook(
             result_label="rate_limited",
         )
 
+    # 5b. Kill-switch / webhook lock. Applies to both batch and signal
+    # strategies. The lock is set by the /kill_switch endpoint (which
+    # also cancels pending orders and flattens positions) and cleared
+    # only by an explicit /unlock_webhook call from the operator. While
+    # locked, every incoming signal is refused with HTTP 403 and a
+    # rejected_locked audit row.
+    if getattr(strategy, "webhook_locked", False):
+        async with async_session() as db:
+            await _record_event(
+                db, strategy_id=strategy.id, action=action, mode=mode,
+                payload=parsed, ip=ip, user_agent=user_agent,
+                result_label="rejected_locked",
+            )
+        return WebhookOutcome(
+            status_code=403,
+            body={
+                "status": "error",
+                "message": (
+                    "Strategy is kill-switched - signals are blocked. Unlock "
+                    "webhooks from the detail page before sending new signals."
+                ),
+            },
+            result_label="rejected_locked",
+        )
+
     # 6. action validation - per-kind allowlist
     strategy_kind = getattr(strategy, "strategy_kind", "batch") or "batch"
     allowed_for_kind = SIGNAL_ACTIONS if strategy_kind == "signal" else BATCH_ACTIONS

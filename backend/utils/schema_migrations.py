@@ -102,6 +102,14 @@ def run_startup_migrations() -> None:
             engine, "sm_strategy", "direction",
             "VARCHAR(20) NOT NULL DEFAULT 'both'",
         )
+
+        # Kill-switch column. When True, webhook handler refuses every
+        # signal for the strategy. Set by /kill_switch (which also
+        # flattens positions); cleared by /unlock_webhook.
+        _add_column_if_missing(
+            engine, "sm_strategy", "webhook_locked",
+            "BOOLEAN NOT NULL DEFAULT FALSE",
+        )
     except Exception:
         logger.exception("Startup schema migration failed")
     finally:

@@ -26,11 +26,16 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.events.strategy_events import (
+    KillSwitchActivatedEvent,
+    WebhookUnlockedEvent,
+)
 from backend.models.strategy_module import (
     SmStrategy,
     SmStrategyOrder,
     SmStrategyRun,
 )
+from backend.utils.event_bus import bus
 from backend.strategy import (
     repository as repo, state as state_module, symbol_resolver, tick_feed,
 )
@@ -1283,3 +1288,228 @@ async def signal_auto_square(
         "stop_reason": "eod",
         "leg_summaries": summaries,
     }
+
+
+# ---------------------------------------------------------------------------
+# Kill switch (per-strategy isolation)
+# ---------------------------------------------------------------------------
+#
+# Operator-triggered emergency stop. Walks the current run's pending orders
+# and cancels each, then flattens open positions through the kind-appropriate
+# path (stop_run for batch, signal_auto_square for signal), then flips
+# webhook_locked=True so the webhook handler rejects every subsequent
+# signal until the operator explicitly unlocks.
+#
+# Idempotent: re-firing the kill on an already-killed strategy is a no-op
+# (no run -> nothing to cancel/flatten; webhook_locked is already True).
+# ---------------------------------------------------------------------------
+
+
+async def _cancel_pending_orders_for_run(
+    db: AsyncSession,
+    *,
+    run: SmStrategyRun,
+    strategy: SmStrategy,
+    auth_token: Optional[str],
+    broker: Optional[str],
+    config: Optional[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Cancel every non-terminal order on the strategy's current run.
+
+    Walks ``sm_strategy_order`` rows where ``status`` is not in the terminal
+    set (``complete`` / ``rejected`` / ``cancelled``). For each, routes the
+    cancel through the documented service surface (sandbox or live), records
+    the new ``status='cancelled'`` on the order row, and returns per-order
+    outcomes for the audit trail.
+
+    Failures are isolated per-order so one stuck cancel doesn't abort the
+    rest of the kill-switch sequence.
+    """
+    terminal = {"complete", "rejected", "cancelled"}
+    orders = await repo.list_orders_for_run(
+        db, user_id=strategy.user_id, run_id=run.id,
+    )
+    summaries: list[dict[str, Any]] = []
+    for o in orders:
+        if (o.status or "").lower() in terminal or not o.broker_order_id:
+            continue
+        try:
+            if run.mode == "sandbox":
+                from backend.services.sandbox_service import (
+                    cancel_order as sbx_cancel,
+                )
+                ok, response, _ = sbx_cancel(strategy.user_id, o.broker_order_id)
+            else:
+                if not (auth_token and broker):
+                    summaries.append({
+                        "order_id": o.id,
+                        "outcome": "skipped",
+                        "note": "live cancel needs broker auth",
+                    })
+                    continue
+                from backend.services.order_service import cancel_order_service
+                ok, response, _ = cancel_order_service(
+                    o.broker_order_id, auth_token, broker, config,
+                )
+            o.status = "cancelled" if ok else o.status
+            o.reject_reason = (
+                None if ok else (response.get("message") if isinstance(response, dict) else "cancel failed")
+            )
+            summaries.append({
+                "order_id": o.id,
+                "broker_order_id": o.broker_order_id,
+                "outcome": "cancelled" if ok else "cancel_failed",
+                "note": None if ok else o.reject_reason,
+            })
+        except Exception as e:
+            logger.exception(
+                "Kill switch: cancel raised for order %s on strategy %d",
+                o.broker_order_id, strategy.id,
+            )
+            summaries.append({
+                "order_id": o.id,
+                "broker_order_id": o.broker_order_id,
+                "outcome": "error",
+                "note": repr(e),
+            })
+    if summaries:
+        await db.commit()
+    return summaries
+
+
+async def kill_strategy(
+    db: AsyncSession,
+    *,
+    strategy: SmStrategy,
+    auth_token: Optional[str],
+    broker: Optional[str],
+    config: Optional[dict[str, Any]],
+    triggered_by: str = "manual",
+) -> dict[str, Any]:
+    """Per-strategy kill switch.
+
+    Three actions, in order:
+      1. Cancel every pending/open order on the current run (sandbox or
+         broker via the documented service surfaces).
+      2. Flatten remaining open positions: ``stop_run`` for batch-mode
+         strategies, ``signal_auto_square`` for signal-mode.
+      3. Flip ``webhook_locked=True`` so the webhook handler refuses
+         every subsequent action for this strategy.
+
+    Idempotent: safe to invoke when the strategy is already stopped or
+    already locked. ``triggered_by`` is one of ``'manual'`` (operator
+    pressed the button), ``'daily_loss_limit'`` (engine auto-trigger),
+    or ``'panic'`` (user-level panic button). Lands in the
+    KillSwitchActivatedEvent payload for forensics.
+
+    Returns a structured summary the router shapes into the HTTP
+    response.
+    """
+    # Lock the strategy row first - same TOCTOU guard the entry/exit
+    # paths use. Defends against a webhook signal arriving while the
+    # operator presses the kill button.
+    locked = await _signal_lock_strategy(db, strategy.id)
+    if locked is None:
+        raise EngineError(f"Strategy {strategy.id} not found")
+    strategy = locked
+
+    already_locked = bool(getattr(strategy, "webhook_locked", False))
+    cancelled: list[dict[str, Any]] = []
+    flatten_result: dict[str, Any] = {"outcome": "no_run"}
+    run: Optional[SmStrategyRun] = None
+
+    # Step 1 + 2: only meaningful when a run is active.
+    if strategy.current_run_id is not None:
+        run = await db.get(SmStrategyRun, strategy.current_run_id)
+        if run is not None and run.stopped_at is None:
+            cancelled = await _cancel_pending_orders_for_run(
+                db, run=run, strategy=strategy,
+                auth_token=auth_token, broker=broker, config=config,
+            )
+            try:
+                kind = getattr(strategy, "strategy_kind", "batch") or "batch"
+                if kind == "signal":
+                    flatten_result = await signal_auto_square(
+                        db, strategy=strategy, mode=run.mode, broker=broker or run.broker,
+                        auth_token=auth_token, config=config,
+                    )
+                else:
+                    flatten_result = await stop_run(
+                        db, strategy=strategy, stop_reason="manual",
+                        auth_token=auth_token, broker=broker, config=config,
+                    )
+            except EngineError as e:
+                # Already stopped (race against another concurrent stop) -
+                # acceptable, continue to lock the webhook.
+                flatten_result = {"outcome": "already_stopped", "note": str(e)}
+            except Exception:
+                logger.exception(
+                    "Kill switch: flatten raised for strategy %d", strategy.id,
+                )
+                flatten_result = {"outcome": "flatten_error"}
+
+    # Step 3: flip the lock. Re-acquire the row lock - the flatten step
+    # committed its own transaction and released the SELECT FOR UPDATE.
+    re_locked = await _signal_lock_strategy(db, strategy.id)
+    if re_locked is None:
+        raise EngineError(f"Strategy {strategy.id} not found post-flatten")
+    strategy = re_locked
+    if not strategy.webhook_locked:
+        strategy.webhook_locked = True
+        await db.commit()
+        await db.refresh(strategy)
+
+    # Audit event - even on idempotent re-kill we emit one so the Events
+    # tab shows every operator press, with payload distinguishing trigger.
+    bus.publish(KillSwitchActivatedEvent(
+        user_id=strategy.user_id,
+        strategy_id=strategy.id,
+        run_id=run.id if run else None,
+        severity="critical",
+        message=(
+            f"Kill switch activated ({triggered_by}). "
+            f"{len(cancelled)} order(s) cancelled, flatten outcome: "
+            f"{flatten_result.get('outcome')}"
+        ),
+        payload={
+            "triggered_by": triggered_by,
+            "already_locked_before": already_locked,
+            "cancelled_orders": cancelled,
+            "flatten_outcome": flatten_result.get("outcome"),
+            "stop_reason": flatten_result.get("stop_reason"),
+        },
+    ))
+
+    return {
+        "strategy_id": strategy.id,
+        "webhook_locked": True,
+        "cancelled_orders": cancelled,
+        "flatten": flatten_result,
+        "triggered_by": triggered_by,
+    }
+
+
+async def unlock_webhook(
+    db: AsyncSession, *, strategy: SmStrategy,
+) -> dict[str, Any]:
+    """Clear the kill-switch lock. Strategy stays stopped - operator must
+    manually start to resume entries.
+    """
+    locked = await _signal_lock_strategy(db, strategy.id)
+    if locked is None:
+        raise EngineError(f"Strategy {strategy.id} not found")
+    strategy = locked
+    if not strategy.webhook_locked:
+        return {"strategy_id": strategy.id, "webhook_locked": False, "noop": True}
+    strategy.webhook_locked = False
+    await db.commit()
+    await db.refresh(strategy)
+    bus.publish(WebhookUnlockedEvent(
+        user_id=strategy.user_id,
+        strategy_id=strategy.id,
+        run_id=strategy.current_run_id,
+        severity="warn",
+        message="Webhook lock cleared - strategy can accept signals again",
+        payload={"unlock_method": "manual"},
+    ))
+    return {"strategy_id": strategy.id, "webhook_locked": False, "noop": False}

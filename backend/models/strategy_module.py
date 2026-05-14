@@ -104,6 +104,12 @@ class SmStrategy(Base):
     live_enabled = Column(Boolean, nullable=False, default=False)
     webhook_token_hash = Column(String(64), nullable=False, unique=True)
     webhook_ip_allowlist = Column(JSONB, nullable=True)
+    # Kill-switch / isolation flag. When True the webhook handler refuses
+    # every incoming signal (and start/stop for batch) for this strategy
+    # with HTTP 403 and audit label 'rejected_locked'. Flipped on by the
+    # /kill_switch endpoint (also cancels pending orders + flattens open
+    # positions). Cleared by the explicit /unlock_webhook endpoint.
+    webhook_locked = Column(Boolean, nullable=False, default=False)
     daily_loss_limit_inr = Column(Numeric(18, 2), nullable=True)
 
     status = Column(String(20), nullable=False, default="stopped")

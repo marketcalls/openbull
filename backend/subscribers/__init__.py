@@ -41,6 +41,9 @@ _STRATEGY_AUDIT_TOPICS: tuple[str, ...] = (
     "strategy.lock_profit_floor_advanced",
     "strategy.lock_profit_triggered",
     "strategy.trail_to_entry_activated",
+    # Kill switch / isolation
+    "strategy.kill_switch_activated",
+    "strategy.webhook_unlocked",
 )
 
 
