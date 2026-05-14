@@ -446,21 +446,44 @@ async def stop_run_endpoint(
     db: AsyncSession = Depends(get_db),
     broker_ctx: BrokerContext = Depends(get_broker_context),
 ):
+    """Strategy-level Stop. Same kind-aware routing as /close_all:
+    signal-mode goes through signal_auto_square (reads Redis
+    current_side); batch-mode goes through stop_run.
+    """
     try:
         strategy = await repo.get_strategy(
             db, user_id=user.id, strategy_id=strategy_id,
         )
     except repo.NotFound:
         raise HTTPException(status_code=404, detail="Strategy not found")
+    kind = getattr(strategy, "strategy_kind", "batch") or "batch"
     try:
-        result = await engine.stop_run(
-            db,
-            strategy=strategy,
-            stop_reason="manual",
-            auth_token=broker_ctx.auth_token,
-            broker=broker_ctx.broker_name,
-            config=broker_ctx.broker_config,
-        )
+        if kind == "signal":
+            from backend.models.strategy_module import SmStrategyRun
+            run_mode = "sandbox"
+            run_broker = broker_ctx.broker_name or "manual-sandbox"
+            if strategy.current_run_id is not None:
+                run = await db.get(SmStrategyRun, strategy.current_run_id)
+                if run is not None:
+                    run_mode = run.mode
+                    run_broker = broker_ctx.broker_name or run.broker
+            result = await engine.signal_auto_square(
+                db,
+                strategy=strategy,
+                mode=run_mode,
+                broker=run_broker,
+                auth_token=broker_ctx.auth_token,
+                config=broker_ctx.broker_config,
+            )
+        else:
+            result = await engine.stop_run(
+                db,
+                strategy=strategy,
+                stop_reason="manual",
+                auth_token=broker_ctx.auth_token,
+                broker=broker_ctx.broker_name,
+                config=broker_ctx.broker_config,
+            )
     except engine.EngineError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "success", **result}
@@ -473,24 +496,53 @@ async def close_all_endpoint(
     db: AsyncSession = Depends(get_db),
     broker_ctx: BrokerContext = Depends(get_broker_context),
 ):
-    """Strategy-level Close All — same effect as /stop, but the audit trail
-    differentiates the two (close_all_manual event vs run_stopped event)
-    via the differentiated UI button."""
+    """Strategy-level Close All. Routes by strategy_kind:
+
+    - Batch mode: engine.stop_run -> _exit_legs flattens each leg by
+      its single entry order.
+    - Signal mode: engine.signal_auto_square walks Redis state's
+      current_side per leg and exits whatever is actually open right
+      now. This is required because signal-mode legs cycle through
+      entry -> exit -> entry -> exit repeatedly; checking "has this
+      leg ever had a non-rejected exit?" (what _exit_legs does) will
+      incorrectly skip a leg that was closed earlier and re-opened by
+      a later long_entry / short_entry signal.
+    """
     try:
         strategy = await repo.get_strategy(
             db, user_id=user.id, strategy_id=strategy_id,
         )
     except repo.NotFound:
         raise HTTPException(status_code=404, detail="Strategy not found")
+
+    kind = getattr(strategy, "strategy_kind", "batch") or "batch"
     try:
-        result = await engine.stop_run(
-            db,
-            strategy=strategy,
-            stop_reason="manual",
-            auth_token=broker_ctx.auth_token,
-            broker=broker_ctx.broker_name,
-            config=broker_ctx.broker_config,
-        )
+        if kind == "signal":
+            from backend.models.strategy_module import SmStrategyRun
+            run_mode = "sandbox"
+            run_broker = broker_ctx.broker_name or "manual-sandbox"
+            if strategy.current_run_id is not None:
+                run = await db.get(SmStrategyRun, strategy.current_run_id)
+                if run is not None:
+                    run_mode = run.mode
+                    run_broker = broker_ctx.broker_name or run.broker
+            result = await engine.signal_auto_square(
+                db,
+                strategy=strategy,
+                mode=run_mode,
+                broker=run_broker,
+                auth_token=broker_ctx.auth_token,
+                config=broker_ctx.broker_config,
+            )
+        else:
+            result = await engine.stop_run(
+                db,
+                strategy=strategy,
+                stop_reason="manual",
+                auth_token=broker_ctx.auth_token,
+                broker=broker_ctx.broker_name,
+                config=broker_ctx.broker_config,
+            )
     except engine.EngineError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "success", **result}
