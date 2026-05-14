@@ -89,6 +89,19 @@ def run_startup_migrations() -> None:
         _add_column_if_missing(
             engine, "sandbox_holdings", "settlement_date", "VARCHAR(10)"
         )
+
+        # Signal-mode strategy module (docs/plan/strategy-signal-mode.md):
+        # adds two columns to sm_strategy so the same table can back both
+        # batch-mode (existing) and signal-mode (new) strategies. Defaults
+        # preserve every existing row's semantics with no backfill.
+        _add_column_if_missing(
+            engine, "sm_strategy", "strategy_kind",
+            "VARCHAR(20) NOT NULL DEFAULT 'batch'",
+        )
+        _add_column_if_missing(
+            engine, "sm_strategy", "direction",
+            "VARCHAR(20) NOT NULL DEFAULT 'both'",
+        )
     except Exception:
         logger.exception("Startup schema migration failed")
     finally:

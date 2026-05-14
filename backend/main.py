@@ -120,7 +120,6 @@ async def lifespan(app: FastAPI):
         logger.info("Symbol cache not loaded (will load after master contract download): %s", e)
 
     # Start WebSocket proxy server in background
-    import asyncio
     from backend.websocket_proxy.server import start_ws_proxy, shutdown_ws_proxy
     ws_task = asyncio.create_task(
         start_ws_proxy(settings.websocket_host, settings.websocket_port)
