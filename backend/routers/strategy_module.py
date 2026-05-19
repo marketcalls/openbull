@@ -19,7 +19,7 @@ webhook receiver) ship in later phases when the engine exists.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -141,6 +141,104 @@ async def list_strategies(
     }
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 helper endpoints — wizard pickers.
+#
+# IMPORTANT: these MUST be declared BEFORE `GET /{strategy_id}` below.
+# FastAPI matches routes in registration order, and `/{strategy_id}` is
+# `int`-typed, so a request to `/underlyings` would otherwise be caught
+# by the dynamic route and return 422 ("Input should be a valid integer").
+# ---------------------------------------------------------------------------
+
+
+@router.get("/underlyings")
+async def list_underlyings(
+    universe_tab: str = Query(..., description="weekly_monthly | monthly_only | stocks_fno | mcx | delta"),
+    user: User = Depends(get_current_user),
+):
+    ok, data, status_code = symbol_resolver.list_underlyings_for_tab(universe_tab)
+    if not ok:
+        raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
+    return data
+
+
+@router.get("/expiries")
+async def list_expiries(
+    underlying: str = Query(..., min_length=1, max_length=50),
+    underlying_exchange: str = Query(..., min_length=1, max_length=20),
+    instrument: str = Query("options", pattern="^(options|futures)$"),
+    user: User = Depends(get_current_user),
+):
+    """Sorted expiry dates for an underlying (DD-MMM-YY).
+
+    Thin wrapper over the platform-wide get_expiry_dates so the wizard can
+    use session-cookie auth instead of the API-keyed ``/api/v1/expiry``.
+    """
+    ok, data, status_code = symbol_resolver.list_expiries(
+        underlying, underlying_exchange, instrument,
+    )
+    if not ok:
+        raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
+    return data
+
+
+@router.get("/strikes")
+async def list_strikes(
+    underlying: str = Query(..., min_length=1, max_length=50),
+    underlying_exchange: str = Query(..., min_length=1, max_length=20),
+    expiry: Optional[str] = Query(
+        None,
+        description="Concrete expiry like 28-MAY-26 or 28MAY26. If omitted, expiry_rank is required.",
+    ),
+    expiry_rank: Optional[str] = Query(
+        None,
+        pattern="^(current_week|next_week|current_month|next_month|weekly|monthly|current|next)$",
+        description=(
+            "Resolves to a date via symbol_resolver.resolve_expiry_rank. "
+            "Canonical: current_week / next_week / current_month / next_month. "
+            "Legacy aliases (weekly/monthly/current/next) still accepted."
+        ),
+    ),
+    option_type: str = Query(..., pattern="^(CE|PE)$"),
+    user: User = Depends(get_current_user),
+):
+    """Sorted strikes for an option chain.
+
+    Caller can pass either a concrete ``expiry`` or an ``expiry_rank``; one
+    of the two is required. Resolved expiry is included in the response so
+    the wizard knows which date the strikes belong to.
+    """
+    if not expiry and not expiry_rank:
+        raise HTTPException(status_code=400, detail="Either expiry or expiry_rank is required")
+
+    if not expiry:
+        # Resolve rank to a real date first.
+        ok_e, expiries, sc_e = symbol_resolver.list_expiries(
+            underlying, underlying_exchange, "options",
+        )
+        if not ok_e:
+            raise HTTPException(status_code=sc_e, detail=expiries.get("message", "Expiries unavailable"))
+        resolved, _ = symbol_resolver.resolve_expiry_rank(
+            expiry_rank or "weekly", expiries.get("data", []),
+        )
+        if not resolved:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No expiry found for rank '{expiry_rank}' on {underlying}",
+            )
+        expiry = resolved
+
+    ok, data, status_code = symbol_resolver.list_strikes(
+        underlying=underlying,
+        underlying_exchange=underlying_exchange,
+        expiry_date=expiry,
+        option_type=option_type,
+    )
+    if not ok:
+        raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
+    return data
+
+
 @router.get("/{strategy_id}")
 async def get_strategy(
     strategy_id: int,
@@ -239,96 +337,6 @@ async def rotate_webhook_token(
         strategy=_strategy_out(row, webhook_url=webhook_url),
         webhook_token=plaintext_token,
     ).model_dump()
-
-
-# ---------------------------------------------------------------------------
-# Phase 3 helper endpoints — power the wizard's underlying / expiry / strike
-# pickers. All session-cookie authed; thin wrappers over symbol_resolver.
-# ---------------------------------------------------------------------------
-
-
-@router.get("/underlyings")
-async def list_underlyings(
-    universe_tab: str = Query(..., description="weekly_monthly | monthly_only | stocks_fno | mcx | delta"),
-    user: User = Depends(get_current_user),
-):
-    ok, data, status_code = symbol_resolver.list_underlyings_for_tab(universe_tab)
-    if not ok:
-        raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
-    return data
-
-
-@router.get("/expiries")
-async def list_expiries(
-    underlying: str = Query(..., min_length=1, max_length=50),
-    underlying_exchange: str = Query(..., min_length=1, max_length=20),
-    instrument: str = Query("options", pattern="^(options|futures)$"),
-    user: User = Depends(get_current_user),
-):
-    """Sorted expiry dates for an underlying (DD-MMM-YY).
-
-    Thin wrapper over the platform-wide get_expiry_dates so the wizard can
-    use session-cookie auth instead of the API-keyed ``/api/v1/expiry``.
-    """
-    ok, data, status_code = symbol_resolver.list_expiries(
-        underlying, underlying_exchange, instrument,
-    )
-    if not ok:
-        raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
-    return data
-
-
-@router.get("/strikes")
-async def list_strikes(
-    underlying: str = Query(..., min_length=1, max_length=50),
-    underlying_exchange: str = Query(..., min_length=1, max_length=20),
-    expiry: Optional[str] = Query(
-        None,
-        description="Concrete expiry like 28-MAY-26 or 28MAY26. If omitted, expiry_rank is required.",
-    ),
-    expiry_rank: Optional[str] = Query(
-        None,
-        pattern="^(weekly|monthly|current|next)$",
-        description="Resolves to a date via symbol_resolver.resolve_expiry_rank.",
-    ),
-    option_type: str = Query(..., pattern="^(CE|PE)$"),
-    user: User = Depends(get_current_user),
-):
-    """Sorted strikes for an option chain.
-
-    Caller can pass either a concrete ``expiry`` or an ``expiry_rank``; one
-    of the two is required. Resolved expiry is included in the response so
-    the wizard knows which date the strikes belong to.
-    """
-    if not expiry and not expiry_rank:
-        raise HTTPException(status_code=400, detail="Either expiry or expiry_rank is required")
-
-    if not expiry:
-        # Resolve rank to a real date first.
-        ok_e, expiries, sc_e = symbol_resolver.list_expiries(
-            underlying, underlying_exchange, "options",
-        )
-        if not ok_e:
-            raise HTTPException(status_code=sc_e, detail=expiries.get("message", "Expiries unavailable"))
-        resolved, _ = symbol_resolver.resolve_expiry_rank(
-            expiry_rank or "weekly", expiries.get("data", []),
-        )
-        if not resolved:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No expiry found for rank '{expiry_rank}' on {underlying}",
-            )
-        expiry = resolved
-
-    ok, data, status_code = symbol_resolver.list_strikes(
-        underlying=underlying,
-        underlying_exchange=underlying_exchange,
-        expiry_date=expiry,
-        option_type=option_type,
-    )
-    if not ok:
-        raise HTTPException(status_code=status_code, detail=data.get("message", "Failed"))
-    return data
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +666,25 @@ async def get_strategy_orders(
     }
 
 
+async def _resolve_broker_optional(user: User, db: AsyncSession) -> Optional[BrokerContext]:
+    """Try to resolve a broker context for the user; return None if none active.
+
+    Plain ``get_broker_context`` raises 400 when no broker session exists.
+    The positions endpoint must keep working without one (sandbox flows
+    where the user hasn't bothered logging into a broker), so we wrap the
+    lookup with a graceful fallback. The returned context's quote API is
+    used to populate LTPs that the WS-feed-driven MarketDataCache hasn't
+    seen — typical for sandbox runs where no broker WS is connected.
+    """
+    try:
+        return await get_broker_context(user=user, db=db)
+    except HTTPException:
+        return None
+    except Exception:
+        logger.warning("broker context lookup failed for user=%d", user.id, exc_info=True)
+        return None
+
+
 @router.get("/{strategy_id}/positions")
 async def get_strategy_positions(
     strategy_id: int,
@@ -717,6 +744,7 @@ async def get_strategy_positions(
 
     # Aggregate per (symbol, exchange, product).
     from backend.services.market_data_cache import get_market_data_cache
+    from backend.services.quotes_service import get_multi_quotes_with_auth
     cache = get_market_data_cache()
 
     aggs: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -750,6 +778,49 @@ async def get_strategy_positions(
             a["last_kind"] = o.kind
             a["last_action_at"] = o.placed_at
 
+    # Resolve LTPs in two passes:
+    #   1) Try MarketDataCache (cheap, populated when the broker WS is
+    #      subscribed to the symbol).
+    #   2) For anything still missing AND still open (net_qty != 0),
+    #      batch-fetch via the broker's quote REST API. This is what makes
+    #      unrealized P&L visible in sandbox mode where no WS feed runs.
+    ltp_by_key: dict[tuple[str, str], Optional[float]] = {}
+    missing: list[dict[str, str]] = []
+    for a in aggs.values():
+        key = (a["symbol"], a["exchange"])
+        ltp_entry = cache.get_ltp(a["symbol"], a["exchange"]) or {}
+        ltp_val = ltp_entry.get("value") if isinstance(ltp_entry, dict) else None
+        try:
+            ltp_f = float(ltp_val) if ltp_val is not None else None
+        except (TypeError, ValueError):
+            ltp_f = None
+        ltp_by_key[key] = ltp_f
+        if ltp_f is None and (a["buy_qty"] - a["sell_qty"]) != 0:
+            missing.append({"symbol": a["symbol"], "exchange": a["exchange"]})
+
+    if missing:
+        broker_ctx = await _resolve_broker_optional(user, db)
+        if broker_ctx is not None:
+            ok_q, mq, _ = get_multi_quotes_with_auth(
+                symbols_list=missing,
+                auth_token=broker_ctx.auth_token,
+                broker=broker_ctx.broker_name,
+                config=broker_ctx.broker_config,
+            )
+            if ok_q:
+                for q in mq.get("results", []) or []:
+                    sym = q.get("symbol")
+                    exch = q.get("exchange")
+                    if not sym or not exch:
+                        continue
+                    # Broker plugins return LTP flat or nested under "data".
+                    inner = q.get("data", q) if isinstance(q, dict) else {}
+                    val = inner.get("ltp") if isinstance(inner, dict) else None
+                    try:
+                        ltp_by_key[(sym, exch)] = float(val) if val is not None else ltp_by_key.get((sym, exch))
+                    except (TypeError, ValueError):
+                        pass
+
     positions: list[dict[str, Any]] = []
     for a in aggs.values():
         net_qty = a["buy_qty"] - a["sell_qty"]
@@ -763,16 +834,7 @@ async def get_strategy_positions(
         matched = min(a["buy_qty"], a["sell_qty"])
         realized = (avg_sell - avg_buy) * matched if matched > 0 else 0.0
 
-        # LTP from cache - only available when something has subscribed
-        # the symbol on the broker WS feed. The Live tab subscribes via
-        # tick_feed.add_run_subscriptions on each entry, but the broker
-        # WS adapter must also be subscribed for ticks to land here.
-        ltp_entry = cache.get_ltp(a["symbol"], a["exchange"]) or {}
-        ltp_val = ltp_entry.get("value") if isinstance(ltp_entry, dict) else None
-        try:
-            ltp_f = float(ltp_val) if ltp_val is not None else None
-        except (TypeError, ValueError):
-            ltp_f = None
+        ltp_f = ltp_by_key.get((a["symbol"], a["exchange"]))
 
         if net_qty == 0:
             side = "flat"

@@ -58,7 +58,14 @@ class Leg(BaseModel):
 
     id: int = Field(..., ge=1, description="1-indexed leg number, unique within strategy")
     segment: Literal["options", "futures", "cash"]
-    expiry: Optional[Literal["weekly", "monthly", "current", "next"]] = None
+    # Canonical ranks: current_week / next_week / current_month / next_month.
+    # Legacy aliases (kept so existing DB rows keep parsing): weekly = current_week,
+    # monthly = current_month, current = current_month, next = next_month.
+    # Strategy-level validator below blocks current_week/next_week/weekly on MCX.
+    expiry: Optional[Literal[
+        "current_week", "next_week", "current_month", "next_month",
+        "weekly", "monthly", "current", "next",
+    ]] = None
     # Batch-mode lot count (multiplied by symtoken.lotsize at runtime). For
     # signal-mode legs ``qty`` carries the absolute order quantity instead.
     lots: int = Field(1, gt=0, le=10000)
@@ -155,6 +162,62 @@ _PRICETYPE = Literal["MARKET", "LIMIT"]
 _STRATEGY_KIND = Literal["batch", "signal"]
 _DIRECTION = Literal["long_only", "short_only", "both"]
 
+# MCX commodity contracts are monthly-only (verified from symtoken: every
+# MCX FUT/OPT row is a distinct monthly expiry). Weekly ranks are nonsense
+# there, so reject them at the schema layer instead of letting the engine
+# resolve to an unexpected contract.
+_WEEKLY_RANKS_FORBIDDEN_ON_MCX = frozenset(
+    {"current_week", "next_week", "weekly"}
+)
+
+
+def _validate_product_vs_segments(product: str, legs: List[Leg]) -> None:
+    """Enforce exchange-side product rules against the leg composition.
+
+    Rules (per Indian-exchange conventions):
+      * ``CNC``  — delivery, cash equity only. Reject if any leg is FUT/OPT.
+      * ``NRML`` — normal margin, derivatives only. Reject if any leg is cash.
+      * ``MIS``  — intraday, valid for every segment.
+    """
+    has_cash = any(leg.segment == "cash" for leg in legs)
+    has_deriv = any(leg.segment in ("futures", "options") for leg in legs)
+    if product == "CNC" and has_deriv:
+        raise ValueError(
+            "product='CNC' is delivery-only — not valid for futures or "
+            "options legs. Use 'NRML' for derivatives or 'MIS' for a mixed "
+            "intraday basket."
+        )
+    if product == "NRML" and has_cash:
+        raise ValueError(
+            "product='NRML' is a derivatives product — not valid for cash "
+            "equity legs. Use 'CNC' for delivery or 'MIS' for intraday."
+        )
+
+
+def _validate_tab_expiries(universe_tab: str, legs: List[Leg]) -> None:
+    """Cross-field validation: per-tab expiry restrictions.
+
+    Today's rule: MCX rejects weekly ranks on any leg (FUT or OPT). NSE/BSE
+    index tabs accept the full four ranks. Stocks F&O accepts monthly ranks
+    only (no weeklies for stock options/futures even on NFO/BFO).
+    """
+    if universe_tab == "mcx":
+        for leg in legs:
+            if leg.expiry in _WEEKLY_RANKS_FORBIDDEN_ON_MCX:
+                raise ValueError(
+                    f"Leg {leg.id}: MCX contracts are monthly-only — "
+                    f"'{leg.expiry}' is not a valid expiry rank for MCX. "
+                    f"Use 'current_month' or 'next_month'."
+                )
+    elif universe_tab == "stocks_fno":
+        for leg in legs:
+            if leg.expiry in ("current_week", "next_week", "weekly"):
+                raise ValueError(
+                    f"Leg {leg.id}: stock F&O contracts are monthly-only — "
+                    f"weekly ranks aren't valid on '{universe_tab}'. "
+                    f"Use 'current_month' or 'next_month'."
+                )
+
 
 def _validate_legs_for_kind(kind: str, legs: List[Leg]) -> None:
     """Per-kind leg validation. Called from StrategyCreate and StrategyUpdate.
@@ -163,17 +226,13 @@ def _validate_legs_for_kind(kind: str, legs: List[Leg]) -> None:
     ``exchange``, ``side``, ``qty``). Options legs are allowed.
 
     Signal mode: each leg MUST carry ``symbol``, ``exchange``, ``side``,
-    ``qty``. ``segment`` must be ``cash`` or ``futures`` (no options).
-    Options-only fields must be absent (enforced by Leg._validate_segment_fields
-    plus an explicit reject here).
+    ``qty``. ``segment`` may be ``cash``, ``futures``, or ``options``;
+    the leg's ``symbol`` carries the base underlying (e.g. NIFTY, RELIANCE,
+    CRUDEOIL) and the engine resolves the actual FUT/option contract at
+    signal time from the leg's expiry rank + option fields.
     """
     if kind == "signal":
         for leg in legs:
-            if leg.segment == "options":
-                raise ValueError(
-                    f"Leg {leg.id}: signal-mode strategies cannot contain "
-                    f"options legs. Use 'cash' or 'futures'."
-                )
             if not leg.symbol:
                 raise ValueError(f"Leg {leg.id}: signal-mode legs require 'symbol'")
             if not leg.exchange:
@@ -185,10 +244,17 @@ def _validate_legs_for_kind(kind: str, legs: List[Leg]) -> None:
                 )
             if leg.qty is None:
                 raise ValueError(f"Leg {leg.id}: signal-mode legs require 'qty'")
-            if leg.segment == "futures" and leg.expiry not in ("current", "next"):
+            if leg.segment == "futures" and leg.expiry not in (
+                "current", "next", "current_month", "next_month",
+            ):
                 raise ValueError(
                     f"Leg {leg.id}: futures legs in signal mode need expiry "
-                    f"'current' or 'next'"
+                    f"'current_month' or 'next_month' (legacy 'current'/'next' also accepted)"
+                )
+            if leg.segment == "options" and leg.expiry is None:
+                raise ValueError(
+                    f"Leg {leg.id}: options legs in signal mode need expiry "
+                    f"(current_week / next_week / current_month / next_month)"
                 )
     else:  # batch
         for leg in legs:
@@ -246,6 +312,8 @@ class StrategyCreate(BaseModel):
     @model_validator(mode="after")
     def _validate_legs_per_kind(self) -> "StrategyCreate":
         _validate_legs_for_kind(self.strategy_kind, self.legs)
+        _validate_tab_expiries(self.universe_tab, self.legs)
+        _validate_product_vs_segments(self.product, self.legs)
         return self
 
     @field_validator("legs")
@@ -306,6 +374,18 @@ class StrategyUpdate(BaseModel):
         if len(set(ids)) != len(ids):
             raise ValueError("leg ids must be unique within a strategy")
         return legs
+
+    @model_validator(mode="after")
+    def _validate_tab_expiries(self) -> "StrategyUpdate":
+        # Only validate when both legs and tab are being patched together;
+        # otherwise the existing strategy.universe_tab governs and the
+        # router-layer merge will re-validate. We don't have the existing
+        # tab here, so be conservative: when both are present, check.
+        if self.legs is not None and self.universe_tab is not None:
+            _validate_tab_expiries(self.universe_tab, self.legs)
+        if self.legs is not None and self.product is not None:
+            _validate_product_vs_segments(self.product, self.legs)
+        return self
 
 
 # ----------------------------------------------------------------------------

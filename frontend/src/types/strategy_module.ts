@@ -18,7 +18,28 @@ export type PriceType = "MARKET" | "LIMIT";
 export type Position = "B" | "S";
 export type OptionType = "CE" | "PE";
 export type Segment = "options" | "futures" | "cash";
-export type ExpiryRank = "weekly" | "monthly" | "current" | "next";
+/**
+ * Canonical expiry ranks (preferred):
+ *   - current_week  — nearest expiry (weekly or monthly, whichever is rank-1)
+ *   - next_week     — second-nearest expiry
+ *   - current_month — nearest "last-of-calendar-month" expiry
+ *   - next_month    — month after current_month
+ *
+ * Legacy aliases (kept for backwards compatibility with rows created
+ * before the explicit-ranks rollout): weekly ≡ current_week,
+ * monthly ≡ current_month, current ≡ current_month, next ≡ next_month.
+ * Backend resolves both old and new names; new strategies use the
+ * canonical four.
+ */
+export type ExpiryRank =
+  | "current_week"
+  | "next_week"
+  | "current_month"
+  | "next_month"
+  | "weekly"
+  | "monthly"
+  | "current"
+  | "next";
 export type StrikeMode = "atm" | "strike";
 export type Weekday = "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT" | "SUN";
 
@@ -216,14 +237,31 @@ export const UNIVERSE_TAB_HINT: Record<UniverseTab, string> = {
 };
 
 /**
- * What expiry options are valid per tab. The backend leg validator is the
- * authority — this is just for the dropdown UX.
+ * What expiry ranks the wizard offers per tab. Backend validator is the
+ * authority and rejects mismatches (e.g. weekly on MCX).
+ *
+ * Index tabs (NIFTY / SENSEX) get the full four since they have both
+ * weekly + monthly contracts. Stock F&O is monthly-only; so is MCX.
  */
 export const TAB_EXPIRIES: Record<UniverseTab, ExpiryRank[]> = {
-  weekly_monthly: ["weekly", "monthly"],
-  monthly_only: ["monthly"],
-  stocks_fno: ["monthly"],
-  mcx: ["current", "next"],
+  weekly_monthly: ["current_week", "next_week", "current_month", "next_month"],
+  monthly_only: ["current_month", "next_month"],
+  stocks_fno: ["current_month", "next_month"],
+  mcx: ["current_month", "next_month"],
+};
+
+/** Human-readable labels for the expiry-rank dropdown. */
+export const EXPIRY_RANK_LABELS: Record<ExpiryRank, string> = {
+  current_week: "Current Week",
+  next_week: "Next Week",
+  current_month: "Current Month",
+  next_month: "Next Month",
+  // Legacy aliases — kept so existing strategies render sensibly in the
+  // edit form while they migrate to the canonical names on next save.
+  weekly: "Current Week (legacy)",
+  monthly: "Current Month (legacy)",
+  current: "Current Month (legacy)",
+  next: "Next Month (legacy)",
 };
 
 /** What segments are allowed per tab. */
@@ -316,11 +354,17 @@ export const LEG_SIDE_LABELS: Record<LegSide, string> = {
   both: "Both",
 };
 
-/** Universe tabs allowed when the strategy is signal-mode. Options-only
- *  tabs are excluded because signal mode doesn't support option spreads
- *  in v1 (backend Pydantic validator also rejects options legs for
- *  signal-mode strategies - see slice 2). */
-export const SIGNAL_MODE_ALLOWED_TABS: UniverseTab[] = ["stocks_fno", "mcx"];
+/** Universe tabs allowed when the strategy is signal-mode. All four tabs
+ *  are supported: index-options (weekly_monthly, monthly_only), stock
+ *  cash/futures/options (stocks_fno), and MCX futures/options. The
+ *  engine resolves each leg's contract from (symbol, expiry rank,
+ *  option fields) at signal time so the leg config stays roll-stable. */
+export const SIGNAL_MODE_ALLOWED_TABS: UniverseTab[] = [
+  "weekly_monthly",
+  "monthly_only",
+  "stocks_fno",
+  "mcx",
+];
 
 /** Default product per (strategy_type, segment) for signal-mode legs.
  *  Wizard auto-picks unless the user overrides. */
@@ -331,6 +375,59 @@ export function defaultProductForSignal(
   if (segment === "cash") {
     return strategyType === "intraday" ? "MIS" : "CNC";
   }
-  // futures: MIS for intraday, NRML for positional
+  // futures/options: MIS for intraday, NRML for positional
   return strategyType === "intraday" ? "MIS" : "NRML";
 }
+
+// ---------------------------------------------------------------------------
+// Tab / segment -> Product rules (slice 11)
+// ---------------------------------------------------------------------------
+//
+// Exchange-side product rules:
+//   - Cash equity (NSE/BSE)        -> MIS or CNC      (default MIS)
+//   - Derivatives (NFO/BFO/MCX)    -> NRML or MIS     (default NRML)
+//
+// The strategy-level product applies to every leg, so for a strategy
+// that mixes cash + derivatives (only possible on stocks_fno) we
+// restrict to MIS (the only product valid in both contexts).
+// ---------------------------------------------------------------------------
+
+/** Products valid for the given mix of segments across legs. */
+export function allowedProductsForLegs(legs: Leg[]): Product[] {
+  const segs = new Set(legs.map((l) => l.segment));
+  const hasCash = segs.has("cash");
+  const hasDeriv = segs.has("futures") || segs.has("options");
+  if (hasCash && hasDeriv) return ["MIS"];
+  if (hasCash) return ["MIS", "CNC"];
+  return ["NRML", "MIS"];
+}
+
+/** Default product for a strategy given its leg composition. Cash-only
+ *  defaults to MIS; derivatives default to NRML. */
+export function defaultProductForLegs(legs: Leg[]): Product {
+  const allowed = allowedProductsForLegs(legs);
+  return allowed[0];
+}
+
+// ---------------------------------------------------------------------------
+// Tab -> Intraday default windows (slice 11)
+// ---------------------------------------------------------------------------
+//
+// NSE/BSE cash + F&O trade 09:15-15:30 IST. Operator-friendly intraday
+// window is 09:35-15:15 (skip opening volatility, exit before MIS auto-
+// squareoff at 15:20 from most brokers).
+//
+// MCX commodities trade 09:00-23:30 (winter) / 23:55 (summer). Default
+// intraday window is 09:00-23:25 so positions auto-square comfortably
+// before the session close.
+// ---------------------------------------------------------------------------
+
+export const TAB_INTRADAY_DEFAULTS: Record<
+  UniverseTab,
+  { entry: string; exit: string }
+> = {
+  weekly_monthly: { entry: "09:35", exit: "15:15" },
+  monthly_only: { entry: "09:35", exit: "15:15" },
+  stocks_fno: { entry: "09:35", exit: "15:15" },
+  mcx: { entry: "09:00", exit: "23:25" },
+};

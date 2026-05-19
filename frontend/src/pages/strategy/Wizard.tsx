@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
@@ -30,6 +30,7 @@ import {
 } from "@/api/strategy_module";
 import {
   ATM_OFFSETS,
+  EXPIRY_RANK_LABELS,
   LEG_SIDE_LABELS,
   SIGNAL_MODE_ALLOWED_TABS,
   STRATEGY_DIRECTION_LABELS,
@@ -37,9 +38,12 @@ import {
   STRATEGY_KIND_LABELS,
   TAB_DEFAULT_UNDERLYINGS,
   TAB_EXPIRIES,
+  TAB_INTRADAY_DEFAULTS,
   TAB_SEGMENTS,
   UNIVERSE_TAB_HINT,
   UNIVERSE_TAB_LABELS,
+  allowedProductsForLegs,
+  defaultProductForLegs,
   defaultProductForSignal,
   type ExpiryRank,
   type Leg,
@@ -65,7 +69,7 @@ const TABS: UniverseTab[] = [
 ];
 
 function freshLeg(id: number, tab: UniverseTab): Leg {
-  const allowedExpiries = TAB_EXPIRIES[tab];
+  const allowedExpiries = expiriesFor(tab, "options");
   return {
     id,
     segment: "options",
@@ -83,22 +87,33 @@ function freshLeg(id: number, tab: UniverseTab): Leg {
   };
 }
 
-/** Signal-mode leg starts cash + long with qty=1. The user picks segment,
- *  side, and qty from there. Distinct from freshLeg so signal-mode legs
- *  never carry option_type / strike_mode etc. (backend Pydantic rejects
- *  those on signal-mode legs per slice 2). */
+/** Signal-mode leg defaults: cash for stocks (NSE), futures for MCX,
+ *  options for index tabs (weekly_monthly / monthly_only — no spot
+ *  trading on indices). The user can switch segment per-leg afterwards.
+ *  Options legs ride the same option_type / strike_mode / atm_offset /
+ *  strike_value pipeline as batch-mode; the engine resolves the actual
+ *  contract at signal time from (leg.symbol, expiry rank, option fields). */
 function freshSignalLeg(id: number, tab: UniverseTab): Leg {
-  const segment: Segment = tab === "mcx" ? "futures" : "cash";
-  const expiry: ExpiryRank | null = segment === "futures" ? "current" : null;
+  const allowedSegs = TAB_SEGMENTS[tab];
+  const segment: Segment =
+    tab === "mcx"
+      ? "futures"
+      : tab === "weekly_monthly" || tab === "monthly_only"
+        ? "options"
+        : allowedSegs.includes("cash")
+          ? "cash"
+          : allowedSegs[0];
+  const expiry: ExpiryRank | null =
+    segment === "cash" ? null : expiriesFor(tab, segment)[0] ?? "current_month";
   return {
     id,
     segment,
     expiry,
     lots: 1,
     position: "B",
-    option_type: null,
-    strike_mode: null,
-    atm_offset: null,
+    option_type: segment === "options" ? "CE" : null,
+    strike_mode: segment === "options" ? "atm" : null,
+    atm_offset: segment === "options" ? "ATM" : null,
     strike_value: null,
     symbol: "",
     exchange: "",
@@ -123,6 +138,22 @@ interface LegCardProps {
   removable: boolean;
 }
 
+/**
+ * Expiry-rank choices for a leg given (tab, segment).
+ *
+ * - Futures contracts are monthly-only on every Indian exchange — even
+ *   NIFTY/SENSEX have monthly FUT only (weekly contracts exist on the
+ *   options side, not the futures side). So segment=futures always gets
+ *   the two monthly ranks regardless of tab.
+ * - Options on weekly_monthly tabs (NIFTY, SENSEX) get the full four
+ *   ranks. Stock F&O and MCX are monthly-only.
+ */
+function expiriesFor(tab: UniverseTab, segment: Segment): ExpiryRank[] {
+  if (segment === "cash") return [];
+  if (segment === "futures") return ["current_month", "next_month"];
+  return TAB_EXPIRIES[tab];
+}
+
 function LegCard({
   leg,
   tab,
@@ -135,7 +166,7 @@ function LegCard({
   removable,
 }: LegCardProps) {
   const segments = TAB_SEGMENTS[tab];
-  const expiries = TAB_EXPIRIES[tab];
+  const expiries = expiriesFor(tab, leg.segment);
 
   const update = <K extends keyof Leg>(key: K, value: Leg[K]) => {
     onChange({ ...leg, [key]: value });
@@ -194,7 +225,7 @@ function LegCard({
             >
               {expiries.map((e) => (
                 <option key={e} value={e}>
-                  {e}
+                  {EXPIRY_RANK_LABELS[e]}
                 </option>
               ))}
             </select>
@@ -418,7 +449,12 @@ function SignalLegCard({
   onRemove,
   removable,
 }: SignalLegCardProps) {
-  const segments: Segment[] = tab === "mcx" ? ["futures"] : ["cash", "futures"];
+  // Same set of segments per tab as batch mode — drives whether the
+  // user can pick options/futures/cash. The engine resolves the actual
+  // FUT/option contract from (leg.symbol, expiry rank, option fields)
+  // at signal time, so all three segments work in signal mode.
+  const segments: Segment[] = TAB_SEGMENTS[tab];
+  const expiryChoices: ExpiryRank[] = expiriesFor(tab, leg.segment);
 
   const update = <K extends keyof Leg>(key: K, value: Leg[K]) => {
     onChange({ ...leg, [key]: value });
@@ -492,7 +528,23 @@ function SignalLegCard({
                 onChange({
                   ...leg,
                   segment: seg,
-                  expiry: seg === "futures" ? "current" : null,
+                  // Expiry: cash has none; futures/options use the
+                  // first rank allowed by the parent tab.
+                  expiry:
+                    seg === "cash" ? null : expiryChoices[0] ?? "current",
+                  // Options-only fields: seed when entering options,
+                  // null out otherwise (Pydantic strict mode rejects
+                  // strays).
+                  option_type: seg === "options" ? leg.option_type ?? "CE" : null,
+                  strike_mode: seg === "options" ? leg.strike_mode ?? "atm" : null,
+                  atm_offset:
+                    seg === "options" && (leg.strike_mode ?? "atm") === "atm"
+                      ? leg.atm_offset ?? "ATM"
+                      : null,
+                  strike_value:
+                    seg === "options" && leg.strike_mode === "strike"
+                      ? leg.strike_value ?? null
+                      : null,
                 });
               }}
               className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
@@ -505,17 +557,17 @@ function SignalLegCard({
             </select>
           </div>
 
-          {leg.segment === "futures" && (
+          {leg.segment !== "cash" && (
             <div className="space-y-1.5">
               <Label className="text-xs uppercase">Expiry</Label>
               <select
-                value={leg.expiry ?? "current"}
+                value={leg.expiry ?? expiryChoices[0] ?? "current_month"}
                 onChange={(e) => update("expiry", e.target.value as ExpiryRank)}
                 className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
               >
-                {(["current", "next"] as ExpiryRank[]).map((e) => (
+                {expiryChoices.map((e) => (
                   <option key={e} value={e}>
-                    {e}
+                    {EXPIRY_RANK_LABELS[e]}
                   </option>
                 ))}
               </select>
@@ -551,6 +603,98 @@ function SignalLegCard({
             />
           </div>
         </div>
+
+        {leg.segment === "options" && (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="space-y-1.5">
+              <Label className="text-xs uppercase">Option Type</Label>
+              <div className="flex h-9 overflow-hidden rounded-md border border-input">
+                {(["CE", "PE"] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => update("option_type", t)}
+                    className={cn(
+                      "flex-1 text-sm font-medium transition-colors",
+                      leg.option_type === t
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-background hover:bg-muted",
+                    )}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs uppercase">Strike mode</Label>
+              <div className="flex h-9 overflow-hidden rounded-md border border-input">
+                {(["atm", "strike"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => {
+                      onChange({
+                        ...leg,
+                        strike_mode: m,
+                        atm_offset: m === "atm" ? leg.atm_offset ?? "ATM" : null,
+                        strike_value:
+                          m === "strike" ? leg.strike_value ?? null : null,
+                      });
+                    }}
+                    className={cn(
+                      "flex-1 text-sm font-medium transition-colors",
+                      leg.strike_mode === m
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-background hover:bg-muted",
+                    )}
+                  >
+                    {m === "atm" ? "ATM-relative" : "Direct strike"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {leg.strike_mode === "atm" ? (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">Strike offset</Label>
+                <select
+                  value={leg.atm_offset ?? "ATM"}
+                  onChange={(e) => update("atm_offset", e.target.value)}
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                >
+                  {ATM_OFFSETS.map((o) => (
+                    <option key={o} value={o}>
+                      {o}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">Strike value</Label>
+                <Input
+                  type="number"
+                  step={0.01}
+                  value={leg.strike_value ?? ""}
+                  placeholder="e.g. 25000"
+                  onChange={(e) =>
+                    update(
+                      "strike_value",
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="h-9 font-mono"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Engine looks up this strike on {leg.symbol || "<symbol>"}{" "}
+                  {leg.expiry} {leg.option_type} at signal time.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         <p className="text-xs text-muted-foreground">
           Product for this leg:{" "}
@@ -701,13 +845,22 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
   const [strategyType, setStrategyType] = useState<StrategyType>(
     editing?.strategy_type ?? "intraday",
   );
+  const _initialTab: UniverseTab =
+    editing?.universe_tab ?? (isSignal ? "stocks_fno" : "weekly_monthly");
   const [entryTime, setEntryTime] = useState(
-    editing?.entry_time ?? "09:35",
+    editing?.entry_time ?? TAB_INTRADAY_DEFAULTS[_initialTab].entry,
   );
   const [exitTime, setExitTime] = useState(
-    editing?.exit_time ?? "15:15",
+    editing?.exit_time ?? TAB_INTRADAY_DEFAULTS[_initialTab].exit,
   );
-  const [product, setProduct] = useState<Product>(editing?.product ?? "NRML");
+  const [product, setProduct] = useState<Product>(
+    editing?.product ??
+      defaultProductForLegs(
+        editing?.legs ?? [
+          isSignal ? freshSignalLeg(1, _initialTab) : freshLeg(1, _initialTab),
+        ],
+      ),
+  );
 
   // Underlyings come from the API now (dynamic for stocks_fno and mcx).
   // The hardcoded TAB_DEFAULT_UNDERLYINGS is the seed shown until the
@@ -786,7 +939,15 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
     const seed = TAB_DEFAULT_UNDERLYINGS[next];
     if (seed.length > 0) setUnderlying(seed[0].symbol);
     // Reset legs to one fresh leg with the right shape for the kind+tab.
-    setLegs([isSignal ? freshSignalLeg(1, next) : freshLeg(1, next)]);
+    const seededLegs = [
+      isSignal ? freshSignalLeg(1, next) : freshLeg(1, next),
+    ];
+    setLegs(seededLegs);
+    // Tab-aware intraday window — MCX runs 09:00-23:25, NSE/BSE 09:35-15:15.
+    setEntryTime(TAB_INTRADAY_DEFAULTS[next].entry);
+    setExitTime(TAB_INTRADAY_DEFAULTS[next].exit);
+    // Tab-aware default product — NSE/BSE cash = MIS, derivatives = NRML.
+    setProduct(defaultProductForLegs(seededLegs));
   };
 
   const onKindChange = (next: StrategyKind) => {
@@ -823,6 +984,16 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
     if (legs.length <= 1) return;
     setLegs(legs.filter((_, idx) => idx !== i));
   };
+
+  // Snap `product` back to a valid value whenever the leg composition
+  // changes (e.g. user switched a leg from futures to cash and the old
+  // NRML selection no longer applies).
+  const allowedProducts = useMemo(() => allowedProductsForLegs(legs), [legs]);
+  useEffect(() => {
+    if (!allowedProducts.includes(product)) {
+      setProduct(allowedProducts[0]);
+    }
+  }, [allowedProducts, product]);
 
   // ---- Webhook reveal modal (one-time-view of the token) ----
   const [revealedToken, setRevealedToken] = useState<{
@@ -1189,10 +1360,19 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
                 onChange={(e) => setProduct(e.target.value as Product)}
                 className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
               >
-                <option value="NRML">NRML</option>
-                <option value="MIS">MIS</option>
-                <option value="CNC">CNC</option>
+                {allowedProducts.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
               </select>
+              <p className="text-xs text-muted-foreground">
+                {allowedProducts.length === 1
+                  ? "Mixed cash + derivatives legs: only MIS works for both."
+                  : allowedProducts.includes("CNC")
+                    ? "Cash equity: CNC (delivery) or MIS (intraday)."
+                    : "Derivatives: NRML (carry) or MIS (intraday)."}
+              </p>
             </div>
           </div>
         </CardContent>

@@ -110,6 +110,14 @@ def _find_near_month_futures(base_symbol: str, exchange: str) -> dict | None:
     have a tradable spot (MCX, CDS) — callers pass ``underlying="CRUDEOIL"``
     and we resolve ``CRUDEOIL{DDMMMYY}FUT`` for the soonest expiry that hasn't
     rolled off yet.
+
+    Important — exact base match: MCX has same-prefix variants that are
+    different products (CRUDEOIL vs CRUDEOILM mini, GOLD vs GOLDPETAL 1g
+    vs GOLDM 100g). A plain ``LIKE 'GOLD%FUT'`` would happily return
+    ``GOLDPETAL...FUT`` which has a price an order of magnitude different.
+    We post-filter with a regex requiring a digit immediately after the
+    base (the start of the ``DDMMMYY`` expiry block) so ``GOLD`` matches
+    only ``GOLD{DDMMMYY}FUT`` and never ``GOLDM`` / ``GOLDPETAL``.
     """
     rows = _run_query(
         "SELECT symbol, exchange, expiry FROM symtoken "
@@ -121,6 +129,11 @@ def _find_near_month_futures(base_symbol: str, exchange: str) -> dict | None:
         return None
 
     today = datetime.now().date()
+    # Anchored regex: base + DDMMMYY + FUT exactly. Rejects CRUDEOILM,
+    # GOLDPETAL, GOLDM, etc.
+    exact_pattern = re.compile(
+        rf"^{re.escape(base_symbol.upper())}\d{{2}}[A-Z]{{3}}\d{{2}}FUT$"
+    )
 
     def parse_exp(expiry_str: str):
         try:
@@ -130,6 +143,8 @@ def _find_near_month_futures(base_symbol: str, exchange: str) -> dict | None:
 
     candidates = []
     for sym, exch, exp in rows:
+        if not exact_pattern.match(sym.upper()):
+            continue
         d = parse_exp(exp or "")
         if d is None:
             continue
@@ -140,6 +155,8 @@ def _find_near_month_futures(base_symbol: str, exchange: str) -> dict | None:
         # All FUT contracts have expired — fall back to the latest known one
         # so the chain page still renders something instead of 404'ing.
         for sym, exch, exp in rows:
+            if not exact_pattern.match(sym.upper()):
+                continue
             d = parse_exp(exp or "")
             if d is not None:
                 candidates.append((d, sym, exch))
@@ -231,9 +248,31 @@ def get_option_symbol(
         quote_exchange = _quote_exchange_for(base_symbol, exchange)
         options_exchange = _option_exchange_for(quote_exchange)
 
-        quote_symbol = base_symbol if quote_exchange in ("NSE_INDEX", "BSE_INDEX", "NSE", "BSE") else underlying.upper()
+        # Pick the instrument whose LTP defines ATM. Same three-branch rule
+        # the option chain service uses (option_chain_service.py:96):
+        #   - Indices / equities: quote the base on its spot exchange.
+        #   - Caller passed an explicit FUT (e.g. NIFTY28APR26FUT): use it.
+        #   - Commodities / currencies with no tradable spot (MCX, CDS):
+        #     auto-resolve the near-month FUT as the pricing reference.
+        if quote_exchange in ("NSE_INDEX", "BSE_INDEX", "NSE", "BSE"):
+            quote_symbol, quote_exchange_for_ltp = base_symbol, quote_exchange
+        elif embedded_expiry:
+            quote_symbol, quote_exchange_for_ltp = underlying.upper(), quote_exchange
+        else:
+            fut = _find_near_month_futures(base_symbol, quote_exchange)
+            if not fut:
+                return False, {
+                    "status": "error",
+                    "message": (
+                        f"No FUT contract found for {base_symbol} on {quote_exchange} "
+                        f"to use as ATM-pricing reference. MCX/CDS options are options-"
+                        f"on-futures — ensure the master contract is downloaded."
+                    ),
+                }, 404
+            quote_symbol, quote_exchange_for_ltp = fut["symbol"], fut["exchange"]
+
         ok, quote_data, status_code = get_quotes_with_auth(
-            symbol=quote_symbol, exchange=quote_exchange,
+            symbol=quote_symbol, exchange=quote_exchange_for_ltp,
             auth_token=auth_token, broker=broker, config=config,
         )
         if not ok:

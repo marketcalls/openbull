@@ -979,14 +979,38 @@ async def enter_leg(
 
     # Place the entry order. qty is the absolute share/lot count stored
     # on the signal-mode leg config - lotsize multiplication already
-    # baked in by the wizard for futures legs; raw shares for cash.
+    # baked in by the wizard for futures/options legs; raw shares for cash.
     qty = int(leg_config["qty"])
     if qty <= 0:
         raise EngineError(f"Leg {leg_id}: qty must be > 0 (got {qty!r})")
 
+    # Resolve futures/options to a real contract symbol at signal time.
+    # The leg's `symbol` carries the base (e.g. NIFTY, RELIANCE, CRUDEOIL)
+    # and `expiry` carries the rank (current/next for FUT, weekly/monthly/
+    # current/next for OPT). Cash legs trade the underlying directly.
+    segment = leg_config.get("segment") or "cash"
+    if segment in ("futures", "options"):
+        try:
+            resolved = _resolve_leg(
+                leg_config,
+                underlying=leg_config["symbol"],
+                underlying_exchange=leg_config["exchange"],
+                auth_token=auth_token,
+                broker=broker,
+                config=config,
+                expiry_dates_cache={},
+            )
+        except EngineError as e:
+            raise EngineError(f"Leg {leg_id} resolution failed: {e}") from e
+        order_symbol = resolved["symbol"]
+        order_exchange = resolved["exchange"]
+    else:
+        order_symbol = leg_config["symbol"]
+        order_exchange = leg_config["exchange"]
+
     order_data = {
-        "symbol": leg_config["symbol"],
-        "exchange": leg_config["exchange"],
+        "symbol": order_symbol,
+        "exchange": order_exchange,
         "action": broker_action,
         "quantity": str(qty),
         "pricetype": strategy.pricetype or "MARKET",
@@ -1005,8 +1029,8 @@ async def enter_leg(
         run_id=run.id,
         leg_id=leg_id,
         kind="entry",
-        symbol=leg_config["symbol"],
-        exchange=leg_config["exchange"],
+        symbol=order_symbol,
+        exchange=order_exchange,
         action=broker_action,
         qty=qty,
         pricetype=strategy.pricetype or "MARKET",
@@ -1036,7 +1060,7 @@ async def enter_leg(
         strategy_id=strategy.id,
         run_id=run.id,
         leg_id=leg_id,
-        symbol=leg_config["symbol"],
+        symbol=order_symbol,
         action=broker_action,
         qty=qty,
         broker_order_id=broker_order_id,
@@ -1044,8 +1068,11 @@ async def enter_leg(
     if ok:
         leg_state["current_side"] = requested_side
         leg_state["qty"] = qty
-        leg_state["symbol"] = leg_config["symbol"]
-        leg_state["exchange"] = leg_config["exchange"]
+        # Store the RESOLVED contract so exit_leg_by_signal targets the
+        # same instrument even after expiry rolls (e.g. 'current' moves
+        # to the next contract; the leg-state pins the entered contract).
+        leg_state["symbol"] = order_symbol
+        leg_state["exchange"] = order_exchange
         leg_state["entry_order_id"] = order_row.id
         leg_state["status"] = "open"
         leg_state["exit_order_id"] = None
@@ -1079,7 +1106,7 @@ async def enter_leg(
         try:
             tick_feed.add_run_subscriptions(
                 run.id,
-                [(leg_config["exchange"], leg_config["symbol"])],
+                [(order_exchange, order_symbol)],
             )
         except Exception:
             logger.exception("signal enter_leg: failed to subscribe ticks")

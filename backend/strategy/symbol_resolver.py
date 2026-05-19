@@ -74,6 +74,18 @@ def resolve_expiry_rank(
     The list is the output of :func:`get_expiry_dates` — already filtered to
     non-expired entries and sorted ascending. Returns
     ``(resolved_or_None, all_input_dates)``.
+
+    Canonical ranks (preferred):
+      * ``current_week``  — rank-1 entry (the nearest expiry)
+      * ``next_week``     — rank-2 entry
+      * ``current_month`` — first entry that's the last expiry of its month
+      * ``next_month``    — second entry that's the last expiry of its month
+
+    Legacy aliases (kept so existing DB rows keep working):
+      * ``weekly``  ≡ ``current_week``
+      * ``current`` ≡ ``current_month`` (MCX-tab convention pre-2026-05)
+      * ``next``    ≡ ``next_month``    (MCX-tab convention pre-2026-05)
+      * ``monthly`` ≡ ``current_month``
     """
     if not sorted_dates:
         return None, sorted_dates
@@ -81,20 +93,37 @@ def resolve_expiry_rank(
     parsed = [(_parse_iso_expiry(s), s) for s in sorted_dates]
     parsed_valid = [(d, s) for d, s in parsed if d is not None]
 
-    if rank in ("weekly", "current"):
-        # Rank-1 of whatever is in the list. For an underlying without
-        # weeklies, rank-1 is the next monthly — degrades gracefully.
+    # Weekly ranks: rank-1 / rank-2 of the full list (weekly+monthly mixed).
+    if rank in ("current_week", "weekly"):
         return sorted_dates[0], sorted_dates
 
-    if rank == "next":
-        return (sorted_dates[1] if len(sorted_dates) >= 2 else sorted_dates[0]), sorted_dates
+    if rank == "next_week":
+        return (
+            sorted_dates[1] if len(sorted_dates) >= 2 else sorted_dates[0]
+        ), sorted_dates
 
-    if rank == "monthly":
+    # Monthly ranks: first / second "last-of-calendar-month" entry.
+    if rank in ("current_month", "monthly", "current"):
         all_dates = [d for d, _ in parsed_valid]
         for d, s in parsed_valid:
             if _is_last_of_calendar_month(d, all_dates):
                 return s, sorted_dates
-        # Fallback: if we can't classify, behave like rank-1.
+        # Fallback: no classifiable monthly (shouldn't happen on real data).
+        return sorted_dates[0], sorted_dates
+
+    if rank in ("next_month", "next"):
+        all_dates = [d for d, _ in parsed_valid]
+        monthlies = [
+            s for d, s in parsed_valid if _is_last_of_calendar_month(d, all_dates)
+        ]
+        if len(monthlies) >= 2:
+            return monthlies[1], sorted_dates
+        if len(monthlies) == 1:
+            # Only one monthly known — degrade to rank-2 to give the caller
+            # *something* useable rather than a hard failure.
+            return (
+                sorted_dates[1] if len(sorted_dates) >= 2 else monthlies[0]
+            ), sorted_dates
         return sorted_dates[0], sorted_dates
 
     return None, sorted_dates
