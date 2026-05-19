@@ -337,6 +337,13 @@ export interface StrategyPositionsResponse {
     realized: number;
     unrealized: number;
     total: number;
+    /** Sum of pnl_realized across every previous closed run of this
+     *  strategy (excludes the run currently being viewed). */
+    historical_realized?: number;
+    /** Lifetime cumulative realized = historical_realized + this run's
+     *  in-flight realized. The number the operator looks at when they've
+     *  been running the same strategy for months or years. */
+    cumulative_realized?: number;
   };
 }
 

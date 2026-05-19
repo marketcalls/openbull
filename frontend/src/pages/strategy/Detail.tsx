@@ -849,10 +849,10 @@ function PositionsTab({
         </CardHeader>
         <CardContent>
           {summary && (
-            <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="rounded-md border p-3">
                 <div className="text-xs uppercase text-muted-foreground">
-                  Realized
+                  Realized (this run)
                 </div>
                 <div
                   className={cn(
@@ -878,18 +878,35 @@ function PositionsTab({
                   {formatPnl(summary.unrealized)}
                 </div>
               </div>
-              <div className="rounded-md border-2 p-3">
+              <div className="rounded-md border p-3">
                 <div className="text-xs uppercase text-muted-foreground">
-                  Total
+                  Run total
                 </div>
                 <div
                   className={cn(
-                    "font-mono text-xl font-bold",
+                    "font-mono text-xl",
                     summary.total > 0 && "text-green-600",
                     summary.total < 0 && "text-red-600",
                   )}
                 >
                   {formatPnl(summary.total)}
+                </div>
+              </div>
+              <div className="rounded-md border-2 p-3">
+                <div className="text-xs uppercase text-muted-foreground">
+                  Cumulative realized
+                </div>
+                <div
+                  className={cn(
+                    "font-mono text-xl font-bold",
+                    (summary.cumulative_realized ?? 0) > 0 && "text-green-600",
+                    (summary.cumulative_realized ?? 0) < 0 && "text-red-600",
+                  )}
+                >
+                  {formatPnl(summary.cumulative_realized ?? summary.realized)}
+                </div>
+                <div className="text-[10px] text-muted-foreground">
+                  Lifetime across all runs
                 </div>
               </div>
             </div>

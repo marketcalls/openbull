@@ -399,6 +399,70 @@ async def list_runs(
     return rows
 
 
+async def sum_strategy_realized(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    strategy_id: int,
+    exclude_run_id: Optional[int] = None,
+) -> float:
+    """Sum ``SmStrategyRun.pnl_realized`` across all runs of a strategy.
+
+    Used by the positions endpoint to compute lifetime cumulative realized
+    P&L. ``exclude_run_id`` lets callers leave the currently-running run
+    out so they can add its in-flight order-derived realized separately —
+    ``run.pnl_realized`` only gets written by :func:`finalize_run` on stop,
+    so the live row's DB value is stale until the run is closed.
+
+    Filters by ``user_id`` (same tenancy guarantee as every other reader
+    in this module). Returns 0.0 when the strategy has never run.
+    """
+    from sqlalchemy import func
+    stmt = (
+        select(func.coalesce(func.sum(SmStrategyRun.pnl_realized), 0))
+        .join(SmStrategy, SmStrategyRun.strategy_id == SmStrategy.id)
+        .where(
+            SmStrategy.id == strategy_id,
+            SmStrategy.user_id == user_id,
+        )
+    )
+    if exclude_run_id is not None:
+        stmt = stmt.where(SmStrategyRun.id != exclude_run_id)
+    return float((await db.execute(stmt)).scalar() or 0)
+
+
+async def sum_realized_per_strategy(
+    db: AsyncSession, *, user_id: int, strategy_ids: Sequence[int],
+) -> dict[int, float]:
+    """Batched per-strategy ``SUM(pnl_realized)`` for the list page.
+
+    Returns ``{strategy_id: cumulative_realized}`` for every strategy_id
+    in the input list (zero-filled when no runs exist). Single query,
+    grouped — avoids the N+1 you'd get from calling
+    :func:`sum_strategy_realized` per row.
+    """
+    if not strategy_ids:
+        return {}
+    from sqlalchemy import func
+    rows = (
+        await db.execute(
+            select(
+                SmStrategyRun.strategy_id,
+                func.coalesce(func.sum(SmStrategyRun.pnl_realized), 0),
+            )
+            .join(SmStrategy, SmStrategyRun.strategy_id == SmStrategy.id)
+            .where(
+                SmStrategy.user_id == user_id,
+                SmStrategyRun.strategy_id.in_(list(strategy_ids)),
+            )
+            .group_by(SmStrategyRun.strategy_id)
+        )
+    ).all()
+    by_strategy = {sid: float(total or 0) for sid, total in rows}
+    # Zero-fill so every strategy_id has an entry even with no runs.
+    return {sid: by_strategy.get(sid, 0.0) for sid in strategy_ids}
+
+
 async def record_order(
     db: AsyncSession,
     *,

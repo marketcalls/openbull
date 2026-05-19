@@ -98,7 +98,9 @@ def _strategy_out(row: SmStrategy, *, webhook_url: str) -> StrategyOut:
     )
 
 
-def _strategy_list_item(row: SmStrategy) -> StrategyListItem:
+def _strategy_list_item(
+    row: SmStrategy, *, cumulative_realized: float = 0.0,
+) -> StrategyListItem:
     return StrategyListItem(
         id=row.id,
         name=row.name,
@@ -110,11 +112,14 @@ def _strategy_list_item(row: SmStrategy) -> StrategyListItem:
         status=row.status,
         live_enabled=row.live_enabled,
         webhook_locked=bool(getattr(row, "webhook_locked", False)),
-        # Phase 1 has no engine yet — P&L surfaces zero. Phase 6 wires live
-        # values via Redis state lookup.
-        pnl_realized=0.0,
+        # pnl_realized is lifetime cumulative across every run of this
+        # strategy (sum of SmStrategyRun.pnl_realized). Live unrealized
+        # for the running run is still Phase-6 work; pnl_unrealized stays
+        # at 0 in the list view and is surfaced on the detail page's
+        # Positions tab via the WS feed / quote fallback.
+        pnl_realized=round(cumulative_realized, 2),
         pnl_unrealized=0.0,
-        pnl_total=0.0,
+        pnl_total=round(cumulative_realized, 2),
         created_at=format_ist(row.created_at),
         updated_at=format_ist(row.updated_at),
     )
@@ -135,9 +140,20 @@ async def list_strategies(
     rows = await repo.list_strategies(
         db, user_id=user.id, status=status, universe_tab=universe_tab
     )
+    # Batched lifetime realized so the list page shows cumulative P&L
+    # across every run of each strategy — important for positional
+    # strategies that the operator runs for months/years.
+    realized_by_id = await repo.sum_realized_per_strategy(
+        db, user_id=user.id, strategy_ids=[r.id for r in rows],
+    )
     return {
         "status": "success",
-        "strategies": [_strategy_list_item(r).model_dump() for r in rows],
+        "strategies": [
+            _strategy_list_item(
+                r, cumulative_realized=realized_by_id.get(r.id, 0.0),
+            ).model_dump()
+            for r in rows
+        ],
     }
 
 
@@ -866,6 +882,20 @@ async def get_strategy_positions(
     # Strategy-level totals as a convenience.
     tot_realized = sum(p["realized_pnl"] for p in positions)
     tot_unrealized = sum(p["unrealized_pnl"] for p in positions)
+
+    # Lifetime cumulative realized = sum of every previous run's finalized
+    # pnl_realized + the currently-viewed run's in-flight realized. The
+    # exclude_run_id keeps us from double-counting the viewed run
+    # (its DB row's pnl_realized is either zero (still running) or
+    # already reflected by tot_realized for a closed run we'd otherwise
+    # re-derive). This is what makes "I ran this strategy for two years"
+    # show a meaningful number even though each individual run resets.
+    historical_realized = await repo.sum_strategy_realized(
+        db, user_id=user.id, strategy_id=strategy_id,
+        exclude_run_id=resolved_run_id,
+    )
+    cumulative_realized = historical_realized + tot_realized
+
     return {
         "status": "success",
         "run_id": resolved_run_id,
@@ -874,6 +904,8 @@ async def get_strategy_positions(
             "realized": round(tot_realized, 2),
             "unrealized": round(tot_unrealized, 2),
             "total": round(tot_realized + tot_unrealized, 2),
+            "historical_realized": round(historical_realized, 2),
+            "cumulative_realized": round(cumulative_realized, 2),
         },
     }
 
