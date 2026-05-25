@@ -827,12 +827,73 @@ function PositionsTab({
   summary,
   runId,
   loading,
+  liveLegs,
 }: {
   positions: StrategyPosition[];
-  summary?: { realized: number; unrealized: number; total: number };
+  summary?: {
+    realized: number;
+    unrealized: number;
+    total: number;
+    historical_realized?: number;
+    cumulative_realized?: number;
+  };
   runId: number | null;
   loading: boolean;
+  /** Live leg state from the WS delta stream. When present, the per-position
+   *  LTP / unrealized cells are overlaid with tick-rate values; the REST
+   *  snapshot stays as the floor when ticks haven't yet arrived for a
+   *  symbol (e.g. broker WS hasn't subscribed it yet). */
+  liveLegs?: Array<Record<string, unknown>>;
 }) {
+  // Build a (SYMBOL, EXCHANGE) -> live leg map so the per-row render can
+  // overlay live LTP/MTM without an O(N*M) lookup. Symbol+exchange match
+  // is the natural key because a strategy can have multiple legs on the
+  // same contract (e.g. two CE strikes at different offsets).
+  const liveBySymbol = new Map<string, Record<string, unknown>>();
+  for (const leg of liveLegs ?? []) {
+    const sym = String(leg.symbol ?? "").toUpperCase();
+    const exch = String(leg.exchange ?? "").toUpperCase();
+    if (sym && exch) liveBySymbol.set(`${sym}|${exch}`, leg);
+  }
+
+  // Overlay live ltp / unrealized onto each REST position row. Falls back
+  // to whatever the REST endpoint returned when no tick has arrived yet.
+  const liveTotals = { realized: 0, unrealized: 0 };
+  const merged = positions.map((p) => {
+    const live = liveBySymbol.get(
+      `${p.symbol.toUpperCase()}|${p.exchange.toUpperCase()}`,
+    );
+    const liveLtp =
+      live && typeof live.ltp === "number" && Number.isFinite(live.ltp)
+        ? (live.ltp as number)
+        : null;
+    const ltp = liveLtp ?? p.ltp;
+    // Recompute unrealized off the live LTP rather than trust live.mtm —
+    // mtm is a per-leg figure; positions can aggregate multiple legs into
+    // one row, so we derive from the position's own qty + avg_entry.
+    let unrealized = p.unrealized_pnl;
+    if (ltp != null && p.net_qty !== 0) {
+      const sign = p.net_qty > 0 ? 1 : -1;
+      unrealized = (ltp - p.avg_entry_price) * Math.abs(p.net_qty) * sign;
+    }
+    liveTotals.realized += p.realized_pnl;
+    liveTotals.unrealized += unrealized;
+    return { ...p, ltp, unrealized_pnl: unrealized };
+  });
+
+  // Prefer live totals when WS deltas have started flowing; else fall
+  // back to REST summary so the user sees something on first paint.
+  const effectiveSummary = summary
+    ? liveLegs && liveLegs.length > 0
+      ? {
+          ...summary,
+          realized: liveTotals.realized,
+          unrealized: liveTotals.unrealized,
+          total: liveTotals.realized + liveTotals.unrealized,
+        }
+      : summary
+    : undefined;
+
   return (
     <div className="space-y-4">
       <Card>
@@ -848,7 +909,7 @@ function PositionsTab({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {summary && (
+          {effectiveSummary && (
             <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="rounded-md border p-3">
                 <div className="text-xs uppercase text-muted-foreground">
@@ -857,11 +918,11 @@ function PositionsTab({
                 <div
                   className={cn(
                     "font-mono text-xl",
-                    summary.realized > 0 && "text-green-600",
-                    summary.realized < 0 && "text-red-600",
+                    effectiveSummary.realized > 0 && "text-green-600",
+                    effectiveSummary.realized < 0 && "text-red-600",
                   )}
                 >
-                  {formatPnl(summary.realized)}
+                  {formatPnl(effectiveSummary.realized)}
                 </div>
               </div>
               <div className="rounded-md border p-3">
@@ -871,11 +932,11 @@ function PositionsTab({
                 <div
                   className={cn(
                     "font-mono text-xl",
-                    summary.unrealized > 0 && "text-green-600",
-                    summary.unrealized < 0 && "text-red-600",
+                    effectiveSummary.unrealized > 0 && "text-green-600",
+                    effectiveSummary.unrealized < 0 && "text-red-600",
                   )}
                 >
-                  {formatPnl(summary.unrealized)}
+                  {formatPnl(effectiveSummary.unrealized)}
                 </div>
               </div>
               <div className="rounded-md border p-3">
@@ -885,11 +946,11 @@ function PositionsTab({
                 <div
                   className={cn(
                     "font-mono text-xl",
-                    summary.total > 0 && "text-green-600",
-                    summary.total < 0 && "text-red-600",
+                    effectiveSummary.total > 0 && "text-green-600",
+                    effectiveSummary.total < 0 && "text-red-600",
                   )}
                 >
-                  {formatPnl(summary.total)}
+                  {formatPnl(effectiveSummary.total)}
                 </div>
               </div>
               <div className="rounded-md border-2 p-3">
@@ -899,11 +960,11 @@ function PositionsTab({
                 <div
                   className={cn(
                     "font-mono text-xl font-bold",
-                    (summary.cumulative_realized ?? 0) > 0 && "text-green-600",
-                    (summary.cumulative_realized ?? 0) < 0 && "text-red-600",
+                    (effectiveSummary.cumulative_realized ?? 0) > 0 && "text-green-600",
+                    (effectiveSummary.cumulative_realized ?? 0) < 0 && "text-red-600",
                   )}
                 >
-                  {formatPnl(summary.cumulative_realized ?? summary.realized)}
+                  {formatPnl(effectiveSummary.cumulative_realized ?? effectiveSummary.realized)}
                 </div>
                 <div className="text-[10px] text-muted-foreground">
                   Lifetime across all runs
@@ -915,7 +976,7 @@ function PositionsTab({
             <p className="py-6 text-center text-sm text-muted-foreground">
               Loading…
             </p>
-          ) : positions.length === 0 ? (
+          ) : merged.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               No positions for the current run.
             </p>
@@ -936,7 +997,7 @@ function PositionsTab({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {positions.map((p) => (
+                  {merged.map((p) => (
                     <TableRow key={`${p.symbol}-${p.exchange}-${p.product}`}>
                       <TableCell className="font-mono font-medium">
                         {p.symbol}
@@ -1352,19 +1413,27 @@ export default function StrategyDetail() {
   const [enableLiveDialogOpen, setEnableLiveDialogOpen] = useState(false);
   const [liveModePassword, setLiveModePassword] = useState("");
 
+  // ---- Data refresh strategy ----
+  // All five queries below used to poll every 5–10s while the strategy
+  // was running. They now refresh via the WS hook: the backend pushes
+  // order_update / strategy_update / run_update frames at each write
+  // point (engine.record_order, reconcile_order_fill, repo.start_run /
+  // finalize_run), and useStrategyWebSocket hydrates the React Query
+  // cache directly. We keep a slow 60s "safety" refetch as a backstop
+  // for missed frames (network blip, queue overflow, server restart).
+  const SAFETY_REFETCH_MS = 60_000;
+
   const strategyQuery = useQuery({
     queryKey: ["strategy", numId],
     queryFn: () => getStrategy(numId),
     enabled: Number.isFinite(numId) && numId > 0,
     refetchInterval: (q) => {
-      // Light REST poll for status/current_run_id transitions; live legs/MTM
-      // arrive via the WebSocket (Phase 6).
       const d = q.state.data;
-      return d && d.status === "running" ? 10_000 : false;
+      return d && d.status === "running" ? SAFETY_REFETCH_MS : false;
     },
   });
 
-  // Phase 6 WebSocket connection — only while running, to keep idle pages quiet.
+  // WebSocket connection — only while running, to keep idle pages quiet.
   const wsEnabled =
     Number.isFinite(numId) && numId > 0 &&
     strategyQuery.data?.status === "running";
@@ -1379,7 +1448,7 @@ export default function StrategyDetail() {
     queryFn: () => listOrders(numId),
     enabled: Number.isFinite(numId) && numId > 0,
     refetchInterval: (q) =>
-      strategyQuery.data?.status === "running" ? 5_000 : false,
+      strategyQuery.data?.status === "running" ? SAFETY_REFETCH_MS : false,
   });
 
   const runsQuery = useQuery({
@@ -1393,7 +1462,7 @@ export default function StrategyDetail() {
     queryFn: () => listEvents(numId, undefined, 200),
     enabled: Number.isFinite(numId) && numId > 0,
     refetchInterval: (q) =>
-      strategyQuery.data?.status === "running" ? 5_000 : false,
+      strategyQuery.data?.status === "running" ? SAFETY_REFETCH_MS : false,
   });
 
   const positionsQuery = useQuery({
@@ -1401,7 +1470,7 @@ export default function StrategyDetail() {
     queryFn: () => listPositions(numId),
     enabled: Number.isFinite(numId) && numId > 0,
     refetchInterval: (q) =>
-      strategyQuery.data?.status === "running" ? 5_000 : false,
+      strategyQuery.data?.status === "running" ? SAFETY_REFETCH_MS : false,
   });
 
   const tradesQuery = useQuery({
@@ -1409,7 +1478,7 @@ export default function StrategyDetail() {
     queryFn: () => listTrades(numId),
     enabled: Number.isFinite(numId) && numId > 0,
     refetchInterval: (q) =>
-      strategyQuery.data?.status === "running" ? 5_000 : false,
+      strategyQuery.data?.status === "running" ? SAFETY_REFETCH_MS : false,
   });
 
   const invalidateAll = () => {
@@ -1766,6 +1835,7 @@ export default function StrategyDetail() {
             summary={positionsQuery.data?.summary}
             runId={positionsQuery.data?.run_id ?? null}
             loading={positionsQuery.isLoading}
+            liveLegs={liveState?.legs}
           />
         </TabsContent>
         <TabsContent value="orders" className="mt-4">

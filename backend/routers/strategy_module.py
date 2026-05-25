@@ -1067,6 +1067,14 @@ async def enable_live_mode(
         message=f"Live mode enabled on '{strategy.name}'",
         payload={"action": "enable"},
     ))
+    try:
+        from backend.strategy import broadcast as _bc
+        if _bc.has_subscribers(strategy.id):
+            _bc.push_strategy_update(strategy.id, {
+                "id": strategy.id, "live_enabled": True,
+            })
+    except Exception:
+        logger.warning("enable_live: WS push failed", exc_info=True)
     logger.info(
         "user=%d enabled LIVE mode on strategy=%d (%s)",
         user.id, strategy_id, strategy.name,
@@ -1111,6 +1119,14 @@ async def disable_live_mode(
         message=f"Live mode disabled on '{strategy.name}'",
         payload={"action": "disable"},
     ))
+    try:
+        from backend.strategy import broadcast as _bc
+        if _bc.has_subscribers(strategy.id):
+            _bc.push_strategy_update(strategy.id, {
+                "id": strategy.id, "live_enabled": False,
+            })
+    except Exception:
+        logger.warning("disable_live: WS push failed", exc_info=True)
     logger.info(
         "user=%d disabled live mode on strategy=%d", user.id, strategy_id,
     )

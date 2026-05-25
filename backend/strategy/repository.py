@@ -325,7 +325,70 @@ async def start_run(
         message=f"Run started in {mode} mode (trigger: {trigger_source})",
         payload={"mode": mode, "broker": broker, "trigger_source": trigger_source},
     ))
+    # WS: tell the client the strategy is now running + the run row exists.
+    try:
+        from backend.strategy import broadcast
+        if broadcast.has_subscribers(strategy.id):
+            broadcast.push_strategy_update(strategy.id, {
+                "id": strategy.id,
+                "status": "running",
+                "current_run_id": run.id,
+            })
+            broadcast.push_run_update(strategy.id, broadcast.format_run_row(run))
+    except Exception:
+        logger.warning("start_run: WS push failed", exc_info=True)
     return run
+
+
+async def _compute_run_realized_from_orders(
+    db: AsyncSession, *, run_id: int,
+) -> float:
+    """Source-of-truth realized P&L from the filled order book of a run.
+
+    For each (symbol, exchange) pair, the closed portion is
+    ``min(buy_qty, sell_qty)`` units; realized = (avg_sell - avg_buy) * matched.
+    Works for pure-long, pure-short, and round-trips.
+
+    Used by :func:`finalize_run` when the caller doesn't pass an explicit
+    ``pnl_realized``. Order book is the canonical source — Redis state can
+    be lost (recovery, restart) but persisted orders cannot.
+    """
+    rows = (
+        await db.execute(
+            select(SmStrategyOrder.symbol, SmStrategyOrder.exchange,
+                   SmStrategyOrder.action, SmStrategyOrder.filled_qty,
+                   SmStrategyOrder.qty, SmStrategyOrder.avg_fill_price,
+                   SmStrategyOrder.status)
+            .where(SmStrategyOrder.run_id == run_id)
+        )
+    ).all()
+    aggs: dict[tuple[str, str], dict[str, float]] = {}
+    for symbol, exchange, action, filled_qty, qty, avg_fill_price, status in rows:
+        if (status or "").lower() != "complete":
+            continue
+        fq = int(filled_qty or qty or 0)
+        price = float(avg_fill_price or 0)
+        if fq <= 0 or price <= 0:
+            continue
+        a = aggs.setdefault((symbol, exchange), {
+            "buy_qty": 0, "buy_value": 0.0,
+            "sell_qty": 0, "sell_value": 0.0,
+        })
+        if (action or "").upper() == "BUY":
+            a["buy_qty"] += fq
+            a["buy_value"] += fq * price
+        else:
+            a["sell_qty"] += fq
+            a["sell_value"] += fq * price
+    realized_total = 0.0
+    for a in aggs.values():
+        if a["buy_qty"] <= 0 or a["sell_qty"] <= 0:
+            continue
+        avg_buy = a["buy_value"] / a["buy_qty"]
+        avg_sell = a["sell_value"] / a["sell_qty"]
+        matched = min(a["buy_qty"], a["sell_qty"])
+        realized_total += (avg_sell - avg_buy) * matched
+    return realized_total
 
 
 async def finalize_run(
@@ -334,11 +397,28 @@ async def finalize_run(
     run: SmStrategyRun,
     strategy: SmStrategy,
     stop_reason: str,
-    pnl_realized: float = 0.0,
+    pnl_realized: Optional[float] = None,
     pnl_peak: float = 0.0,
     pnl_trough: float = 0.0,
 ) -> SmStrategyRun:
-    """Close the run, flip the strategy back to 'stopped'."""
+    """Close the run, flip the strategy back to 'stopped'.
+
+    ``pnl_realized=None`` (the default — engine call sites use it) triggers
+    a compute-from-order-book. This is what makes lifetime cumulative work:
+    without it, every finalize wrote 0 and ``SUM(pnl_realized)`` across runs
+    was structurally always zero.
+    """
+    if pnl_realized is None:
+        try:
+            pnl_realized = await _compute_run_realized_from_orders(
+                db, run_id=run.id,
+            )
+        except Exception:
+            logger.exception(
+                "finalize_run: realized compute failed for run %d — defaulting to 0",
+                run.id,
+            )
+            pnl_realized = 0.0
     run.stopped_at = now_utc()
     run.stop_reason = stop_reason
     run.pnl_realized = pnl_realized
@@ -363,6 +443,19 @@ async def finalize_run(
             "pnl_realized": pnl_realized,
         },
     ))
+    # WS: status flip + finalized run row so the client doesn't have to poll
+    # to discover the stop or the realized P&L.
+    try:
+        from backend.strategy import broadcast
+        if broadcast.has_subscribers(strategy.id):
+            broadcast.push_strategy_update(strategy.id, {
+                "id": strategy.id,
+                "status": "stopped",
+                "current_run_id": None,
+            })
+            broadcast.push_run_update(strategy.id, broadcast.format_run_row(run))
+    except Exception:
+        logger.warning("finalize_run: WS push failed", exc_info=True)
     return run
 
 
@@ -480,7 +573,12 @@ async def record_order(
     status: str = "pending",
     reject_reason: Optional[str] = None,
 ) -> SmStrategyOrder:
-    """Audit-grade write of one order placed by the engine."""
+    """Audit-grade write of one order placed by the engine.
+
+    Also pushes an ``order_update`` WS frame so the UI's orderbook and
+    tradebook caches refresh at the moment the row lands — replacing
+    the 5-second polling loop the Detail page used to run.
+    """
     row = SmStrategyOrder(
         run_id=run_id,
         leg_id=leg_id,
@@ -499,6 +597,18 @@ async def record_order(
     db.add(row)
     await db.commit()
     await db.refresh(row)
+    # Push to connected WS clients so the UI updates immediately.
+    # Strategy id is derivable via the run; one tiny extra query but only
+    # when subscribers are connected to keep idle traffic at zero.
+    try:
+        from backend.strategy import broadcast
+        run = await db.get(SmStrategyRun, run_id)
+        if run is not None and broadcast.has_subscribers(run.strategy_id):
+            broadcast.push_order_update(
+                run.strategy_id, broadcast.format_order_row(row),
+            )
+    except Exception:
+        logger.warning("record_order: WS push failed", exc_info=True)
     return row
 
 

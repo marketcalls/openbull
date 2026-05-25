@@ -13,6 +13,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import type {
+  StrategyOrder,
+  StrategyRun,
+} from "@/api/strategy_module";
+import type { Strategy } from "@/types/strategy_module";
 
 export type WsStatus =
   | "idle"
@@ -100,6 +106,9 @@ export function useStrategyWebSocket(
   const [snapshot, setSnapshot] = useState<StrategySnapshot | null>(null);
   const [liveState, setLiveState] = useState<StrategySnapshot | null>(null);
   const [events, setEvents] = useState<StrategyWsEvent[]>([]);
+  // React Query client — used to hydrate caches from order_update /
+  // strategy_update / run_update frames so callers don't need to poll.
+  const queryClient = useQueryClient();
 
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef<number>(0);
@@ -174,6 +183,66 @@ export function useStrategyWebSocket(
       } else if (type === "event") {
         const ev = msg as unknown as StrategyWsEvent;
         setEvents((prev) => [ev, ...prev].slice(0, 500));
+        // Audit-row source of truth is the REST /events endpoint; flag it
+        // stale so the Events tab refetches the next time it's visible.
+        queryClient.invalidateQueries({
+          queryKey: ["strategy-events", strategyId],
+          refetchType: "none",
+        });
+      } else if (type === "order_update") {
+        // Splice the order into the orders cache — replace if present
+        // (status flip), prepend if new. Tradebook is a filtered view
+        // of orders so it's invalidated for refetch-on-next-visit.
+        const order = (msg as { order: StrategyOrder }).order;
+        if (order && strategyId !== null) {
+          queryClient.setQueryData<StrategyOrder[]>(
+            ["strategy-orders", strategyId],
+            (prev) => {
+              const list = prev ? [...prev] : [];
+              const idx = list.findIndex((o) => o.id === order.id);
+              if (idx >= 0) list[idx] = order;
+              else list.unshift(order);
+              return list;
+            },
+          );
+          // Positions + tradebook derive from filled orders — invalidate
+          // them so the next read pulls a fresh, correct snapshot. We
+          // don't reconstruct here because positions need LTP + the
+          // strategy.product context.
+          queryClient.invalidateQueries({
+            queryKey: ["strategy-positions", strategyId],
+          });
+          queryClient.invalidateQueries({
+            queryKey: ["strategy-trades", strategyId],
+          });
+        }
+      } else if (type === "strategy_update") {
+        // Partial merge into the strategy detail cache — only the fields
+        // the backend chose to push (status / current_run_id / live_enabled
+        // / webhook_locked). Other fields stay as the last full GET.
+        const patch = (msg as { strategy: Partial<Strategy> }).strategy;
+        if (patch && strategyId !== null) {
+          queryClient.setQueryData<Strategy>(
+            ["strategy", strategyId],
+            (prev) => (prev ? { ...prev, ...patch } : prev),
+          );
+        }
+      } else if (type === "run_update") {
+        // Runs list: replace by id, else prepend (newest first like the
+        // REST endpoint orders them).
+        const run = (msg as { run: StrategyRun }).run;
+        if (run && strategyId !== null) {
+          queryClient.setQueryData<StrategyRun[]>(
+            ["strategy-runs", strategyId],
+            (prev) => {
+              const list = prev ? [...prev] : [];
+              const idx = list.findIndex((r) => r.id === run.id);
+              if (idx >= 0) list[idx] = run;
+              else list.unshift(run);
+              return list;
+            },
+          );
+        }
       } else if (type === "ping") {
         // server heartbeat — ignore
       }

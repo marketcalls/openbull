@@ -29,7 +29,7 @@ from backend.models.strategy_module import SmStrategy
 from backend.models.user import User
 from backend.models.audit import ActiveSession
 from backend.security import decode_access_token
-from backend.strategy import broadcast, state as state_module
+from backend.strategy import broadcast, live_quotes, state as state_module
 from backend.strategy.time_utils import format_ist, now_utc
 
 logger = logging.getLogger(__name__)
@@ -160,6 +160,10 @@ async def strategy_ws(websocket: WebSocket, strategy_id: int):
     await websocket.send_json(snapshot)
 
     queue = await broadcast.register(strategy_id)
+    # Spin up the quote pump so live MTM works in sandbox sessions where
+    # nothing else has subscribed the broker WS to the strategy's contracts.
+    # Refcounted internally — a second concurrent client reuses the task.
+    await live_quotes.start(strategy_id)
     logger.info("WS /ws/strategy/%d connected (user=%d)", strategy_id, user_id)
     try:
         while True:
@@ -178,4 +182,5 @@ async def strategy_ws(websocket: WebSocket, strategy_id: int):
         logger.exception("WS /ws/strategy/%d error", strategy_id)
     finally:
         await broadcast.unregister(strategy_id, queue)
+        await live_quotes.stop(strategy_id)
         logger.info("WS /ws/strategy/%d disconnected", strategy_id)

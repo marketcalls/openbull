@@ -96,5 +96,117 @@ def push_terminal(strategy_id: int, message: dict[str, Any]) -> None:
     _broadcast_nowait(strategy_id, message)
 
 
+# ---------------------------------------------------------------------------
+# Data-update frames (real-time replacement for REST polling)
+# ---------------------------------------------------------------------------
+#
+# These are never throttled — they fire at the moment a row is persisted
+# or its status changes. Volume per strategy is naturally low (one
+# frame per order/exit/reconcile, ~10 frames per run total), nothing
+# like the tick-driven delta firehose. Each frame triggers exactly one
+# React Query cache update on the client, replacing the 5s timer poll.
+# ---------------------------------------------------------------------------
+
+
+def push_order_update(strategy_id: int, order_payload: dict[str, Any]) -> None:
+    """Fan out a single order row update.
+
+    Fires twice per order lifecycle:
+      1. Right after ``repo.record_order`` returns (status=open or rejected).
+      2. After ``reconcile_order_fill`` overwrites status/avg_fill_price.
+
+    The frame carries the same shape as the REST ``/orders`` endpoint's
+    row format so the client can substitute it straight into its cache.
+    """
+    _broadcast_nowait(strategy_id, {
+        "type": "order_update",
+        "ts_ms_utc": int(time.time() * 1000),
+        "order": order_payload,
+    })
+
+
+def push_strategy_update(strategy_id: int, strategy_payload: dict[str, Any]) -> None:
+    """Fan out a strategy-header update — status / current_run_id flip /
+    live_enabled toggle / webhook_locked transition.
+
+    Carries a partial payload (only the fields that may have changed). The
+    client merges into its strategy detail cache.
+    """
+    _broadcast_nowait(strategy_id, {
+        "type": "strategy_update",
+        "ts_ms_utc": int(time.time() * 1000),
+        "strategy": strategy_payload,
+    })
+
+
+def push_run_update(strategy_id: int, run_payload: dict[str, Any]) -> None:
+    """Fan out a run row update — start, stop, P&L snapshot.
+
+    The /runs tab and the strategy header both need to know when a new
+    run row appears or an existing one finalizes. Client invalidates the
+    /runs query on this frame.
+    """
+    _broadcast_nowait(strategy_id, {
+        "type": "run_update",
+        "ts_ms_utc": int(time.time() * 1000),
+        "run": run_payload,
+    })
+
+
 def has_subscribers(strategy_id: int) -> bool:
     return bool(_subscribers.get(strategy_id))
+
+
+# ---------------------------------------------------------------------------
+# Row -> WS frame formatters (shared between engine + reconciler).
+# Mirrors backend/routers/strategy_module.py:_format_order so the client
+# can paste the frame straight into its React Query cache.
+# ---------------------------------------------------------------------------
+
+
+def format_order_row(order_row: Any) -> dict[str, Any]:
+    """Same shape as the REST /orders row. Lives here so the engine can
+    publish a WS frame at the same touchpoint that the REST endpoint
+    would have served on a poll."""
+    from backend.strategy.time_utils import format_ist
+    return {
+        "id": order_row.id,
+        "leg_id": order_row.leg_id,
+        "kind": order_row.kind,
+        "broker_order_id": order_row.broker_order_id,
+        "symbol": order_row.symbol,
+        "exchange": order_row.exchange,
+        "action": order_row.action,
+        "qty": order_row.qty,
+        "pricetype": order_row.pricetype,
+        "price": float(order_row.price) if order_row.price is not None else 0.0,
+        "trigger_price": (
+            float(order_row.trigger_price) if order_row.trigger_price is not None else 0.0
+        ),
+        "status": order_row.status,
+        "placed_at": format_ist(order_row.placed_at),
+        "filled_at": format_ist(order_row.filled_at),
+        "avg_fill_price": (
+            float(order_row.avg_fill_price) if order_row.avg_fill_price is not None else None
+        ),
+        "filled_qty": order_row.filled_qty,
+        "reject_reason": order_row.reject_reason,
+    }
+
+
+def format_run_row(run_row: Any) -> dict[str, Any]:
+    """Same shape as the REST /runs row."""
+    from backend.strategy.time_utils import format_ist
+    return {
+        "id": run_row.id,
+        "strategy_id": run_row.strategy_id,
+        "mode": run_row.mode,
+        "broker": run_row.broker,
+        "started_at": format_ist(run_row.started_at),
+        "stopped_at": format_ist(run_row.stopped_at),
+        "stop_reason": run_row.stop_reason,
+        "pnl_realized": float(run_row.pnl_realized) if run_row.pnl_realized is not None else 0.0,
+        "pnl_peak": float(run_row.pnl_peak) if run_row.pnl_peak is not None else 0.0,
+        "pnl_trough": float(run_row.pnl_trough) if run_row.pnl_trough is not None else 0.0,
+        "trigger_source": run_row.trigger_source,
+    }

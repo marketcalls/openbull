@@ -1621,6 +1621,19 @@ async def kill_strategy(
         },
     ))
 
+    # WS: webhook_locked flipped - flow control UI elements need to know.
+    try:
+        from backend.strategy import broadcast as _bc
+        if _bc.has_subscribers(strategy.id):
+            _bc.push_strategy_update(strategy.id, {
+                "id": strategy.id,
+                "webhook_locked": True,
+                "status": strategy.status,
+                "current_run_id": strategy.current_run_id,
+            })
+    except Exception:
+        logger.warning("kill_strategy: WS push failed", exc_info=True)
+
     return {
         "strategy_id": strategy.id,
         "webhook_locked": True,
@@ -1653,6 +1666,15 @@ async def unlock_webhook(
         message="Webhook lock cleared - strategy can accept signals again",
         payload={"unlock_method": "manual"},
     ))
+    try:
+        from backend.strategy import broadcast as _bc
+        if _bc.has_subscribers(strategy.id):
+            _bc.push_strategy_update(strategy.id, {
+                "id": strategy.id,
+                "webhook_locked": False,
+            })
+    except Exception:
+        logger.warning("unlock_webhook: WS push failed", exc_info=True)
     return {"strategy_id": strategy.id, "webhook_locked": False, "noop": False}
 
 
@@ -1820,6 +1842,11 @@ async def reconcile_order_fill(
 
     Commits the change when something was updated. Idempotent - calling
     multiple times is safe.
+
+    Also pushes a second ``order_update`` WS frame (the first fires from
+    ``repo.record_order`` at placement time) so the client sees the
+    status flip from 'open' to 'complete' + executed price land without
+    waiting for a poll.
     """
     if mode == "sandbox":
         changed = _reconcile_sandbox_order(user_id, order_row)
@@ -1832,6 +1859,15 @@ async def reconcile_order_fill(
     if changed:
         await db.commit()
         await db.refresh(order_row)
+        try:
+            from backend.strategy import broadcast
+            run = await db.get(SmStrategyRun, order_row.run_id)
+            if run is not None and broadcast.has_subscribers(run.strategy_id):
+                broadcast.push_order_update(
+                    run.strategy_id, broadcast.format_order_row(order_row),
+                )
+        except Exception:
+            logger.warning("reconcile_order_fill: WS push failed", exc_info=True)
     return changed
 
 
