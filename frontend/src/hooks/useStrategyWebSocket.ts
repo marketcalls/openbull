@@ -183,11 +183,14 @@ export function useStrategyWebSocket(
       } else if (type === "event") {
         const ev = msg as unknown as StrategyWsEvent;
         setEvents((prev) => [ev, ...prev].slice(0, 500));
-        // Audit-row source of truth is the REST /events endpoint; flag it
-        // stale so the Events tab refetches the next time it's visible.
+        // Trigger an immediate /events refetch so the persisted DB row
+        // (with its real id) lands in the cache before the WS closes.
+        // Critical for the stop sequence — strategy_update arrives right
+        // after a stream of run_stopped/leg_exit_placed/overall_sl_hit
+        // event frames; once status flips the hook closes and any events
+        // that were live-only would otherwise vanish from the audit list.
         queryClient.invalidateQueries({
           queryKey: ["strategy-events", strategyId],
-          refetchType: "none",
         });
       } else if (type === "order_update") {
         // Splice the order into the orders cache — replace if present
@@ -266,15 +269,30 @@ export function useStrategyWebSocket(
     };
   }, [strategyId]);
 
-  // (Re-)connect when strategyId or `enabled` flips
+  // Track the last strategyId we connected against so we can clear
+  // per-strategy state when (and only when) the user navigates to a
+  // different strategy. Just flipping `enabled` (run stopped) must NOT
+  // wipe wsEvents — the run_stopped / overall_sl_hit / leg_exit_placed
+  // frames the WS just delivered would otherwise vanish from the
+  // Events tab the moment status flips.
+  const lastStrategyIdRef = useRef<number | null>(null);
+
   useEffect(() => {
+    if (strategyId !== lastStrategyIdRef.current) {
+      // Different strategy — reset everything; the prior strategy's
+      // snapshot / legs / events are no longer relevant.
+      setSnapshot(null);
+      setLiveState(null);
+      setEvents([]);
+      lastStrategyIdRef.current = strategyId;
+    }
     if (!enabled || strategyId === null) {
       shouldRunRef.current = false;
       closeSocket();
       setStatus("idle");
-      setSnapshot(null);
-      setLiveState(null);
-      setEvents([]);
+      // Keep snapshot / liveState / events as-is — they're the last live
+      // values, and the merged EventsTab + REST refetch keep the UI
+      // accurate after disconnect.
       return;
     }
     shouldRunRef.current = true;
