@@ -30,6 +30,16 @@ export default defineConfig({
       "/health": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/upstox/": { target: "http://127.0.0.1:8000", changeOrigin: true },
       "/zerodha/": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      // Strategy module WebSocket — proxied with ws:true so the upgrade
+      // handshake is forwarded to the backend. Without this Vite serves
+      // the SPA's index.html for /ws/strategy/{id} and the browser sees
+      // an immediate close (or just hangs at opening) — which was the
+      // whole reason live PnL never streamed in dev.
+      "/ws/": {
+        target: "ws://127.0.0.1:8000",
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
 })

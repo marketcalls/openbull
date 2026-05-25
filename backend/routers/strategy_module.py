@@ -757,6 +757,15 @@ async def get_strategy_positions(
     orders = await repo.list_orders_for_run(
         db, user_id=user.id, run_id=resolved_run_id,
     )
+    # Also pull every filled order across every run of this strategy —
+    # used below to compute a per-symbol lifetime realized P&L for the
+    # Positions tab's "Realized" column. Aggregating the current run
+    # alone shows 0 when only the entry has fired, even though the
+    # operator may have closed multiple profitable round-trips on the
+    # same symbol in earlier runs.
+    all_orders = await repo.list_orders_for_strategy(
+        db, user_id=user.id, strategy_id=strategy_id,
+    )
 
     # Aggregate per (symbol, exchange, product).
     from backend.services.market_data_cache import get_market_data_cache
@@ -793,6 +802,36 @@ async def get_strategy_positions(
         if o.placed_at and (a["last_action_at"] is None or o.placed_at > a["last_action_at"]):
             a["last_kind"] = o.kind
             a["last_action_at"] = o.placed_at
+
+    # Compute lifetime realized per (symbol, exchange) across every run.
+    # Same matched-round-trip math as the per-run realized below — applied
+    # to the full order history.
+    lifetime_aggs: dict[tuple[str, str], dict[str, float]] = {}
+    for o in all_orders:
+        if (o.status or "").lower() != "complete":
+            continue
+        fq = int(o.filled_qty or o.qty or 0)
+        price = float(o.avg_fill_price or 0)
+        if fq <= 0 or price <= 0:
+            continue
+        la = lifetime_aggs.setdefault((o.symbol, o.exchange), {
+            "buy_qty": 0, "buy_value": 0.0, "sell_qty": 0, "sell_value": 0.0,
+        })
+        if (o.action or "").upper() == "BUY":
+            la["buy_qty"] += fq
+            la["buy_value"] += fq * price
+        else:
+            la["sell_qty"] += fq
+            la["sell_value"] += fq * price
+    lifetime_realized: dict[tuple[str, str], float] = {}
+    for key, la in lifetime_aggs.items():
+        if la["buy_qty"] > 0 and la["sell_qty"] > 0:
+            avg_b = la["buy_value"] / la["buy_qty"]
+            avg_s = la["sell_value"] / la["sell_qty"]
+            matched_l = min(la["buy_qty"], la["sell_qty"])
+            lifetime_realized[key] = (avg_s - avg_b) * matched_l
+        else:
+            lifetime_realized[key] = 0.0
 
     # Resolve LTPs in two passes:
     #   1) Try MarketDataCache (cheap, populated when the broker WS is
@@ -865,6 +904,13 @@ async def get_strategy_positions(
             avg_entry = avg_sell
             unrealized = ((avg_entry - ltp_f) * abs(net_qty)) if ltp_f else 0.0
 
+        # Lifetime per-symbol realized — sum of every closed round-trip on
+        # this (symbol, exchange) across every run of the strategy. Distinct
+        # from the run-scoped ``realized_pnl`` below: an open position in the
+        # current run has run realized 0 but may carry meaningful lifetime
+        # P&L from earlier closed round-trips on the same symbol.
+        lifetime_r = lifetime_realized.get((a["symbol"], a["exchange"]), 0.0)
+
         positions.append({
             "symbol": a["symbol"],
             "exchange": a["exchange"],
@@ -876,6 +922,7 @@ async def get_strategy_positions(
             "ltp": ltp_f,
             "unrealized_pnl": round(unrealized, 2),
             "realized_pnl": round(realized, 2),
+            "realized_pnl_lifetime": round(lifetime_r, 2),
             "last_kind": a["last_kind"],
         })
 

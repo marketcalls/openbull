@@ -325,7 +325,13 @@ export interface StrategyPosition {
   avg_exit_price: number | null;
   ltp: number | null;
   unrealized_pnl: number;
+  /** Realized P&L from closed round-trips in the CURRENT run only. */
   realized_pnl: number;
+  /** Realized P&L on this (symbol, exchange) across every run of the
+   *  strategy — what the Positions tab actually shows in the "Realized"
+   *  column so an open position with prior closed round-trips reads
+   *  the operator's total earned/lost on that contract. */
+  realized_pnl_lifetime?: number;
   last_kind: string;
 }
 

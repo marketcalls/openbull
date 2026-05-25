@@ -993,11 +993,13 @@ function PositionsTab({
                     <TableHead className="text-right">Avg Entry</TableHead>
                     <TableHead className="text-right">LTP</TableHead>
                     <TableHead className="text-right">Unrealized</TableHead>
-                    <TableHead className="text-right">Realized</TableHead>
+                    <TableHead className="text-right">Realized (lifetime)</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {merged.map((p) => (
+                  {merged.map((p) => {
+                    const rowRealized = p.realized_pnl_lifetime ?? p.realized_pnl;
+                    return (
                     <TableRow key={`${p.symbol}-${p.exchange}-${p.product}`}>
                       <TableCell className="font-mono font-medium">
                         {p.symbol}
@@ -1045,14 +1047,16 @@ function PositionsTab({
                       <TableCell
                         className={cn(
                           "text-right font-mono",
-                          p.realized_pnl > 0 && "text-green-600",
-                          p.realized_pnl < 0 && "text-red-600",
+                          rowRealized > 0 && "text-green-600",
+                          rowRealized < 0 && "text-red-600",
                         )}
+                        title="Lifetime realized on this contract across all runs"
                       >
-                        {formatPnl(p.realized_pnl)}
+                        {formatPnl(rowRealized)}
                       </TableCell>
                     </TableRow>
-                  ))}
+                  );
+                  })}
                 </TableBody>
               </Table>
             </div>
