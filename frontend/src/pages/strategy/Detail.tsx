@@ -1407,6 +1407,7 @@ export default function StrategyDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmCloseAll, setConfirmCloseAll] = useState(false);
   const [confirmKill, setConfirmKill] = useState(false);
+  const [confirmStop, setConfirmStop] = useState(false);
   const [startDialogOpen, setStartDialogOpen] = useState(false);
   const [startMode, setStartMode] = useState<StrategyMode>("sandbox");
   const [closingLegId, setClosingLegId] = useState<number | null>(null);
@@ -1749,7 +1750,7 @@ export default function StrategyDetail() {
               <Button
                 variant="outline"
                 disabled={stopMutation.isPending}
-                onClick={() => stopMutation.mutate()}
+                onClick={() => setConfirmStop(true)}
               >
                 {stopMutation.isPending ? "Stopping…" : "Stop"}
               </Button>
@@ -1991,6 +1992,24 @@ export default function StrategyDetail() {
         variant="destructive"
         loading={closeAllMutation.isPending}
         onConfirm={() => closeAllMutation.mutate()}
+      />
+
+      <ConfirmDialog
+        open={confirmStop}
+        onOpenChange={setConfirmStop}
+        title="Stop the run?"
+        description={
+          "Every open leg will be exited at MARKET and the run finalised. " +
+          "Realized P&L gets locked in; the strategy returns to a stopped state " +
+          "and stops accepting webhook signals until you start it again."
+        }
+        confirmLabel="Stop run"
+        variant="destructive"
+        loading={stopMutation.isPending}
+        onConfirm={() => {
+          stopMutation.mutate();
+          setConfirmStop(false);
+        }}
       />
 
       <ConfirmDialog
