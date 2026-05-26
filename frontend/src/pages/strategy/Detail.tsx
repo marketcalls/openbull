@@ -165,6 +165,9 @@ function LiveTab({
   closingLegId,
   liveState,
   wsStatus,
+  lastRun,
+  cumulativeRealized,
+  totalRuns,
 }: {
   strategy: Strategy;
   orders: StrategyOrder[];
@@ -172,6 +175,14 @@ function LiveTab({
   closingLegId: number | null;
   liveState: StrategySnapshot | null;
   wsStatus: WsStatus;
+  /** Most recent run (running or closed) — used to surface a last-run
+   *  realized P&L when the WS has no live state yet (initial load) or
+   *  the run just stopped and liveState's final values aren't enough. */
+  lastRun?: StrategyRun | null;
+  /** Sum of pnl_realized across every run of the strategy. */
+  cumulativeRealized?: number;
+  /** Count of runs the strategy has had (used to render context). */
+  totalRuns?: number;
 }) {
   // Pair each leg config with its current run's entry + (latest) exit order
   // for the fallback rendering when the WS hasn't sent state yet.
@@ -215,37 +226,78 @@ function LiveTab({
           </Badge>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-3 gap-4">
-            {[
-              { label: "Realized", value: liveState?.mtm_realized ?? null },
-              { label: "Unrealized", value: liveState?.mtm_unrealized ?? null },
-              { label: "Total P&L", value: liveState?.mtm_total ?? null },
-            ].map((m) => (
-              <div
-                key={m.label}
-                className="rounded-md border bg-muted/30 p-4 text-center"
-              >
-                <p className="text-xs uppercase tracking-wider text-muted-foreground">
-                  {m.label}
-                </p>
-                <p
-                  className={cn(
-                    "mt-1 font-mono text-2xl font-semibold",
-                    m.value != null && m.value > 0 && "text-green-600",
-                    m.value != null && m.value < 0 && "text-red-600",
-                  )}
-                >
-                  {fmtPnl(m.value)}
-                </p>
+          {/* Fallback ladder for the three live cards:
+              1. liveState from WS (the running / just-stopped run)
+              2. lastRun.pnl_realized from /runs (after a closed run with
+                 the run finalised but WS gone)
+              3. null -> renders "—"
+              Unrealized is only meaningful while a run is open, so no
+              fallback there — once flat, unrealized truly is 0. */}
+          {(() => {
+            const isStopped = strategy.status !== "running";
+            const lastRealized = lastRun?.pnl_realized ?? null;
+            const realized = liveState?.mtm_realized ?? lastRealized;
+            const unrealized = isStopped ? 0 : liveState?.mtm_unrealized ?? null;
+            const total =
+              realized != null || unrealized != null
+                ? (realized ?? 0) + (unrealized ?? 0)
+                : null;
+            const lifetime = cumulativeRealized ?? null;
+            return (
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                {[
+                  { label: "Realized (run)", value: realized },
+                  { label: "Unrealized", value: unrealized },
+                  { label: "Run total", value: total },
+                  { label: "Cumulative (lifetime)", value: lifetime, bold: true },
+                ].map((m) => (
+                  <div
+                    key={m.label}
+                    className={cn(
+                      "rounded-md p-4 text-center",
+                      m.bold
+                        ? "border-2 bg-muted/40"
+                        : "border bg-muted/30",
+                    )}
+                  >
+                    <p className="text-xs uppercase tracking-wider text-muted-foreground">
+                      {m.label}
+                    </p>
+                    <p
+                      className={cn(
+                        "mt-1 font-mono text-2xl",
+                        m.bold && "font-bold",
+                        !m.bold && "font-semibold",
+                        m.value != null && m.value > 0 && "text-green-600",
+                        m.value != null && m.value < 0 && "text-red-600",
+                      )}
+                    >
+                      {m.value == null ? "—" : fmtPnl(m.value)}
+                    </p>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          {liveState && (
+            );
+          })()}
+          {liveState ? (
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground sm:grid-cols-4">
               <span>Peak: <span className="font-mono">{fmtPnl(liveState.peak)}</span></span>
               <span>Trough: <span className="font-mono">{fmtPnl(liveState.trough)}</span></span>
               <span>Updated: <span className="font-mono">{liveState.ts_ist}</span></span>
+              {totalRuns != null && (
+                <span>
+                  Total runs: <span className="font-mono">{totalRuns}</span>
+                </span>
+              )}
             </div>
+          ) : (
+            totalRuns != null && totalRuns > 0 && (
+              <div className="mt-3 text-xs text-muted-foreground">
+                Showing last finalised run.{" "}
+                <span className="font-mono">{totalRuns}</span> run
+                {totalRuns === 1 ? "" : "s"} on this strategy so far.
+              </div>
+            )
           )}
         </CardContent>
       </Card>
@@ -1829,6 +1881,11 @@ export default function StrategyDetail() {
             }}
             liveState={liveState}
             wsStatus={wsStatus}
+            lastRun={runsQuery.data?.[0] ?? null}
+            cumulativeRealized={
+              positionsQuery.data?.summary?.cumulative_realized ?? undefined
+            }
+            totalRuns={runsQuery.data?.length}
           />
         </TabsContent>
         <TabsContent value="setup" className="mt-4">
@@ -1926,9 +1983,11 @@ export default function StrategyDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* Start-run mode picker */}
+      {/* Start-run mode picker + explicit confirm. UI-triggered starts go
+          through this dialog; webhook-driven starts bypass it entirely and
+          land at engine.start_run directly. */}
       <Dialog open={startDialogOpen} onOpenChange={setStartDialogOpen}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Start run — pick mode</DialogTitle>
             <p className="text-sm text-muted-foreground">
@@ -1959,6 +2018,38 @@ export default function StrategyDetail() {
                 </button>
               ))}
             </div>
+            <div
+              className={cn(
+                "rounded-md p-3 text-xs",
+                startMode === "live"
+                  ? "bg-red-500/10 text-red-700 dark:text-red-400"
+                  : "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+              )}
+            >
+              {startMode === "live" ? (
+                <>
+                  <p className="font-medium">Confirm live start</p>
+                  <p className="mt-1">
+                    Clicking "Start live" places entry orders for every
+                    configured leg at <span className="font-mono">MARKET</span>{" "}
+                    with real money. Overall SL / Target and per-leg rules
+                    activate immediately on the first tick. There is no
+                    "preview" step.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="font-medium">Confirm sandbox start</p>
+                  <p className="mt-1">
+                    Clicking "Start sandbox" places simulated entry orders
+                    for every configured leg at{" "}
+                    <span className="font-mono">MARKET</span>. P&L is paper,
+                    no margin used, but the engine fully evaluates SL /
+                    Target / Trail just like a live run.
+                  </p>
+                </>
+              )}
+            </div>
             {startMode === "live" && !strategy.live_enabled && (
               <p className="rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
                 Strategy isn't live-enabled. Use "Enable LIVE" on the detail
@@ -1971,6 +2062,7 @@ export default function StrategyDetail() {
               Cancel
             </Button>
             <Button
+              variant={startMode === "live" ? "destructive" : "default"}
               disabled={
                 startMutation.isPending ||
                 (startMode === "live" && !strategy.live_enabled)
