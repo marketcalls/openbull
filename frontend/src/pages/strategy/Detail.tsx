@@ -838,14 +838,7 @@ function HistoryTab({
             <>
               {/* Row 1 — headline + win/loss profile (run-level) */}
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">
-                <Stat
-                  label="Trades (runs)"
-                  value={`${totalTrades}${
-                    stats.legCount !== totalTrades
-                      ? ` · ${stats.legCount} legs`
-                      : ""
-                  }`}
-                />
+                <Stat label="Trades" value={String(totalTrades)} />
                 <Stat
                   label="Win rate"
                   value={`${stats.winRate.toFixed(1)}%`}
