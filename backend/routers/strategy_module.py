@@ -368,6 +368,7 @@ class StartRunRequest(BaseModel):
 def _format_order(o) -> dict:
     return {
         "id": o.id,
+        "run_id": o.run_id,
         "leg_id": o.leg_id,
         "kind": o.kind,
         "broker_order_id": o.broker_order_id,

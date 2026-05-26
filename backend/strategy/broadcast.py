@@ -171,6 +171,7 @@ def format_order_row(order_row: Any) -> dict[str, Any]:
     from backend.strategy.time_utils import format_ist
     return {
         "id": order_row.id,
+        "run_id": order_row.run_id,
         "leg_id": order_row.leg_id,
         "kind": order_row.kind,
         "broker_order_id": order_row.broker_order_id,

@@ -163,6 +163,7 @@ export interface StrategyRun {
 
 export interface StrategyOrder {
   id: number;
+  run_id: number;
   leg_id: number;
   kind: string;
   broker_order_id: string | null;

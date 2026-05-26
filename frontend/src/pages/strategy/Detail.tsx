@@ -456,80 +456,541 @@ function OrdersTab({ orders }: { orders: StrategyOrder[] }) {
 // History tab — strategy runs
 // ---------------------------------------------------------------------------
 
-function HistoryTab({ runs }: { runs: StrategyRun[] }) {
-  if (runs.length === 0) {
+// One completed round-trip on a leg — entry + matching exit.
+interface RoundTrip {
+  run_id: number;
+  leg_id: number;
+  symbol: string;
+  exchange: string;
+  side: "long" | "short";
+  qty: number;
+  entry_time: string;
+  entry_price: number;
+  exit_time: string;
+  exit_price: number;
+  exit_kind: string;
+  pnl: number;
+}
+
+function buildRoundTrips(orders: StrategyOrder[]): RoundTrip[] {
+  // Group filled orders by (run_id, leg_id). Pair each leg's first
+  // entry order with its latest exit order. Each run currently produces
+  // one round-trip per leg (batch start_run + stop_run / SL / target);
+  // this also handles signal-mode legs that toggle entry+exit multiple
+  // times within one run by FIFO-matching entries to subsequent exits.
+  const byLeg = new Map<string, StrategyOrder[]>();
+  for (const o of orders) {
+    if ((o.status || "").toLowerCase() !== "complete") continue;
+    const fq = Number(o.filled_qty ?? o.qty ?? 0);
+    const price = Number(o.avg_fill_price ?? 0);
+    if (fq <= 0 || price <= 0) continue;
+    const key = `${o.run_id}:${o.leg_id}`;
+    const list = byLeg.get(key);
+    if (list) list.push(o);
+    else byLeg.set(key, [o]);
+  }
+
+  const trips: RoundTrip[] = [];
+  for (const list of byLeg.values()) {
+    // Sort by filled_at if available, else placed_at.
+    list.sort((a, b) => {
+      const ta = a.filled_at ?? a.placed_at;
+      const tb = b.filled_at ?? b.placed_at;
+      return ta.localeCompare(tb);
+    });
+    // FIFO queue of open lots — each entry pushes a lot; each exit
+    // pops the oldest matching lot and emits a round-trip.
+    type OpenLot = {
+      side: "long" | "short";
+      qty: number;
+      entry: StrategyOrder;
+    };
+    const open: OpenLot[] = [];
+    for (const o of list) {
+      const isEntry = o.kind === "entry";
+      const isExit = o.kind.startsWith("exit");
+      const action = (o.action || "").toUpperCase();
+      const fq = Number(o.filled_qty ?? o.qty ?? 0);
+      if (isEntry) {
+        open.push({
+          side: action === "BUY" ? "long" : "short",
+          qty: fq,
+          entry: o,
+        });
+      } else if (isExit && open.length > 0) {
+        // Match against oldest open lot first.
+        let remaining = fq;
+        while (remaining > 0 && open.length > 0) {
+          const lot = open[0];
+          const matched = Math.min(remaining, lot.qty);
+          const entryPx = Number(lot.entry.avg_fill_price ?? 0);
+          const exitPx = Number(o.avg_fill_price ?? 0);
+          const sign = lot.side === "long" ? 1 : -1;
+          trips.push({
+            run_id: o.run_id,
+            leg_id: o.leg_id,
+            symbol: o.symbol,
+            exchange: o.exchange,
+            side: lot.side,
+            qty: matched,
+            entry_time: lot.entry.filled_at ?? lot.entry.placed_at,
+            entry_price: entryPx,
+            exit_time: o.filled_at ?? o.placed_at,
+            exit_price: exitPx,
+            exit_kind: o.kind,
+            pnl: (exitPx - entryPx) * matched * sign,
+          });
+          lot.qty -= matched;
+          remaining -= matched;
+          if (lot.qty <= 0) open.shift();
+        }
+      }
+    }
+  }
+  // Newest first.
+  trips.sort((a, b) => b.exit_time.localeCompare(a.exit_time));
+  return trips;
+}
+
+function HistoryTab({
+  runs,
+  orders,
+}: {
+  runs: StrategyRun[];
+  orders: StrategyOrder[];
+}) {
+  // Compute closed round-trips from the full order history. This is the
+  // operator's trade ledger — one row per completed (entry → exit) pair
+  // on a leg, spanning every run of the strategy (today, yesterday,
+  // last week, …). Newest first.
+  const trips = useMemo(() => buildRoundTrips(orders), [orders]);
+
+  // Run lookup so each trade row can show the originating mode
+  // (sandbox / live). Trades and the run they belong to are stored in
+  // separate tables; joining here keeps the ledger truthful.
+  const runModeById = useMemo(() => {
+    const m = new Map<number, "sandbox" | "live" | string>();
+    for (const r of runs) m.set(r.id, r.mode);
+    return m;
+  }, [runs]);
+
+  // Per-mode metric breakdown — operator wants to evaluate sandbox vs
+  // live performance independently. Sandbox numbers shouldn't get
+  // averaged into live "real" P&L.
+  const tripsByMode = useMemo(() => {
+    const live: RoundTrip[] = [];
+    const sandbox: RoundTrip[] = [];
+    for (const t of trips) {
+      const mode = runModeById.get(t.run_id);
+      if (mode === "live") live.push(t);
+      else sandbox.push(t);
+    }
+    return { live, sandbox };
+  }, [trips, runModeById]);
+
+  // Aggregate metrics across every trade.
+  const totalTrades = trips.length;
+  const wins = trips.filter((t) => t.pnl > 0).length;
+  const losses = trips.filter((t) => t.pnl < 0).length;
+  const scratches = totalTrades - wins - losses;
+  const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
+  const totalPnl = trips.reduce((s, t) => s + t.pnl, 0);
+  const avgPnl = totalTrades > 0 ? totalPnl / totalTrades : 0;
+  const grossWin = trips
+    .filter((t) => t.pnl > 0)
+    .reduce((s, t) => s + t.pnl, 0);
+  const grossLoss = trips
+    .filter((t) => t.pnl < 0)
+    .reduce((s, t) => s + t.pnl, 0);
+  const profitFactor =
+    grossLoss !== 0 ? Math.abs(grossWin / grossLoss) : grossWin > 0 ? Infinity : 0;
+  const bestTrade =
+    trips.length > 0 ? Math.max(...trips.map((t) => t.pnl)) : 0;
+  const worstTrade =
+    trips.length > 0 ? Math.min(...trips.map((t) => t.pnl)) : 0;
+
+  if (runs.length === 0 && totalTrades === 0) {
     return (
       <Card>
         <CardContent className="py-12 text-center">
           <p className="text-sm text-muted-foreground">
-            No runs yet. Each Start spawns a run row.
+            No history yet. Each completed entry+exit will appear here as one
+            trade row.
           </p>
         </CardContent>
       </Card>
     );
   }
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Run history</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Run #</TableHead>
-                <TableHead>Mode</TableHead>
-                <TableHead>Broker</TableHead>
-                <TableHead>Started</TableHead>
-                <TableHead>Stopped</TableHead>
-                <TableHead>Reason</TableHead>
-                <TableHead>Trigger</TableHead>
-                <TableHead className="text-right">P&L</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {runs.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell className="font-mono">{r.id}</TableCell>
-                  <TableCell>
-                    <Badge variant={r.mode === "live" ? "destructive" : "secondary"}>
-                      {r.mode}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-xs">{r.broker}</TableCell>
-                  <TableCell className="whitespace-nowrap text-xs">
-                    {formatIst(r.started_at)}
-                  </TableCell>
-                  <TableCell className="whitespace-nowrap text-xs">
-                    {formatIst(r.stopped_at)}
-                  </TableCell>
-                  <TableCell>
-                    {r.stop_reason ? (
-                      <Badge variant="outline" className="font-mono text-[10px]">
-                        {r.stop_reason}
-                      </Badge>
-                    ) : (
-                      "—"
-                    )}
-                  </TableCell>
-                  <TableCell className="text-xs">{r.trigger_source}</TableCell>
-                  <TableCell
+    <div className="space-y-4">
+      {/* Summary metrics */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Strategy performance</CardTitle>
+          <CardDescription>
+            Aggregated across every closed trade — all runs, all days.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">
+            <Stat label="Trades" value={String(totalTrades)} />
+            <Stat
+              label="Win rate"
+              value={`${winRate.toFixed(1)}%`}
+              tone={winRate >= 50 ? "good" : winRate > 0 ? "warn" : "bad"}
+            />
+            <Stat
+              label="Wins / Losses"
+              value={`${wins} / ${losses}${scratches ? ` (+${scratches})` : ""}`}
+            />
+            <Stat
+              label="Total P&L"
+              value={totalPnl === 0 ? "0.00" : formatPnl(totalPnl)}
+              tone={totalPnl > 0 ? "good" : totalPnl < 0 ? "bad" : "neutral"}
+              bold
+            />
+            <Stat
+              label="Avg P&L / trade"
+              value={avgPnl === 0 ? "0.00" : formatPnl(avgPnl)}
+              tone={avgPnl > 0 ? "good" : avgPnl < 0 ? "bad" : "neutral"}
+            />
+            <Stat
+              label="Profit factor"
+              value={
+                profitFactor === Infinity
+                  ? "∞"
+                  : profitFactor === 0
+                    ? "—"
+                    : profitFactor.toFixed(2)
+              }
+              tone={profitFactor >= 1.5 ? "good" : profitFactor > 1 ? "warn" : "bad"}
+            />
+            <Stat
+              label="Best trade"
+              value={bestTrade === 0 ? "—" : formatPnl(bestTrade)}
+              tone="good"
+            />
+            <Stat
+              label="Worst trade"
+              value={worstTrade === 0 ? "—" : formatPnl(worstTrade)}
+              tone="bad"
+            />
+            <Stat
+              label="Gross win"
+              value={grossWin === 0 ? "—" : formatPnl(grossWin)}
+              tone="good"
+            />
+            <Stat
+              label="Gross loss"
+              value={grossLoss === 0 ? "—" : formatPnl(grossLoss)}
+              tone="bad"
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Per-mode split so sandbox paper P&L doesn't contaminate the
+          live track record (and vice versa). */}
+      {(tripsByMode.live.length > 0 || tripsByMode.sandbox.length > 0) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>By mode</CardTitle>
+            <CardDescription>
+              Sandbox trades are paper; live trades touched real money.
+              Performance is reported separately so paper P&L doesn't
+              inflate the live track record.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {(["live", "sandbox"] as const).map((mode) => {
+                const list = tripsByMode[mode];
+                const total = list.length;
+                const w = list.filter((t) => t.pnl > 0).length;
+                const wr = total > 0 ? (w / total) * 100 : 0;
+                const pnl = list.reduce((s, t) => s + t.pnl, 0);
+                return (
+                  <div
+                    key={mode}
                     className={cn(
-                      "text-right font-mono",
-                      r.pnl_realized > 0 && "text-green-600",
-                      r.pnl_realized < 0 && "text-red-600",
+                      "rounded-md border p-3",
+                      mode === "live"
+                        ? "border-red-500/40 bg-red-500/5"
+                        : "border-blue-500/40 bg-blue-500/5",
                     )}
                   >
-                    {r.pnl_realized.toFixed(2)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      </CardContent>
-    </Card>
+                    <div className="mb-2 flex items-center justify-between">
+                      <Badge
+                        variant={mode === "live" ? "destructive" : "secondary"}
+                      >
+                        {mode.toUpperCase()}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {total} {total === 1 ? "trade" : "trades"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-sm">
+                      <div>
+                        <p className="text-[10px] uppercase text-muted-foreground">
+                          P&L
+                        </p>
+                        <p
+                          className={cn(
+                            "font-mono font-semibold",
+                            pnl > 0 && "text-green-600",
+                            pnl < 0 && "text-red-600",
+                          )}
+                        >
+                          {total === 0 ? "—" : formatPnl(pnl)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] uppercase text-muted-foreground">
+                          Win rate
+                        </p>
+                        <p className="font-mono font-semibold">
+                          {total === 0 ? "—" : `${wr.toFixed(1)}%`}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] uppercase text-muted-foreground">
+                          Wins / Total
+                        </p>
+                        <p className="font-mono font-semibold">
+                          {w} / {total}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Trade ledger */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Trade ledger</CardTitle>
+          <CardDescription>
+            One row per completed entry + exit pair. FIFO-matched within
+            each leg.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {totalTrades === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No closed trades yet — open positions will appear here once
+              they exit.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="text-xs">Run</TableHead>
+                    <TableHead className="text-xs">Mode</TableHead>
+                    <TableHead className="text-xs">Symbol</TableHead>
+                    <TableHead className="text-xs">Side</TableHead>
+                    <TableHead className="text-right text-xs">Qty</TableHead>
+                    <TableHead className="text-xs">Entry time</TableHead>
+                    <TableHead className="text-right text-xs">Entry</TableHead>
+                    <TableHead className="text-xs">Exit time</TableHead>
+                    <TableHead className="text-right text-xs">Exit</TableHead>
+                    <TableHead className="text-xs">Exit kind</TableHead>
+                    <TableHead className="text-right text-xs">P&L</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {trips.map((t, i) => {
+                    const mode = runModeById.get(t.run_id);
+                    return (
+                      <TableRow key={`${t.run_id}-${t.leg_id}-${i}`}>
+                        <TableCell className="font-mono text-xs">
+                          #{t.run_id}
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={
+                              mode === "live" ? "destructive" : "secondary"
+                            }
+                            className="text-[10px]"
+                          >
+                            {mode ?? "—"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">
+                          {t.symbol}
+                          <span className="ml-1 text-muted-foreground">
+                            {t.exchange}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={
+                              t.side === "long" ? "default" : "destructive"
+                            }
+                            className="text-[10px]"
+                          >
+                            {t.side}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {t.qty}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs">
+                          {formatIst(t.entry_time)}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {t.entry_price.toFixed(2)}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs">
+                          {formatIst(t.exit_time)}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {t.exit_price.toFixed(2)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant="outline"
+                            className="font-mono text-[10px]"
+                          >
+                            {t.exit_kind}
+                          </Badge>
+                        </TableCell>
+                        <TableCell
+                          className={cn(
+                            "text-right font-mono text-xs font-semibold",
+                            t.pnl > 0 && "text-green-600",
+                            t.pnl < 0 && "text-red-600",
+                          )}
+                        >
+                          {formatPnl(t.pnl)}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Run-level breakdown — kept for context (one row per Start/Stop) */}
+      {runs.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Run history</CardTitle>
+            <CardDescription>
+              Every Start spawns a run row; each row aggregates the leg
+              trades above into a single finalised P&L.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Run #</TableHead>
+                    <TableHead>Mode</TableHead>
+                    <TableHead>Started</TableHead>
+                    <TableHead>Stopped</TableHead>
+                    <TableHead>Reason</TableHead>
+                    <TableHead>Trigger</TableHead>
+                    <TableHead className="text-right">P&L</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {runs.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell className="font-mono">{r.id}</TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            r.mode === "live" ? "destructive" : "secondary"
+                          }
+                        >
+                          {r.mode}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap text-xs">
+                        {formatIst(r.started_at)}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap text-xs">
+                        {formatIst(r.stopped_at)}
+                      </TableCell>
+                      <TableCell>
+                        {r.stop_reason ? (
+                          <Badge
+                            variant="outline"
+                            className="font-mono text-[10px]"
+                          >
+                            {r.stop_reason}
+                          </Badge>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {r.trigger_source}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right font-mono",
+                          r.pnl_realized > 0 && "text-green-600",
+                          r.pnl_realized < 0 && "text-red-600",
+                        )}
+                      >
+                        {r.pnl_realized.toFixed(2)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  tone,
+  bold,
+}: {
+  label: string;
+  value: string;
+  tone?: "good" | "bad" | "warn" | "neutral";
+  bold?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-md p-3",
+        bold ? "border-2 bg-muted/40" : "border bg-muted/30",
+      )}
+    >
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </p>
+      <p
+        className={cn(
+          "mt-1 font-mono",
+          bold ? "text-xl font-bold" : "text-lg font-semibold",
+          tone === "good" && "text-green-600",
+          tone === "bad" && "text-red-600",
+          tone === "warn" && "text-amber-600",
+        )}
+      >
+        {value}
+      </p>
+    </div>
   );
 }
 
@@ -1866,7 +2327,7 @@ export default function StrategyDetail() {
           />
         </TabsContent>
         <TabsContent value="history" className="mt-4">
-          <HistoryTab runs={runs} />
+          <HistoryTab runs={runs} orders={orders} />
         </TabsContent>
       </Tabs>
 
