@@ -190,18 +190,26 @@ function LegCard({
               value={leg.segment}
               onChange={(e) => {
                 const seg = e.target.value as Segment;
+                // Resolve the NEW strike_mode first; the atm_offset /
+                // strike_value defaults must be evaluated against that
+                // (not against `leg.strike_mode`, which may be null after
+                // an earlier round-trip through a non-options segment).
+                // Without this, toggling off→on options leaves
+                // atm_offset=null while strike_mode='atm' and the schema
+                // rejects with "atm_offset required when strike_mode='atm'".
+                const nextStrikeMode =
+                  seg === "options" ? leg.strike_mode ?? "atm" : null;
                 onChange({
                   ...leg,
                   segment: seg,
-                  // Drop option-only fields when switching away from options
                   option_type: seg === "options" ? leg.option_type ?? "CE" : null,
-                  strike_mode: seg === "options" ? leg.strike_mode ?? "atm" : null,
+                  strike_mode: nextStrikeMode,
                   atm_offset:
-                    seg === "options" && leg.strike_mode === "atm"
+                    nextStrikeMode === "atm"
                       ? leg.atm_offset ?? "ATM"
                       : null,
                   strike_value:
-                    seg === "options" && leg.strike_mode === "strike"
+                    nextStrikeMode === "strike"
                       ? leg.strike_value ?? null
                       : null,
                 });
@@ -525,24 +533,24 @@ function SignalLegCard({
               value={leg.segment}
               onChange={(e) => {
                 const seg = e.target.value as Segment;
+                // Resolve the new strike_mode first and use it as the
+                // source of truth for the atm_offset / strike_value
+                // defaults — same race fix as the batch LegCard.
+                const nextStrikeMode =
+                  seg === "options" ? leg.strike_mode ?? "atm" : null;
                 onChange({
                   ...leg,
                   segment: seg,
-                  // Expiry: cash has none; futures/options use the
-                  // first rank allowed by the parent tab.
                   expiry:
                     seg === "cash" ? null : expiryChoices[0] ?? "current",
-                  // Options-only fields: seed when entering options,
-                  // null out otherwise (Pydantic strict mode rejects
-                  // strays).
                   option_type: seg === "options" ? leg.option_type ?? "CE" : null,
-                  strike_mode: seg === "options" ? leg.strike_mode ?? "atm" : null,
+                  strike_mode: nextStrikeMode,
                   atm_offset:
-                    seg === "options" && (leg.strike_mode ?? "atm") === "atm"
+                    nextStrikeMode === "atm"
                       ? leg.atm_offset ?? "ATM"
                       : null,
                   strike_value:
-                    seg === "options" && leg.strike_mode === "strike"
+                    nextStrikeMode === "strike"
                       ? leg.strike_value ?? null
                       : null,
                 });
