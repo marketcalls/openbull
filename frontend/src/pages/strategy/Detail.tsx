@@ -591,51 +591,98 @@ function HistoryTab({
     return { live, sandbox };
   }, [allTrips, runModeById]);
 
-  // Trades scoped to the active filter — drive the Performance card
-  // and the ledger table.
+  // Per-leg round-trips scoped to the active filter — drives the leg
+  // detail ledger below the per-run summary.
   const trips = useMemo(() => {
     if (modeFilter === "all") return allTrips;
     return allTrips.filter((t) => runModeById.get(t.run_id) === modeFilter);
   }, [allTrips, modeFilter, runModeById]);
 
+  // Per-RUN aggregation. A multi-leg basket (e.g. a 2-leg short strangle)
+  // closes as ONE trade attempt — win/loss is decided by the SUM of all
+  // its legs, not by counting each leg separately. Without this, a
+  // strangle that exits at +400/-300 = +100 net would count as
+  // 1 win + 1 loss instead of one winning trade.
+  interface RunTrade {
+    run_id: number;
+    mode: "sandbox" | "live" | string;
+    entry_time: string;   // earliest leg entry in the run
+    exit_time: string;    // latest leg exit in the run
+    num_legs: number;
+    pnl: number;          // sum across all leg round-trips in the run
+    exit_kinds: string[]; // distinct exit kinds the legs went out on
+  }
+  const runTrades = useMemo<RunTrade[]>(() => {
+    const byRun = new Map<number, RunTrade>();
+    for (const t of trips) {
+      const existing = byRun.get(t.run_id);
+      if (existing) {
+        existing.pnl += t.pnl;
+        existing.num_legs += 1;
+        if (t.entry_time < existing.entry_time) existing.entry_time = t.entry_time;
+        if (t.exit_time > existing.exit_time) existing.exit_time = t.exit_time;
+        if (!existing.exit_kinds.includes(t.exit_kind))
+          existing.exit_kinds.push(t.exit_kind);
+      } else {
+        byRun.set(t.run_id, {
+          run_id: t.run_id,
+          mode: runModeById.get(t.run_id) ?? "sandbox",
+          entry_time: t.entry_time,
+          exit_time: t.exit_time,
+          num_legs: 1,
+          pnl: t.pnl,
+          exit_kinds: [t.exit_kind],
+        });
+      }
+    }
+    // Newest first.
+    return Array.from(byRun.values()).sort((a, b) =>
+      b.exit_time.localeCompare(a.exit_time),
+    );
+  }, [trips, runModeById]);
+
   // ---------------------------------------------------------------------
-  // Aggregate metrics across the filtered trades. All numbers reactive
-  // to the mode filter above.
+  // Stats compute on RUN-level P&L, not leg-level. For multi-leg baskets
+  // (e.g. short strangle = 2 legs) the basket is one trade attempt; its
+  // win/loss is decided by the sum of all legs. Counting each leg
+  // separately would double-count a strangle and skew the win rate.
+  // For exit-kind breakdown we still aggregate per leg-trip (a basket
+  // can have legs exit via different rules — e.g. one leg target,
+  // other leg SL — and the operator wants to see both reasons).
   // ---------------------------------------------------------------------
   const stats = useMemo(() => {
-    const total = trips.length;
-    const winners = trips.filter((t) => t.pnl > 0);
-    const losers = trips.filter((t) => t.pnl < 0);
+    const total = runTrades.length;
+    const winners = runTrades.filter((t) => t.pnl > 0);
+    const losers = runTrades.filter((t) => t.pnl < 0);
     const wins = winners.length;
     const losses = losers.length;
     const scratches = total - wins - losses;
     const winRate = total > 0 ? (wins / total) * 100 : 0;
-    const totalPnl = trips.reduce((s, t) => s + t.pnl, 0);
+    const totalPnl = runTrades.reduce((s, t) => s + t.pnl, 0);
     const avgPnl = total > 0 ? totalPnl / total : 0;
     const grossWin = winners.reduce((s, t) => s + t.pnl, 0);
     const grossLoss = losers.reduce((s, t) => s + t.pnl, 0);
     const avgWin = wins > 0 ? grossWin / wins : 0;
     const avgLoss = losses > 0 ? grossLoss / losses : 0;
-    // RR = how big the average winner is vs the average loser. > 1 means
-    // winners outsize losers; combined with win rate this tells the full
-    // story (high win rate + low RR can still be unprofitable).
-    const rrRatio = avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : avgWin > 0 ? Infinity : 0;
+    const rrRatio =
+      avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : avgWin > 0 ? Infinity : 0;
     const profitFactor =
       grossLoss !== 0
         ? Math.abs(grossWin / grossLoss)
         : grossWin > 0
           ? Infinity
           : 0;
-    const bestTrade = total > 0 ? Math.max(...trips.map((t) => t.pnl)) : 0;
-    const worstTrade = total > 0 ? Math.min(...trips.map((t) => t.pnl)) : 0;
+    const bestTrade =
+      total > 0 ? Math.max(...runTrades.map((t) => t.pnl)) : 0;
+    const worstTrade =
+      total > 0 ? Math.min(...runTrades.map((t) => t.pnl)) : 0;
 
-    // Max drawdown on the cumulative P&L curve, walked in chronological
-    // order. Operators care about this because it sets the worst-case
-    // capital path the strategy has actually walked through.
+    // Max drawdown on the cumulative net P&L curve walked chronologically
+    // by run. Multi-leg baskets count as a single P&L point per run.
     let maxDrawdown = 0;
     let peak = 0;
     let cum = 0;
-    const chronological = [...trips].sort((a, b) =>
+    const chronological = [...runTrades].sort((a, b) =>
       a.exit_time.localeCompare(b.exit_time),
     );
     for (const t of chronological) {
@@ -645,8 +692,7 @@ function HistoryTab({
       if (dd < maxDrawdown) maxDrawdown = dd;
     }
 
-    // Longest losing streak — sets the capital cushion you need to
-    // survive without psychological tilt or margin calls.
+    // Longest losing / winning streak — also at the run level.
     let maxLoseStreak = 0;
     let curLose = 0;
     let maxWinStreak = 0;
@@ -666,10 +712,10 @@ function HistoryTab({
       }
     }
 
-    // Average trade duration in minutes (entry → exit).
+    // Average run duration (earliest leg entry → latest leg exit).
     let totalDurMs = 0;
     let countedDur = 0;
-    for (const t of trips) {
+    for (const t of runTrades) {
       const a = new Date(t.entry_time).getTime();
       const b = new Date(t.exit_time).getTime();
       if (!Number.isNaN(a) && !Number.isNaN(b) && b > a) {
@@ -679,10 +725,10 @@ function HistoryTab({
     }
     const avgDurMin = countedDur > 0 ? totalDurMs / countedDur / 60000 : 0;
 
-    // Exit-kind breakdown — what fraction of trades exited via SL vs
-    // Target vs manual close vs signal vs EOD. Highlights which rules
-    // are doing the heavy lifting and where the strategy actually
-    // makes / loses money.
+    // Exit-kind breakdown stays leg-level — a basket can exit through
+    // multiple rules and seeing every one is useful for tuning. P&L
+    // bucketing here is per-leg P&L so the chips reconcile with the
+    // ledger detail; total of the chips equals totalPnl above.
     const exitKindCounts: Record<string, number> = {};
     const exitKindPnl: Record<string, number> = {};
     for (const t of trips) {
@@ -712,10 +758,11 @@ function HistoryTab({
       avgDurMin,
       exitKindCounts,
       exitKindPnl,
+      legCount: trips.length,
     };
-  }, [trips]);
+  }, [runTrades, trips]);
 
-  // Pull individual fields out to keep the JSX tidy.
+  // Headline number is now run-level. Renamed for clarity in the JSX.
   const totalTrades = stats.total;
 
   if (runs.length === 0 && totalTrades === 0) {
@@ -789,9 +836,16 @@ function HistoryTab({
             </p>
           ) : (
             <>
-              {/* Row 1 — headline + win/loss profile */}
+              {/* Row 1 — headline + win/loss profile (run-level) */}
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">
-                <Stat label="Trades" value={String(totalTrades)} />
+                <Stat
+                  label="Trades (runs)"
+                  value={`${totalTrades}${
+                    stats.legCount !== totalTrades
+                      ? ` · ${stats.legCount} legs`
+                      : ""
+                  }`}
+                />
                 <Stat
                   label="Win rate"
                   value={`${stats.winRate.toFixed(1)}%`}
@@ -820,7 +874,7 @@ function HistoryTab({
                   bold
                 />
                 <Stat
-                  label="Avg P&L / trade"
+                  label="Avg P&L / run"
                   value={stats.avgPnl === 0 ? "0.00" : formatPnl(stats.avgPnl)}
                   tone={
                     stats.avgPnl > 0
@@ -982,25 +1036,29 @@ function HistoryTab({
       </Card>
 
       {/* Per-mode split so sandbox paper P&L doesn't contaminate the
-          live track record (and vice versa). */}
+          live track record (and vice versa). Also computed run-level. */}
       {(tripsByMode.live.length > 0 || tripsByMode.sandbox.length > 0) && (
         <Card>
           <CardHeader>
             <CardTitle>By mode</CardTitle>
             <CardDescription>
               Sandbox trades are paper; live trades touched real money.
-              Performance is reported separately so paper P&L doesn't
-              inflate the live track record.
+              Win rate counts a multi-leg basket as one trade attempt.
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {(["live", "sandbox"] as const).map((mode) => {
+                // Aggregate legs into per-run trades inside the mode.
                 const list = tripsByMode[mode];
-                const total = list.length;
-                const w = list.filter((t) => t.pnl > 0).length;
+                const byRun = new Map<number, number>();
+                for (const t of list)
+                  byRun.set(t.run_id, (byRun.get(t.run_id) ?? 0) + t.pnl);
+                const runPnls = Array.from(byRun.values());
+                const total = runPnls.length;
+                const w = runPnls.filter((p) => p > 0).length;
                 const wr = total > 0 ? (w / total) * 100 : 0;
-                const pnl = list.reduce((s, t) => s + t.pnl, 0);
+                const pnl = runPnls.reduce((s, p) => s + p, 0);
                 return (
                   <div
                     key={mode}
@@ -1018,13 +1076,14 @@ function HistoryTab({
                         {mode.toUpperCase()}
                       </Badge>
                       <span className="text-xs text-muted-foreground">
-                        {total} {total === 1 ? "trade" : "trades"}
+                        {total} {total === 1 ? "trade" : "trades"} ·{" "}
+                        {list.length} {list.length === 1 ? "leg" : "legs"}
                       </span>
                     </div>
                     <div className="grid grid-cols-3 gap-2 text-sm">
                       <div>
                         <p className="text-[10px] uppercase text-muted-foreground">
-                          P&L
+                          Net P&L
                         </p>
                         <p
                           className={cn(
@@ -1061,13 +1120,115 @@ function HistoryTab({
         </Card>
       )}
 
-      {/* Trade ledger */}
+      {/* Per-run summary — one row per Start/Stop, P&L = sum across all
+          legs in that run. This is what win-rate and other stats use. */}
       <Card>
         <CardHeader>
-          <CardTitle>Trade ledger</CardTitle>
+          <CardTitle>Trade summary (per run)</CardTitle>
           <CardDescription>
-            One row per completed entry + exit pair. FIFO-matched within
-            each leg.
+            One row per run (= one trade attempt). Net P&L is the sum of
+            every leg's round-trip in that run. Multi-leg baskets count
+            as a single trade for win-rate purposes.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {runTrades.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No closed runs yet.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="text-xs">Run</TableHead>
+                    <TableHead className="text-xs">Mode</TableHead>
+                    <TableHead className="text-right text-xs">Legs</TableHead>
+                    <TableHead className="text-xs">Entry (first leg)</TableHead>
+                    <TableHead className="text-xs">Exit (last leg)</TableHead>
+                    <TableHead className="text-xs">Duration</TableHead>
+                    <TableHead className="text-xs">Exit kinds</TableHead>
+                    <TableHead className="text-right text-xs">Net P&L</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {runTrades.map((r) => {
+                    const durMin =
+                      (new Date(r.exit_time).getTime() -
+                        new Date(r.entry_time).getTime()) /
+                      60000;
+                    const durStr = Number.isFinite(durMin)
+                      ? durMin < 60
+                        ? `${durMin.toFixed(1)}m`
+                        : durMin < 24 * 60
+                          ? `${(durMin / 60).toFixed(1)}h`
+                          : `${(durMin / (24 * 60)).toFixed(1)}d`
+                      : "—";
+                    return (
+                      <TableRow key={r.run_id}>
+                        <TableCell className="font-mono text-xs">
+                          #{r.run_id}
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={
+                              r.mode === "live" ? "destructive" : "secondary"
+                            }
+                            className="text-[10px]"
+                          >
+                            {r.mode}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {r.num_legs}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs">
+                          {formatIst(r.entry_time)}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs">
+                          {formatIst(r.exit_time)}
+                        </TableCell>
+                        <TableCell className="text-xs">{durStr}</TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap gap-1">
+                            {r.exit_kinds.map((k) => (
+                              <Badge
+                                key={k}
+                                variant="outline"
+                                className="font-mono text-[10px]"
+                              >
+                                {k}
+                              </Badge>
+                            ))}
+                          </div>
+                        </TableCell>
+                        <TableCell
+                          className={cn(
+                            "text-right font-mono text-xs font-semibold",
+                            r.pnl > 0 && "text-green-600",
+                            r.pnl < 0 && "text-red-600",
+                          )}
+                        >
+                          {formatPnl(r.pnl)}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Leg-level ledger — kept for drill-down. */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Leg detail</CardTitle>
+          <CardDescription>
+            One row per leg round-trip. FIFO-matched within each leg.
+            Useful for diagnosing which leg of a multi-leg basket carried
+            the run's P&L.
           </CardDescription>
         </CardHeader>
         <CardContent>
