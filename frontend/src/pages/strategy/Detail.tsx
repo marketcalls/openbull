@@ -552,6 +552,8 @@ function buildRoundTrips(orders: StrategyOrder[]): RoundTrip[] {
   return trips;
 }
 
+type ModeFilter = "all" | "live" | "sandbox";
+
 function HistoryTab({
   runs,
   orders,
@@ -559,55 +561,162 @@ function HistoryTab({
   runs: StrategyRun[];
   orders: StrategyOrder[];
 }) {
-  // Compute closed round-trips from the full order history. This is the
-  // operator's trade ledger — one row per completed (entry → exit) pair
-  // on a leg, spanning every run of the strategy (today, yesterday,
-  // last week, …). Newest first.
-  const trips = useMemo(() => buildRoundTrips(orders), [orders]);
+  // Mode filter — drives both the Performance card and the trade ledger.
+  const [modeFilter, setModeFilter] = useState<ModeFilter>("all");
 
-  // Run lookup so each trade row can show the originating mode
-  // (sandbox / live). Trades and the run they belong to are stored in
-  // separate tables; joining here keeps the ledger truthful.
+  // Compute closed round-trips from the full order history. One row per
+  // completed (entry → exit) pair on a leg, spanning every run of the
+  // strategy. Newest first.
+  const allTrips = useMemo(() => buildRoundTrips(orders), [orders]);
+
+  // Run lookup so each trade can be tagged with its originating mode
+  // (sandbox / live).
   const runModeById = useMemo(() => {
     const m = new Map<number, "sandbox" | "live" | string>();
     for (const r of runs) m.set(r.id, r.mode);
     return m;
   }, [runs]);
 
-  // Per-mode metric breakdown — operator wants to evaluate sandbox vs
-  // live performance independently. Sandbox numbers shouldn't get
-  // averaged into live "real" P&L.
+  // Per-mode partition for the side-by-side comparison card (stays
+  // independent of the filter — that card is meant to be a quick
+  // sandbox-vs-live read regardless of what's selected above).
   const tripsByMode = useMemo(() => {
     const live: RoundTrip[] = [];
     const sandbox: RoundTrip[] = [];
-    for (const t of trips) {
+    for (const t of allTrips) {
       const mode = runModeById.get(t.run_id);
       if (mode === "live") live.push(t);
       else sandbox.push(t);
     }
     return { live, sandbox };
-  }, [trips, runModeById]);
+  }, [allTrips, runModeById]);
 
-  // Aggregate metrics across every trade.
-  const totalTrades = trips.length;
-  const wins = trips.filter((t) => t.pnl > 0).length;
-  const losses = trips.filter((t) => t.pnl < 0).length;
-  const scratches = totalTrades - wins - losses;
-  const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
-  const totalPnl = trips.reduce((s, t) => s + t.pnl, 0);
-  const avgPnl = totalTrades > 0 ? totalPnl / totalTrades : 0;
-  const grossWin = trips
-    .filter((t) => t.pnl > 0)
-    .reduce((s, t) => s + t.pnl, 0);
-  const grossLoss = trips
-    .filter((t) => t.pnl < 0)
-    .reduce((s, t) => s + t.pnl, 0);
-  const profitFactor =
-    grossLoss !== 0 ? Math.abs(grossWin / grossLoss) : grossWin > 0 ? Infinity : 0;
-  const bestTrade =
-    trips.length > 0 ? Math.max(...trips.map((t) => t.pnl)) : 0;
-  const worstTrade =
-    trips.length > 0 ? Math.min(...trips.map((t) => t.pnl)) : 0;
+  // Trades scoped to the active filter — drive the Performance card
+  // and the ledger table.
+  const trips = useMemo(() => {
+    if (modeFilter === "all") return allTrips;
+    return allTrips.filter((t) => runModeById.get(t.run_id) === modeFilter);
+  }, [allTrips, modeFilter, runModeById]);
+
+  // ---------------------------------------------------------------------
+  // Aggregate metrics across the filtered trades. All numbers reactive
+  // to the mode filter above.
+  // ---------------------------------------------------------------------
+  const stats = useMemo(() => {
+    const total = trips.length;
+    const winners = trips.filter((t) => t.pnl > 0);
+    const losers = trips.filter((t) => t.pnl < 0);
+    const wins = winners.length;
+    const losses = losers.length;
+    const scratches = total - wins - losses;
+    const winRate = total > 0 ? (wins / total) * 100 : 0;
+    const totalPnl = trips.reduce((s, t) => s + t.pnl, 0);
+    const avgPnl = total > 0 ? totalPnl / total : 0;
+    const grossWin = winners.reduce((s, t) => s + t.pnl, 0);
+    const grossLoss = losers.reduce((s, t) => s + t.pnl, 0);
+    const avgWin = wins > 0 ? grossWin / wins : 0;
+    const avgLoss = losses > 0 ? grossLoss / losses : 0;
+    // RR = how big the average winner is vs the average loser. > 1 means
+    // winners outsize losers; combined with win rate this tells the full
+    // story (high win rate + low RR can still be unprofitable).
+    const rrRatio = avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : avgWin > 0 ? Infinity : 0;
+    const profitFactor =
+      grossLoss !== 0
+        ? Math.abs(grossWin / grossLoss)
+        : grossWin > 0
+          ? Infinity
+          : 0;
+    const bestTrade = total > 0 ? Math.max(...trips.map((t) => t.pnl)) : 0;
+    const worstTrade = total > 0 ? Math.min(...trips.map((t) => t.pnl)) : 0;
+
+    // Max drawdown on the cumulative P&L curve, walked in chronological
+    // order. Operators care about this because it sets the worst-case
+    // capital path the strategy has actually walked through.
+    let maxDrawdown = 0;
+    let peak = 0;
+    let cum = 0;
+    const chronological = [...trips].sort((a, b) =>
+      a.exit_time.localeCompare(b.exit_time),
+    );
+    for (const t of chronological) {
+      cum += t.pnl;
+      if (cum > peak) peak = cum;
+      const dd = cum - peak;
+      if (dd < maxDrawdown) maxDrawdown = dd;
+    }
+
+    // Longest losing streak — sets the capital cushion you need to
+    // survive without psychological tilt or margin calls.
+    let maxLoseStreak = 0;
+    let curLose = 0;
+    let maxWinStreak = 0;
+    let curWin = 0;
+    for (const t of chronological) {
+      if (t.pnl < 0) {
+        curLose += 1;
+        curWin = 0;
+        if (curLose > maxLoseStreak) maxLoseStreak = curLose;
+      } else if (t.pnl > 0) {
+        curWin += 1;
+        curLose = 0;
+        if (curWin > maxWinStreak) maxWinStreak = curWin;
+      } else {
+        curWin = 0;
+        curLose = 0;
+      }
+    }
+
+    // Average trade duration in minutes (entry → exit).
+    let totalDurMs = 0;
+    let countedDur = 0;
+    for (const t of trips) {
+      const a = new Date(t.entry_time).getTime();
+      const b = new Date(t.exit_time).getTime();
+      if (!Number.isNaN(a) && !Number.isNaN(b) && b > a) {
+        totalDurMs += b - a;
+        countedDur += 1;
+      }
+    }
+    const avgDurMin = countedDur > 0 ? totalDurMs / countedDur / 60000 : 0;
+
+    // Exit-kind breakdown — what fraction of trades exited via SL vs
+    // Target vs manual close vs signal vs EOD. Highlights which rules
+    // are doing the heavy lifting and where the strategy actually
+    // makes / loses money.
+    const exitKindCounts: Record<string, number> = {};
+    const exitKindPnl: Record<string, number> = {};
+    for (const t of trips) {
+      exitKindCounts[t.exit_kind] = (exitKindCounts[t.exit_kind] || 0) + 1;
+      exitKindPnl[t.exit_kind] = (exitKindPnl[t.exit_kind] || 0) + t.pnl;
+    }
+
+    return {
+      total,
+      wins,
+      losses,
+      scratches,
+      winRate,
+      totalPnl,
+      avgPnl,
+      grossWin,
+      grossLoss,
+      avgWin,
+      avgLoss,
+      rrRatio,
+      profitFactor,
+      bestTrade,
+      worstTrade,
+      maxDrawdown,
+      maxLoseStreak,
+      maxWinStreak,
+      avgDurMin,
+      exitKindCounts,
+      exitKindPnl,
+    };
+  }, [trips]);
+
+  // Pull individual fields out to keep the JSX tidy.
+  const totalTrades = stats.total;
 
   if (runs.length === 0 && totalTrades === 0) {
     return (
@@ -624,69 +733,251 @@ function HistoryTab({
 
   return (
     <div className="space-y-4">
-      {/* Summary metrics */}
+      {/* Summary metrics + mode filter */}
       <Card>
-        <CardHeader>
-          <CardTitle>Strategy performance</CardTitle>
-          <CardDescription>
-            Aggregated across every closed trade — all runs, all days.
-          </CardDescription>
+        <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
+          <div>
+            <CardTitle>Strategy performance</CardTitle>
+            <CardDescription>
+              {modeFilter === "all"
+                ? "Aggregated across every closed trade — all runs, all days, both modes."
+                : modeFilter === "live"
+                  ? "Live trades only — real money, real broker."
+                  : "Sandbox trades only — paper P&L, no real money."}
+            </CardDescription>
+          </div>
+          {/* Mode filter — segmented pills */}
+          <div className="flex h-9 overflow-hidden rounded-md border border-input">
+            {(
+              [
+                { value: "all", label: "All", count: allTrips.length },
+                {
+                  value: "live",
+                  label: "Live",
+                  count: tripsByMode.live.length,
+                },
+                {
+                  value: "sandbox",
+                  label: "Sandbox",
+                  count: tripsByMode.sandbox.length,
+                },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setModeFilter(opt.value)}
+                className={cn(
+                  "px-3 text-xs font-medium transition-colors",
+                  modeFilter === opt.value
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-background hover:bg-muted",
+                )}
+              >
+                {opt.label}
+                <span className="ml-1 text-[10px] opacity-70">
+                  ({opt.count})
+                </span>
+              </button>
+            ))}
+          </div>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">
-            <Stat label="Trades" value={String(totalTrades)} />
-            <Stat
-              label="Win rate"
-              value={`${winRate.toFixed(1)}%`}
-              tone={winRate >= 50 ? "good" : winRate > 0 ? "warn" : "bad"}
-            />
-            <Stat
-              label="Wins / Losses"
-              value={`${wins} / ${losses}${scratches ? ` (+${scratches})` : ""}`}
-            />
-            <Stat
-              label="Total P&L"
-              value={totalPnl === 0 ? "0.00" : formatPnl(totalPnl)}
-              tone={totalPnl > 0 ? "good" : totalPnl < 0 ? "bad" : "neutral"}
-              bold
-            />
-            <Stat
-              label="Avg P&L / trade"
-              value={avgPnl === 0 ? "0.00" : formatPnl(avgPnl)}
-              tone={avgPnl > 0 ? "good" : avgPnl < 0 ? "bad" : "neutral"}
-            />
-            <Stat
-              label="Profit factor"
-              value={
-                profitFactor === Infinity
-                  ? "∞"
-                  : profitFactor === 0
-                    ? "—"
-                    : profitFactor.toFixed(2)
-              }
-              tone={profitFactor >= 1.5 ? "good" : profitFactor > 1 ? "warn" : "bad"}
-            />
-            <Stat
-              label="Best trade"
-              value={bestTrade === 0 ? "—" : formatPnl(bestTrade)}
-              tone="good"
-            />
-            <Stat
-              label="Worst trade"
-              value={worstTrade === 0 ? "—" : formatPnl(worstTrade)}
-              tone="bad"
-            />
-            <Stat
-              label="Gross win"
-              value={grossWin === 0 ? "—" : formatPnl(grossWin)}
-              tone="good"
-            />
-            <Stat
-              label="Gross loss"
-              value={grossLoss === 0 ? "—" : formatPnl(grossLoss)}
-              tone="bad"
-            />
-          </div>
+          {totalTrades === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              No {modeFilter === "all" ? "" : `${modeFilter} `}trades yet.
+            </p>
+          ) : (
+            <>
+              {/* Row 1 — headline + win/loss profile */}
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">
+                <Stat label="Trades" value={String(totalTrades)} />
+                <Stat
+                  label="Win rate"
+                  value={`${stats.winRate.toFixed(1)}%`}
+                  tone={
+                    stats.winRate >= 50 ? "good" : stats.winRate > 0 ? "warn" : "bad"
+                  }
+                />
+                <Stat
+                  label="Wins / Losses"
+                  value={`${stats.wins} / ${stats.losses}${
+                    stats.scratches ? ` (+${stats.scratches})` : ""
+                  }`}
+                />
+                <Stat
+                  label="Total P&L"
+                  value={
+                    stats.totalPnl === 0 ? "0.00" : formatPnl(stats.totalPnl)
+                  }
+                  tone={
+                    stats.totalPnl > 0
+                      ? "good"
+                      : stats.totalPnl < 0
+                        ? "bad"
+                        : "neutral"
+                  }
+                  bold
+                />
+                <Stat
+                  label="Avg P&L / trade"
+                  value={stats.avgPnl === 0 ? "0.00" : formatPnl(stats.avgPnl)}
+                  tone={
+                    stats.avgPnl > 0
+                      ? "good"
+                      : stats.avgPnl < 0
+                        ? "bad"
+                        : "neutral"
+                  }
+                />
+              </div>
+
+              {/* Row 2 — winner/loser size + RR */}
+              <p className="mt-4 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Winner / loser profile
+              </p>
+              <div className="mt-1 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">
+                <Stat
+                  label="Avg win"
+                  value={stats.avgWin === 0 ? "—" : formatPnl(stats.avgWin)}
+                  tone="good"
+                />
+                <Stat
+                  label="Avg loss"
+                  value={stats.avgLoss === 0 ? "—" : formatPnl(stats.avgLoss)}
+                  tone="bad"
+                />
+                <Stat
+                  label="Reward / Risk"
+                  value={
+                    stats.rrRatio === Infinity
+                      ? "∞"
+                      : stats.rrRatio === 0
+                        ? "—"
+                        : stats.rrRatio.toFixed(2)
+                  }
+                  tone={
+                    stats.rrRatio >= 2
+                      ? "good"
+                      : stats.rrRatio > 1
+                        ? "warn"
+                        : "bad"
+                  }
+                />
+                <Stat
+                  label="Profit factor"
+                  value={
+                    stats.profitFactor === Infinity
+                      ? "∞"
+                      : stats.profitFactor === 0
+                        ? "—"
+                        : stats.profitFactor.toFixed(2)
+                  }
+                  tone={
+                    stats.profitFactor >= 1.5
+                      ? "good"
+                      : stats.profitFactor > 1
+                        ? "warn"
+                        : "bad"
+                  }
+                />
+                <Stat
+                  label="Best / Worst"
+                  value={`${formatPnl(stats.bestTrade)} / ${formatPnl(stats.worstTrade)}`}
+                />
+              </div>
+
+              {/* Row 3 — risk + duration */}
+              <p className="mt-4 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Risk &amp; behaviour
+              </p>
+              <div className="mt-1 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">
+                <Stat
+                  label="Max drawdown"
+                  value={
+                    stats.maxDrawdown === 0
+                      ? "—"
+                      : formatPnl(stats.maxDrawdown)
+                  }
+                  tone="bad"
+                />
+                <Stat
+                  label="Worst losing streak"
+                  value={`${stats.maxLoseStreak} ${
+                    stats.maxLoseStreak === 1 ? "loss" : "losses"
+                  }`}
+                  tone={stats.maxLoseStreak >= 5 ? "bad" : undefined}
+                />
+                <Stat
+                  label="Best winning streak"
+                  value={`${stats.maxWinStreak} ${
+                    stats.maxWinStreak === 1 ? "win" : "wins"
+                  }`}
+                  tone={stats.maxWinStreak >= 3 ? "good" : undefined}
+                />
+                <Stat
+                  label="Avg trade duration"
+                  value={
+                    stats.avgDurMin === 0
+                      ? "—"
+                      : stats.avgDurMin < 60
+                        ? `${stats.avgDurMin.toFixed(1)}m`
+                        : stats.avgDurMin < 24 * 60
+                          ? `${(stats.avgDurMin / 60).toFixed(1)}h`
+                          : `${(stats.avgDurMin / (24 * 60)).toFixed(1)}d`
+                  }
+                />
+                <Stat
+                  label="Gross win / loss"
+                  value={`${formatPnl(stats.grossWin)} / ${formatPnl(stats.grossLoss)}`}
+                />
+              </div>
+
+              {/* Exit-kind breakdown — what rule actually closed the trades. */}
+              {Object.keys(stats.exitKindCounts).length > 0 && (
+                <>
+                  <p className="mt-4 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Exit reasons
+                  </p>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {Object.entries(stats.exitKindCounts)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([kind, count]) => {
+                        const pct = (count / totalTrades) * 100;
+                        const pnl = stats.exitKindPnl[kind] ?? 0;
+                        return (
+                          <div
+                            key={kind}
+                            className="rounded-md border bg-muted/30 px-3 py-1.5"
+                          >
+                            <div className="flex items-center gap-2">
+                              <Badge
+                                variant="outline"
+                                className="font-mono text-[10px]"
+                              >
+                                {kind}
+                              </Badge>
+                              <span className="text-xs text-muted-foreground">
+                                {count} ({pct.toFixed(0)}%)
+                              </span>
+                              <span
+                                className={cn(
+                                  "font-mono text-xs",
+                                  pnl > 0 && "text-green-600",
+                                  pnl < 0 && "text-red-600",
+                                )}
+                              >
+                                {formatPnl(pnl)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </CardContent>
       </Card>
 
