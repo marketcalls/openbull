@@ -99,26 +99,54 @@ def evaluate_leg(
     new_sl = base_sl
 
     trail_fired: Optional[str] = None
-    if trail_x and trail_x > 0 and trail_y and trail_y > 0:
-        if new_favorable_peak >= trail_x:
+    if trail_x and trail_x > 0:
+        if trail_y and trail_y > 0:
+            # ---- Stepped trail (X = trigger, Y = step size) ----
+            # Arms only after favorable_peak >= X, then advances the SL
+            # in Y-pt steps each time peak crosses an X + kY boundary.
+            # Useful for locking in profit progressively.
+            if new_favorable_peak >= trail_x:
+                if not trail_active:
+                    trail_active = True
+                    trail_fired = "trail_armed"
+                steps_past = int((new_favorable_peak - trail_x) // trail_y)
+                advance_pts = trail_y + steps_past * trail_y
+                trailed_sl = (
+                    entry_avg + advance_pts if position == POSITION_BUY
+                    else entry_avg - advance_pts
+                )
+                # Only move SL favorably (up for B, down for S).
+                if base_sl is None or (
+                    trailed_sl > base_sl if position == POSITION_BUY
+                    else trailed_sl < base_sl
+                ):
+                    new_sl = trailed_sl
+                    if trail_fired is None:
+                        trail_fired = "trail_advanced"
+        else:
+            # ---- Fixed-distance trail (X = trail distance, no Y) ----
+            # Armed immediately at entry ± X (initial hard stop). On each
+            # favorable extreme, the SL slides 1:1 with the peak so the
+            # gap stays constant at X points. SL never retreats. Compatible
+            # with sl_pts: whichever stop is more favorable wins, because
+            # the SL-move-favorably-only check below handles both.
+            trailed_sl = (
+                entry_avg + new_favorable_peak - trail_x
+                if position == POSITION_BUY
+                else entry_avg - new_favorable_peak + trail_x
+            )
             if not trail_active:
                 trail_active = True
                 trail_fired = "trail_armed"
-            # Advance the SL in steps of trail_y past the X trigger.
-            steps_past = int((new_favorable_peak - trail_x) // trail_y)
-            advance_pts = trail_y + steps_past * trail_y
-            trailed_sl = (
-                entry_avg + advance_pts if position == POSITION_BUY
-                else entry_avg - advance_pts
-            )
-            # Only move SL favorably (up for B, down for S).
             if base_sl is None or (
                 trailed_sl > base_sl if position == POSITION_BUY
                 else trailed_sl < base_sl
             ):
+                # NOTE: we deliberately don't fire trail_advanced on every
+                # tick that moves the SL — fixed-distance trail advances
+                # continuously, which would flood the event bus. The UI
+                # still sees the new effective_sl via the WS delta.
                 new_sl = trailed_sl
-                if trail_fired is None:
-                    trail_fired = "trail_advanced"
 
     # Now check SL / Target against the (possibly trailed) levels.
     sl_hit = False

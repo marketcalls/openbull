@@ -400,7 +400,7 @@ function LegCard({
             />
           </div>
           <div className="space-y-1.5">
-            <Label className="text-xs uppercase">Trail SL — X (trigger pts)</Label>
+            <Label className="text-xs uppercase">Trail SL — X (pts)</Label>
             <Input
               type="number"
               step={0.01}
@@ -411,9 +411,14 @@ function LegCard({
               }
               className="h-9"
             />
+            <p className="text-[10px] text-muted-foreground">
+              With Y blank: initial SL at entry ± X, then trails the peak 1:1 by
+              X pts. With Y set: stepped trail — arms at X, advances in Y-pt
+              steps.
+            </p>
           </div>
           <div className="space-y-1.5">
-            <Label className="text-xs uppercase">Trail SL — Y (step pts)</Label>
+            <Label className="text-xs uppercase">Trail SL — Y (step, optional)</Label>
             <Input
               type="number"
               step={0.01}
@@ -424,6 +429,10 @@ function LegCard({
               }
               className="h-9"
             />
+            <p className="text-[10px] text-muted-foreground">
+              Leave blank (or 0) for a classic fixed-distance trail driven by X
+              alone.
+            </p>
           </div>
         </div>
       </CardContent>
