@@ -2662,7 +2662,7 @@ export default function StrategyDetail() {
               Disabled briefly while in flight. */}
           <Button
             variant="destructive"
-            className="border-2 border-red-700 bg-red-600 font-bold hover:bg-red-700"
+            className="border-2 border-red-700 bg-red-600 font-bold text-white hover:bg-red-700 hover:text-white"
             disabled={killSwitchMutation.isPending}
             onClick={() => setConfirmKill(true)}
             title="Cancel pending orders, flatten positions, and block all webhook signals"
