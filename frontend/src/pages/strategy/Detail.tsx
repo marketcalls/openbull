@@ -158,6 +158,83 @@ function wsStatusBadge(status: WsStatus): {
   }
 }
 
+/**
+ * Real-time trailing-stop status for one leg. Reads the leg's trail
+ * config (x = favorable move needed to arm, y = step size) and the
+ * live `favorable_peak` / `trail_active` / `effective_sl` from the
+ * WS delta — no polling.
+ *
+ * Three states:
+ *  - no trail configured             → "—"
+ *  - trail configured, not armed     → "arm @ <price>" + "moved X/Y pts"
+ *  - trail armed                     → "armed" badge + effective SL price
+ *
+ * For SELL legs the arm price is below entry (price needs to drop); for
+ * BUY legs it's above entry. `favorable_peak` is a non-negative point
+ * delta from entry (not an absolute price).
+ */
+function TrailCell({
+  leg,
+  live,
+}: {
+  leg: { position: "B" | "S"; trail?: { x: number; y: number } | null };
+  live: Record<string, unknown> | null | undefined;
+}) {
+  const trailX = leg.trail?.x ?? 0;
+  const trailY = leg.trail?.y ?? 0;
+  if (!trailX || trailX <= 0) {
+    return <span className="text-muted-foreground">—</span>;
+  }
+
+  const entry =
+    typeof live?.entry_avg === "number" ? (live.entry_avg as number) : null;
+  const peakPts =
+    typeof live?.favorable_peak === "number"
+      ? (live.favorable_peak as number)
+      : 0;
+  const armed = Boolean(live?.trail_active);
+  const effSl =
+    typeof live?.effective_sl === "number"
+      ? (live.effective_sl as number)
+      : null;
+
+  const armPrice =
+    entry != null
+      ? leg.position === "B"
+        ? entry + trailX
+        : entry - trailX
+      : null;
+
+  return (
+    <div className="flex flex-col items-end gap-0.5 leading-tight">
+      {armed ? (
+        <>
+          <span className="text-amber-600">
+            armed{effSl != null && ` @ ${effSl.toFixed(2)}`}
+          </span>
+          <span className="text-[10px] text-muted-foreground">
+            peak +{peakPts.toFixed(2)} pts
+          </span>
+        </>
+      ) : (
+        <>
+          {armPrice != null ? (
+            <span className="text-muted-foreground">
+              arm @ {armPrice.toFixed(2)}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">arm pending</span>
+          )}
+          <span className="text-[10px] text-muted-foreground">
+            {peakPts.toFixed(2)} / {trailX} pts
+            {trailY > 0 && ` · step ${trailY}`}
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
 function LiveTab({
   strategy,
   orders,
@@ -307,6 +384,7 @@ function LiveTab({
                   <TableHead className="text-right">MTM</TableHead>
                   <TableHead className="text-right">Eff. SL</TableHead>
                   <TableHead className="text-right">Eff. Tgt</TableHead>
+                  <TableHead className="text-right">Trail</TableHead>
                   <TableHead>State</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -365,6 +443,9 @@ function LiveTab({
                       </TableCell>
                       <TableCell className="text-right font-mono">
                         {fmtPrice(live?.effective_target)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        <TrailCell leg={leg} live={live} />
                       </TableCell>
                       <TableCell>
                         <Badge
