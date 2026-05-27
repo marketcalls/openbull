@@ -134,149 +134,158 @@ async def _process_tick(tick: dict[str, Any]) -> None:
 async def _process_tick_for_run(
     run_id: int, exchange: str, symbol: str, ltp: float
 ) -> None:
-    state = await state_module.get_run_state(run_id)
-    if state is None:
-        # Run isn't live in Redis (stopped or crashed before recovery) —
-        # tick is irrelevant.
-        return
-
-    # Find every leg matching this symbol that's still open.
-    matched_legs: list[tuple[str, dict]] = [
-        (lid, leg) for lid, leg in state.get("legs", {}).items()
-        if leg.get("status") == "open"
-        and leg.get("symbol") == symbol
-        and leg.get("exchange") == exchange
-    ]
-    if not matched_legs:
-        return
-
     # Load the strategy row once (overall_sl_mtm / overall_target_mtm /
     # lock_profit / trail_sl_to_entry + per-leg configs) so the tick path
-    # is one DB read instead of N.
+    # is one DB read instead of N. Done outside the state lock — purely
+    # read-only against Postgres, doesn't touch Redis run state.
     strategy_row = await _load_strategy_for_run(run_id)
     if strategy_row is None:
         return
 
-    state_changed = False
-    triggered_exits: list[tuple[int, str]] = []  # (leg_id, exit_kind)
-    sl_leg_ids_this_tick: list[int] = []
+    triggered_exits: list[tuple[int, str]] = []
+    stop_reason: Optional[str] = None
 
-    for lid, leg in matched_legs:
-        entry_avg = leg.get("entry_avg")
-        if entry_avg is None:
+    # Serialize state mutations against the engine's close-leg / exit paths.
+    # Without this lock a tick that's mid-process reads pre-exit state,
+    # then writes its whole-state view back AFTER engine._apply_fill_to_state
+    # wrote the leg's realized_pnl + status='closed' — silently wiping the
+    # realized P&L and leaving the run aggregates stuck on the old value.
+    # Exit dispatch (_trigger_exit / _trigger_run_stop) runs AFTER the lock
+    # releases so it can re-acquire the same lock through engine._exit_legs.
+    async with state_module.get_state_lock(run_id):
+        state = await state_module.get_run_state(run_id)
+        if state is None:
+            return
+
+        # Find every leg matching this symbol that's still open.
+        matched_legs: list[tuple[str, dict]] = [
+            (lid, leg) for lid, leg in state.get("legs", {}).items()
+            if leg.get("status") == "open"
+            and leg.get("symbol") == symbol
+            and leg.get("exchange") == exchange
+        ]
+        if not matched_legs:
+            return
+
+        state_changed = False
+        sl_leg_ids_this_tick: list[int] = []
+
+        for lid, leg in matched_legs:
+            entry_avg = leg.get("entry_avg")
+            if entry_avg is None:
+                leg["ltp"] = ltp
+                state_changed = True
+                continue
+
+            leg_config = _find_leg_config(strategy_row.legs or [], int(lid))
+            outcome = risk_evaluator.evaluate_leg(
+                position=leg.get("position"),
+                qty=int(leg.get("qty") or 0),
+                entry_avg=float(entry_avg),
+                ltp=ltp,
+                sl_pts=leg_config.get("sl_pts"),
+                target_pts=leg_config.get("target_pts"),
+                trail_x=float((leg_config.get("trail") or {}).get("x") or 0),
+                trail_y=float((leg_config.get("trail") or {}).get("y") or 0),
+                prior_favorable_peak=float(leg.get("favorable_peak") or 0.0),
+                prior_trail_active=bool(leg.get("trail_active") or False),
+                prior_effective_sl=leg.get("effective_sl"),
+                prior_effective_target=leg.get("effective_target"),
+            )
+
             leg["ltp"] = ltp
+            leg["mtm"] = outcome.leg_mtm
+            leg["favorable_peak"] = outcome.favorable_peak
+            leg["trail_active"] = outcome.trail_active
+            leg["effective_sl"] = outcome.effective_sl
+            leg["effective_target"] = outcome.effective_target
             state_changed = True
-            continue
 
-        leg_config = _find_leg_config(strategy_row.legs or [], int(lid))
-        outcome = risk_evaluator.evaluate_leg(
-            position=leg.get("position"),
-            qty=int(leg.get("qty") or 0),
-            entry_avg=float(entry_avg),
-            ltp=ltp,
-            sl_pts=leg_config.get("sl_pts"),
-            target_pts=leg_config.get("target_pts"),
-            trail_x=float((leg_config.get("trail") or {}).get("x") or 0),
-            trail_y=float((leg_config.get("trail") or {}).get("y") or 0),
-            prior_favorable_peak=float(leg.get("favorable_peak") or 0.0),
-            prior_trail_active=bool(leg.get("trail_active") or False),
-            prior_effective_sl=leg.get("effective_sl"),
-            prior_effective_target=leg.get("effective_target"),
+            if outcome.triggered:
+                await _publish_risk_event(
+                    run_id, int(lid), outcome, leg, state["run_id"], symbol, ltp,
+                )
+                if outcome.triggered == "sl":
+                    triggered_exits.append((int(lid), "exit_sl"))
+                    sl_leg_ids_this_tick.append(int(lid))
+                elif outcome.triggered == "target":
+                    triggered_exits.append((int(lid), "exit_target"))
+
+        # ---- Cross-cutting: Trail-SL-to-entry ----
+        if (
+            sl_leg_ids_this_tick
+            and strategy_row.trail_sl_to_entry
+            and not state.get("trail_to_entry_active")
+        ):
+            moved_total = 0
+            for sl_leg_id in sl_leg_ids_this_tick:
+                moved_total += strategy_risk.apply_trail_to_entry(
+                    state.get("legs") or {}, sl_leg_id,
+                )
+            if moved_total > 0:
+                state["trail_to_entry_active"] = True
+                triggering = sl_leg_ids_this_tick[0]
+                bus.publish(TrailToEntryActivatedEvent(
+                    user_id=strategy_row.user_id,
+                    strategy_id=strategy_row.id,
+                    run_id=run_id,
+                    leg_id=triggering,
+                    severity="warn",
+                    message=(
+                        f"Trail-SL-to-entry activated by leg {triggering} SL hit; "
+                        f"moved {moved_total} leg(s) to entry. Overall SL bypassed."
+                    ),
+                    payload={"trigger_leg_id": triggering, "moved_legs": moved_total},
+                ))
+
+        # Re-aggregate strategy-level P&L now that legs updated.
+        realized, unrealized, total = risk_evaluator.compute_strategy_mtm(state["legs"])
+        state["pnl_realized"] = realized
+        state["pnl_unrealized"] = unrealized
+        state["pnl_total"] = total
+
+        # ---- Strategy-level rule layer (lock-profit + overall SL/target) ----
+        outcome = strategy_risk.evaluate_strategy(
+            pnl_realized=realized,
+            pnl_unrealized=unrealized,
+            prior_pnl_peak=float(state.get("pnl_peak") or 0.0),
+            prior_pnl_trough=float(state.get("pnl_trough") or 0.0),
+            lock_armed=bool(state.get("lock_armed") or False),
+            lock_floor=state.get("lock_floor"),
+            trail_to_entry_active=bool(state.get("trail_to_entry_active") or False),
+            overall_sl_mtm=float(strategy_row.overall_sl_mtm) if strategy_row.overall_sl_mtm is not None else None,
+            overall_target_mtm=float(strategy_row.overall_target_mtm) if strategy_row.overall_target_mtm is not None else None,
+            lock_profit_cfg=strategy_row.lock_profit,
         )
+        state["pnl_peak"] = outcome.pnl_peak
+        state["pnl_trough"] = outcome.pnl_trough
+        state["lock_armed"] = outcome.lock_armed
+        state["lock_floor"] = outcome.lock_floor
 
-        leg["ltp"] = ltp
-        leg["mtm"] = outcome.leg_mtm
-        leg["favorable_peak"] = outcome.favorable_peak
-        leg["trail_active"] = outcome.trail_active
-        leg["effective_sl"] = outcome.effective_sl
-        leg["effective_target"] = outcome.effective_target
-        state_changed = True
-
-        if outcome.triggered:
-            await _publish_risk_event(
-                run_id, int(lid), outcome, leg, state["run_id"], symbol, ltp,
-            )
-            if outcome.triggered == "sl":
-                triggered_exits.append((int(lid), "exit_sl"))
-                sl_leg_ids_this_tick.append(int(lid))
-            elif outcome.triggered == "target":
-                triggered_exits.append((int(lid), "exit_target"))
-
-    # ---- Cross-cutting: Trail-SL-to-entry ----
-    # When a leg's SL fires AND the strategy has trail_sl_to_entry enabled,
-    # snap every other open leg's effective SL to its entry price. Overall
-    # SL is bypassed for the rest of the run.
-    if (
-        sl_leg_ids_this_tick
-        and strategy_row.trail_sl_to_entry
-        and not state.get("trail_to_entry_active")
-    ):
-        moved_total = 0
-        for sl_leg_id in sl_leg_ids_this_tick:
-            moved_total += strategy_risk.apply_trail_to_entry(
-                state.get("legs") or {}, sl_leg_id,
-            )
-        if moved_total > 0:
-            state["trail_to_entry_active"] = True
-            triggering = sl_leg_ids_this_tick[0]
-            bus.publish(TrailToEntryActivatedEvent(
+        for ev in outcome.events:
+            _publish_strategy_event(
                 user_id=strategy_row.user_id,
                 strategy_id=strategy_row.id,
                 run_id=run_id,
-                leg_id=triggering,
-                severity="warn",
-                message=(
-                    f"Trail-SL-to-entry activated by leg {triggering} SL hit; "
-                    f"moved {moved_total} leg(s) to entry. Overall SL bypassed."
-                ),
-                payload={"trigger_leg_id": triggering, "moved_legs": moved_total},
-            ))
+                event=ev,
+            )
 
-    # Re-aggregate strategy-level P&L now that legs updated.
-    realized, unrealized, total = risk_evaluator.compute_strategy_mtm(state["legs"])
-    state["pnl_realized"] = realized
-    state["pnl_unrealized"] = unrealized
-    state["pnl_total"] = total
+        if state_changed or outcome.events:
+            await state_module.hydrate_run_state(run_id, state)
+            _broadcast_delta(run_id, state, exchange, symbol, ltp)
 
-    # ---- Strategy-level rule layer (lock-profit + overall SL/target) ----
-    outcome = strategy_risk.evaluate_strategy(
-        pnl_realized=realized,
-        pnl_unrealized=unrealized,
-        prior_pnl_peak=float(state.get("pnl_peak") or 0.0),
-        prior_pnl_trough=float(state.get("pnl_trough") or 0.0),
-        lock_armed=bool(state.get("lock_armed") or False),
-        lock_floor=state.get("lock_floor"),
-        trail_to_entry_active=bool(state.get("trail_to_entry_active") or False),
-        overall_sl_mtm=float(strategy_row.overall_sl_mtm) if strategy_row.overall_sl_mtm is not None else None,
-        overall_target_mtm=float(strategy_row.overall_target_mtm) if strategy_row.overall_target_mtm is not None else None,
-        lock_profit_cfg=strategy_row.lock_profit,
-    )
-    state["pnl_peak"] = outcome.pnl_peak
-    state["pnl_trough"] = outcome.pnl_trough
-    state["lock_armed"] = outcome.lock_armed
-    state["lock_floor"] = outcome.lock_floor
+        stop_reason = outcome.stop_reason
 
-    for ev in outcome.events:
-        _publish_strategy_event(
-            user_id=strategy_row.user_id,
-            strategy_id=strategy_row.id,
-            run_id=run_id,
-            event=ev,
-        )
-
-    if state_changed or outcome.events:
-        await state_module.hydrate_run_state(run_id, state)
-        _broadcast_delta(run_id, state, exchange, symbol, ltp)
-
-    # ---- Dispatch exits ----
+    # ---- Dispatch exits (lock released) ----
     # Per-leg first (preserves audit ordering — leg event before run stop).
+    # Runs outside the state lock so engine._exit_legs can re-acquire it.
     for leg_id, exit_kind in triggered_exits:
         await _trigger_exit(run_id, leg_id, exit_kind)
 
     # If a strategy-level rule triggered, close every still-open leg via
     # engine.stop_run and finalize the run with the right stop_reason.
-    if outcome.stop_reason:
-        await _trigger_run_stop(run_id, outcome.stop_reason)
+    if stop_reason:
+        await _trigger_run_stop(run_id, stop_reason)
 
 
 # ---------------------------------------------------------------------------
@@ -394,23 +403,33 @@ async def _publish_risk_event(
 def _broadcast_delta(
     run_id: int, state: dict[str, Any], exchange: str, symbol: str, ltp: float,
 ) -> None:
-    """Push a small delta frame to connected UI clients."""
+    """Push a small delta frame to connected UI clients.
+
+    Includes every open leg's current state, not just the leg that matched
+    this tick's symbol. The per-strategy 100 ms throttle in broadcast.push_delta
+    silently drops back-to-back deltas — when the live_quotes pump fetches
+    quotes for multiple legs and injects them milliseconds apart, only the
+    first tick's frame survives. If that frame carries only its own leg, the
+    other legs' rows stay stuck even though state has fresh LTP/MTM for them.
+    Sending every open leg on every surviving frame keeps the UI in sync.
+    """
     strategy_id = state.get("strategy_id")
     if strategy_id is None:
         return
     legs_payload = []
     for lid, leg in state.get("legs", {}).items():
-        if leg.get("symbol") == symbol and leg.get("exchange") == exchange:
-            legs_payload.append({
-                "leg_id": int(lid),
-                "ltp": leg.get("ltp"),
-                "mtm": leg.get("mtm"),
-                "effective_sl": leg.get("effective_sl"),
-                "effective_target": leg.get("effective_target"),
-                "trail_active": leg.get("trail_active"),
-                "favorable_peak": leg.get("favorable_peak"),
-                "status": leg.get("status"),
-            })
+        if leg.get("status") != "open":
+            continue
+        legs_payload.append({
+            "leg_id": int(lid),
+            "ltp": leg.get("ltp"),
+            "mtm": leg.get("mtm"),
+            "effective_sl": leg.get("effective_sl"),
+            "effective_target": leg.get("effective_target"),
+            "trail_active": leg.get("trail_active"),
+            "favorable_peak": leg.get("favorable_peak"),
+            "status": leg.get("status"),
+        })
     broadcast.push_delta(int(strategy_id), {
         "type": "delta",
         "ts_ist": format_ist(now_utc()),

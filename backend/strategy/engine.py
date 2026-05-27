@@ -550,15 +550,6 @@ async def _exit_legs(
                     user_id=strategy.user_id,
                     broker=broker, auth_token=auth_token,
                 )
-                if order_row.avg_fill_price is not None:
-                    await _apply_fill_to_state(
-                        run.id,
-                        leg_id=leg_id,
-                        order_kind=exit_kind,
-                        avg_fill_price=float(order_row.avg_fill_price),
-                        filled_qty=int(order_row.filled_qty or order_row.qty),
-                        strategy_legs=strategy.legs or [],
-                    )
             except Exception:
                 logger.exception(
                     "Fill recon failed for exit order %s", order_row.id,
@@ -574,15 +565,37 @@ async def _exit_legs(
             kind=exit_kind,
             broker_order_id=broker_order_id,
         )
-        try:
-            await state_module.mark_leg_closed(
-                run.id, leg_id,
-                exit_order_id=order_row.id,
-                exit_kind=exit_kind,
-                exit_status=order_row.status,
-            )
-        except Exception:
-            logger.exception("Failed to mark leg %d closed in Redis state", leg_id)
+        # Lock both Redis state mutations together. _apply_fill_to_state
+        # writes leg.realized_pnl/status and re-aggregates pnl_realized;
+        # mark_leg_closed then attaches exit metadata. Without a single
+        # lock, the tick processor's whole-state writeback can stomp
+        # _apply's leg fields between these two calls — silently wiping
+        # realized_pnl so the Live P&L card shows Realized=0.
+        async with state_module.get_state_lock(run.id):
+            if ok and order_row.avg_fill_price is not None:
+                try:
+                    await _apply_fill_to_state(
+                        run.id,
+                        leg_id=leg_id,
+                        order_kind=exit_kind,
+                        avg_fill_price=float(order_row.avg_fill_price),
+                        filled_qty=int(order_row.filled_qty or order_row.qty),
+                        strategy_legs=strategy.legs or [],
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to apply exit fill to state for run %d leg %d",
+                        run.id, leg_id,
+                    )
+            try:
+                await state_module.mark_leg_closed(
+                    run.id, leg_id,
+                    exit_order_id=order_row.id,
+                    exit_kind=exit_kind,
+                    exit_status=order_row.status,
+                )
+            except Exception:
+                logger.exception("Failed to mark leg %d closed in Redis state", leg_id)
         summaries.append({
             "leg_id": leg_id,
             "order_id": order_row.id,
@@ -663,7 +676,12 @@ async def close_leg(
     broker: Optional[str],
     config: Optional[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Exit a single leg. Run stays open."""
+    """Exit a single leg. Run stays open unless this was the last open leg.
+
+    When the user closes legs one-by-one, the run should finalize once
+    every leg is flat — otherwise the strategy stays in 'running' status
+    with no open positions, and the next /start refuses to fire.
+    """
     if strategy.status != "running" or strategy.current_run_id is None:
         raise EngineError(f"No active run (status='{strategy.status}')")
     if not any(int(leg["id"]) == leg_id for leg in (strategy.legs or [])):
@@ -677,7 +695,53 @@ async def close_leg(
         exit_kind="exit_leg_manual",
         auth_token=auth_token, broker=broker, config=config,
     )
-    return {"run_id": run.id, "legs": summaries}
+    auto_stopped = await _finalize_run_if_all_flat(
+        db, strategy=strategy, run=run,
+    )
+    return {
+        "run_id": run.id,
+        "legs": summaries,
+        "auto_stopped": auto_stopped,
+    }
+
+
+async def _finalize_run_if_all_flat(
+    db: AsyncSession,
+    *,
+    strategy: SmStrategy,
+    run: SmStrategyRun,
+) -> bool:
+    """Finalize the run if no leg in Redis state is still 'open'.
+
+    Legs with status 'closed' (exited) or 'rejected' (entry never filled)
+    count as flat. Returns True when finalization fired so the caller can
+    surface it on the response.
+    """
+    state = await state_module.get_run_state(run.id)
+    if state is None:
+        return False
+    legs = (state.get("legs") or {})
+    if not legs:
+        return False
+    if any((leg.get("status") or "") == "open" for leg in legs.values()):
+        return False
+
+    pnl_peak = float(state.get("pnl_peak") or 0.0)
+    pnl_trough = float(state.get("pnl_trough") or 0.0)
+    await repo.finalize_run(
+        db, run=run, strategy=strategy,
+        stop_reason="all_legs_closed",
+        pnl_peak=pnl_peak, pnl_trough=pnl_trough,
+    )
+    try:
+        await state_module.clear_run_state(run.id)
+    except Exception:
+        logger.exception("Failed to clear Redis state for run %d", run.id)
+    try:
+        tick_feed.remove_run_subscriptions(run.id)
+    except Exception:
+        logger.exception("Failed to unsubscribe ticks for run %d", run.id)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1941,3 +2005,43 @@ async def _apply_fill_to_state(
     state["pnl_trough"] = min(float(state.get("pnl_trough") or 0.0), state["pnl_total"])
 
     await state_module.hydrate_run_state(run_id, state)
+
+    # Push a delta frame on exit fills so the Live P&L card reflects the
+    # locked-in realized P&L instantly, instead of waiting up to 2s for
+    # the live_quotes pump's next tick to drive a broadcast.
+    if order_kind != "entry":
+        strategy_id = state.get("strategy_id")
+        if strategy_id is not None:
+            try:
+                from backend.strategy import broadcast as _broadcast
+                from backend.strategy.time_utils import format_ist, now_utc
+                legs_payload = []
+                for lid, lg in legs.items():
+                    if lg.get("status") != "open":
+                        continue
+                    legs_payload.append({
+                        "leg_id": int(lid),
+                        "ltp": lg.get("ltp"),
+                        "mtm": lg.get("mtm"),
+                        "effective_sl": lg.get("effective_sl"),
+                        "effective_target": lg.get("effective_target"),
+                        "trail_active": lg.get("trail_active"),
+                        "favorable_peak": lg.get("favorable_peak"),
+                        "status": lg.get("status"),
+                    })
+                _broadcast.push_fill_delta(int(strategy_id), {
+                    "type": "delta",
+                    "ts_ist": format_ist(now_utc()),
+                    "ts_ms_utc": int(now_utc().timestamp() * 1000),
+                    "mtm_realized": state["pnl_realized"],
+                    "mtm_unrealized": state["pnl_unrealized"],
+                    "mtm_total": state["pnl_total"],
+                    "peak": state["pnl_peak"],
+                    "trough": state["pnl_trough"],
+                    "legs": legs_payload,
+                })
+            except Exception:
+                logger.warning(
+                    "Failed to push delta after exit fill for run %d leg %d",
+                    run_id, leg_id, exc_info=True,
+                )

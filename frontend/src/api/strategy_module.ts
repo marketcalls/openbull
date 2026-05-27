@@ -211,6 +211,8 @@ export interface ExitResponse {
   status: "success";
   run_id: number;
   stop_reason?: string;
+  /** True when /legs/{id}/close also finalized the run (last open leg). */
+  auto_stopped?: boolean;
   legs: Array<{
     leg_id: number;
     status: string;

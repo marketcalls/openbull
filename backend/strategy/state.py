@@ -17,6 +17,7 @@ Keys
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -28,6 +29,30 @@ from backend.utils.redis_client import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Per-run asyncio lock for serializing state read-modify-write sequences
+# inside this process. The tick processor and engine.{start,stop,close_leg,
+# _exit_legs} both read state, mutate, then write it back; without this
+# lock, an in-flight tick processor can stomp the write that close_leg
+# just made (silently losing leg.realized_pnl, for example). Single-process
+# only — a future multi-worker deployment would need to fall back to the
+# Redis ownership lock for cross-process serialization.
+_state_locks: dict[int, asyncio.Lock] = {}
+
+
+def get_state_lock(run_id: int) -> asyncio.Lock:
+    """Return (creating if needed) the per-run state-mutation lock.
+
+    Callers should ``async with`` this around any get_run_state + mutate +
+    hydrate_run_state sequence. Cheap — one Lock object per active run,
+    cleared by :func:`clear_run_state`.
+    """
+    lock = _state_locks.get(run_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _state_locks[run_id] = lock
+    return lock
 
 
 def _state_key(run_id: int) -> str:
@@ -161,7 +186,9 @@ async def mark_leg_closed(
 
 async def clear_run_state(run_id: int) -> int:
     """Drop the state key (engine.stop_run final cleanup)."""
-    return await cache_delete(_state_key(run_id))
+    result = await cache_delete(_state_key(run_id))
+    _state_locks.pop(run_id, None)
+    return result
 
 
 # ---------------------------------------------------------------------------

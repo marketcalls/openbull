@@ -78,10 +78,24 @@ async def _owns_strategy(db: AsyncSession, *, user_id: int, strategy_id: int) ->
 
 
 async def _build_snapshot(strategy: SmStrategy) -> dict:
-    """Initial full state sent on connect."""
+    """Initial full state sent on connect.
+
+    While a run is active we render Redis run state. After the run stops
+    the Redis state is cleared, so we fall back to the most recent run's
+    finalized ``pnl_realized`` / peak / trough so the Live P&L card keeps
+    showing the just-completed run's realized P&L until the operator
+    presses Start again.
+    """
     state = None
     if strategy.current_run_id:
         state = await state_module.get_run_state(strategy.current_run_id)
+
+    last_run = None
+    last_run_id: Optional[int] = None
+    if state is None:
+        last_run = await _resolve_last_run(strategy)
+        if last_run is not None:
+            last_run_id = last_run.id
 
     legs_payload = []
     if state:
@@ -110,21 +124,46 @@ async def _build_snapshot(strategy: SmStrategy) -> dict:
                 "status": "configured",
             })
 
+    mtm_realized = (state or {}).get("pnl_realized")
+    mtm_unrealized = (state or {}).get("pnl_unrealized")
+    mtm_total = (state or {}).get("pnl_total")
+    peak = (state or {}).get("pnl_peak")
+    trough = (state or {}).get("pnl_trough")
+    if state is None and last_run is not None:
+        mtm_realized = float(last_run.pnl_realized) if last_run.pnl_realized is not None else 0.0
+        mtm_unrealized = 0.0
+        mtm_total = mtm_realized
+        peak = float(last_run.pnl_peak) if last_run.pnl_peak is not None else 0.0
+        trough = float(last_run.pnl_trough) if last_run.pnl_trough is not None else 0.0
+
     return {
         "type": "snapshot",
         "ts_ist": format_ist(now_utc()),
         "ts_ms_utc": int(now_utc().timestamp() * 1000),
         "strategy_id": strategy.id,
-        "run_id": strategy.current_run_id,
+        "run_id": strategy.current_run_id or last_run_id,
         "status": strategy.status,
         "mode": (await _resolve_run_mode(strategy)) if strategy.current_run_id else None,
-        "mtm_realized": (state or {}).get("pnl_realized") or 0.0,
-        "mtm_unrealized": (state or {}).get("pnl_unrealized") or 0.0,
-        "mtm_total": (state or {}).get("pnl_total") or 0.0,
-        "peak": (state or {}).get("pnl_peak") or 0.0,
-        "trough": (state or {}).get("pnl_trough") or 0.0,
+        "mtm_realized": mtm_realized if mtm_realized is not None else 0.0,
+        "mtm_unrealized": mtm_unrealized if mtm_unrealized is not None else 0.0,
+        "mtm_total": mtm_total if mtm_total is not None else 0.0,
+        "peak": peak if peak is not None else 0.0,
+        "trough": trough if trough is not None else 0.0,
         "legs": legs_payload,
     }
+
+
+async def _resolve_last_run(strategy: SmStrategy):
+    """Most recent finalized run row for this strategy, or None."""
+    from backend.models.strategy_module import SmStrategyRun
+    async with async_session() as db:
+        stmt = (
+            select(SmStrategyRun)
+            .where(SmStrategyRun.strategy_id == strategy.id)
+            .order_by(SmStrategyRun.id.desc())
+            .limit(1)
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def _resolve_run_mode(strategy: SmStrategy) -> Optional[str]:

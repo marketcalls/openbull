@@ -90,6 +90,18 @@ def push_delta(strategy_id: int, delta_message: dict[str, Any]) -> None:
     _broadcast_nowait(strategy_id, delta_message)
 
 
+def push_fill_delta(strategy_id: int, delta_message: dict[str, Any]) -> None:
+    """Unthrottled delta — for state changes that must reach the UI now.
+
+    Used when an exit fill lands so the operator sees realized P&L
+    immediately, even if a tick-driven delta just went out within the
+    throttle window. Resets the throttle reservation so the next tick
+    delta isn't artificially delayed either.
+    """
+    _last_delta_ts[strategy_id] = time.monotonic() * 1000.0
+    _broadcast_nowait(strategy_id, delta_message)
+
+
 def push_terminal(strategy_id: int, message: dict[str, Any]) -> None:
     """Run-stopped frame — always sent, drops the throttle reservation."""
     _last_delta_ts.pop(strategy_id, None)

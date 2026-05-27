@@ -165,6 +165,7 @@ function LiveTab({
   closingLegId,
   liveState,
   wsStatus,
+  lastRun,
 }: {
   strategy: Strategy;
   orders: StrategyOrder[];
@@ -172,11 +173,22 @@ function LiveTab({
   closingLegId: number | null;
   liveState: StrategySnapshot | null;
   wsStatus: WsStatus;
+  /** Most recent run (running or stopped) — used to render the just-
+   * completed run's realized P&L on the Live tab after the strategy
+   * stops, since the WS disconnects on status flip and clears liveState. */
+  lastRun: StrategyRun | null;
 }) {
   // Pair each leg config with its current run's entry + (latest) exit order
-  // for the fallback rendering when the WS hasn't sent state yet.
+  // for the fallback rendering when the WS hasn't sent state yet. Scope to
+  // the active run — without the run_id filter, exits from prior runs of
+  // the same strategy slot into exitByLeg and the "Close leg" button stays
+  // disabled because the leg looks already-exited.
   const currentRunOrders = strategy.current_run_id
-    ? orders.filter((o) => o.kind === "entry" || o.kind.startsWith("exit"))
+    ? orders.filter(
+        (o) =>
+          o.run_id === strategy.current_run_id &&
+          (o.kind === "entry" || o.kind.startsWith("exit")),
+      )
     : [];
   const entryByLeg = new Map<number, StrategyOrder>();
   const exitByLeg = new Map<number, StrategyOrder>();
@@ -199,6 +211,22 @@ function LiveTab({
   const ws = wsStatusBadge(wsStatus);
   const haveLive = liveState !== null && strategy.status === "running";
 
+  // When the run is stopped (WS closed, liveState cleared), surface the
+  // last run's finalized P&L so the operator can see the just-completed
+  // run's result until they press Start again. While running, prefer
+  // liveState — it ticks in real time.
+  const showLast =
+    liveState == null && lastRun != null && strategy.status !== "running";
+  const pnlRealized = showLast
+    ? lastRun.pnl_realized
+    : (liveState?.mtm_realized ?? null);
+  const pnlUnrealized = showLast ? 0 : (liveState?.mtm_unrealized ?? null);
+  const pnlTotal = showLast
+    ? lastRun.pnl_realized
+    : (liveState?.mtm_total ?? null);
+  const pnlPeak = showLast ? lastRun.pnl_peak : (liveState?.peak ?? null);
+  const pnlTrough = showLast ? lastRun.pnl_trough : (liveState?.trough ?? null);
+
   return (
     <div className="space-y-4">
       <Card>
@@ -206,8 +234,9 @@ function LiveTab({
           <div>
             <CardTitle>Live P&L</CardTitle>
             <CardDescription>
-              Realized + Unrealized = Total. Streamed via WebSocket while the
-              run is active.
+              {showLast
+                ? "Last run — realized P&L from the most recent run; resets on the next Start."
+                : "Realized + Unrealized = Total. Streamed via WebSocket while the run is active."}
             </CardDescription>
           </div>
           <Badge variant={ws.variant} className="text-[10px]">
@@ -217,9 +246,9 @@ function LiveTab({
         <CardContent>
           <div className="grid grid-cols-3 gap-4">
             {[
-              { label: "Realized", value: liveState?.mtm_realized ?? null },
-              { label: "Unrealized", value: liveState?.mtm_unrealized ?? null },
-              { label: "Total P&L", value: liveState?.mtm_total ?? null },
+              { label: "Realized", value: pnlRealized },
+              { label: "Unrealized", value: pnlUnrealized },
+              { label: "Total P&L", value: pnlTotal },
             ].map((m) => (
               <div
                 key={m.label}
@@ -240,11 +269,16 @@ function LiveTab({
               </div>
             ))}
           </div>
-          {liveState && (
+          {(liveState || showLast) && (
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground sm:grid-cols-4">
-              <span>Peak: <span className="font-mono">{fmtPnl(liveState.peak)}</span></span>
-              <span>Trough: <span className="font-mono">{fmtPnl(liveState.trough)}</span></span>
-              <span>Updated: <span className="font-mono">{liveState.ts_ist}</span></span>
+              <span>Peak: <span className="font-mono">{fmtPnl(pnlPeak)}</span></span>
+              <span>Trough: <span className="font-mono">{fmtPnl(pnlTrough)}</span></span>
+              {liveState && (
+                <span>Updated: <span className="font-mono">{liveState.ts_ist}</span></span>
+              )}
+              {showLast && lastRun?.stopped_at && (
+                <span>Stopped: <span className="font-mono">{lastRun.stopped_at}</span></span>
+              )}
             </div>
           )}
         </CardContent>
@@ -2454,8 +2488,12 @@ export default function StrategyDetail() {
 
   const closeLegMutation = useMutation({
     mutationFn: (legId: number) => closeLeg(numId, legId),
-    onSuccess: () => {
-      toast.success("Leg closed");
+    onSuccess: (resp) => {
+      toast.success(
+        resp.auto_stopped
+          ? "Leg closed — last open leg, run stopped"
+          : "Leg closed",
+      );
       setClosingLegId(null);
       invalidateAll();
     },
@@ -2735,6 +2773,7 @@ export default function StrategyDetail() {
             }}
             liveState={liveState}
             wsStatus={wsStatus}
+            lastRun={runs[0] ?? null}
           />
         </TabsContent>
         <TabsContent value="setup" className="mt-4">
