@@ -485,6 +485,22 @@ async def _trigger_exit(run_id: int, leg_id: int, exit_kind: str) -> None:
             )
         except Exception:
             logger.exception("Auto-exit failed for run %d leg %d", run_id, leg_id)
+            return
+
+        # Auto-finalize the run when this exit was the last open leg.
+        # Without this an SL / Target / TSL hit on the only (or last) open
+        # leg leaves the strategy stuck in 'running' with zero positions,
+        # and the next /start refuses to fire. Batch-mode only — signal-
+        # mode cycling is preserved inside _finalize_run_if_all_flat.
+        try:
+            await engine._finalize_run_if_all_flat(  # noqa: SLF001
+                db, strategy=strategy, run=run,
+            )
+        except Exception:
+            logger.exception(
+                "Auto-finalize check failed after auto-exit for run %d leg %d",
+                run_id, leg_id,
+            )
 
 
 async def _trigger_run_stop(run_id: int, stop_reason: str) -> None:

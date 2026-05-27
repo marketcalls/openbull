@@ -716,7 +716,16 @@ async def _finalize_run_if_all_flat(
     Legs with status 'closed' (exited) or 'rejected' (entry never filled)
     count as flat. Returns True when finalization fired so the caller can
     surface it on the response.
+
+    Batch-mode only. Signal-mode strategies cycle through entry → exit →
+    entry on every webhook signal and may legitimately sit flat between
+    cycles; finalizing here would force the operator to manually press
+    Start before the next signal could re-enter.
     """
+    kind = getattr(strategy, "strategy_kind", "batch") or "batch"
+    if kind != "batch":
+        return False
+
     state = await state_module.get_run_state(run.id)
     if state is None:
         return False
