@@ -34,7 +34,7 @@ from backend.strategy import state as state_module
 
 logger = logging.getLogger(__name__)
 
-CHECKPOINT_INTERVAL_SEC = 30
+CHECKPOINT_INTERVAL_SEC = 5
 
 _task: asyncio.Task | None = None
 _running: bool = False

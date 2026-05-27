@@ -199,7 +199,16 @@ def _state_from_db_and_checkpoint(
     orders: list[SmStrategyOrder],
     checkpoint: SmStrategyCheckpoint | None,
 ) -> dict[str, Any]:
-    """Reconstruct Redis state from the post-reconcile DB rows + checkpoint."""
+    """Reconstruct Redis state from the post-reconcile DB rows + checkpoint.
+
+    Identity fields (symbol / exchange / entry_avg / qty / status) come
+    from the order book — that's canonical post-reconcile. Trail state
+    (favorable_peak / trail_active / effective_sl / effective_target /
+    realized_pnl / current_side / mtm / ltp) comes from the latest
+    checkpoint so a restart doesn't reset an armed trail to its
+    not-yet-armed default. Without this merge the trail counter starts
+    over after every restart and any in-progress TSL advance is lost.
+    """
     entry_by_leg: dict[int, SmStrategyOrder] = {}
     last_exit_by_leg: dict[int, SmStrategyOrder] = {}
     for o in orders:
@@ -207,6 +216,10 @@ def _state_from_db_and_checkpoint(
             entry_by_leg.setdefault(o.leg_id, o)
         elif o.status != "rejected":
             last_exit_by_leg[o.leg_id] = o
+
+    cp_legs: dict[str, dict[str, Any]] = {}
+    if checkpoint and isinstance(checkpoint.leg_state, dict):
+        cp_legs = checkpoint.leg_state
 
     legs: dict[str, dict[str, Any]] = {}
     for leg in (strategy.legs or []):
@@ -219,6 +232,7 @@ def _state_from_db_and_checkpoint(
             else "open" if entry
             else "configured"
         )
+        cp_leg = cp_legs.get(str(leg_id)) or {}
         legs[str(leg_id)] = {
             "leg_id": leg_id,
             "position": leg.get("position"),
@@ -229,15 +243,21 @@ def _state_from_db_and_checkpoint(
             "entry_order_id": entry.id if entry else None,
             "entry_status": entry.status if entry else "configured",
             "entry_avg": float(entry.avg_fill_price) if entry and entry.avg_fill_price is not None else None,
-            "ltp": None,
-            "mtm": 0.0,
+            # Trail / risk state restored from the last checkpoint, falling
+            # back to clean defaults if no checkpoint exists yet. Closed
+            # legs override most of these (mtm=0, current_side=None) so a
+            # restart of a closed leg doesn't re-arm a dead trail.
+            "ltp": cp_leg.get("ltp"),
+            "mtm": 0.0 if status == "closed" else float(cp_leg.get("mtm") or 0.0),
             "status": status,
             "exit_order_id": exit_o.id if exit_o else None,
             "exit_kind": exit_o.kind if exit_o else None,
-            "effective_sl": None,
-            "effective_target": None,
-            "trail_active": False,
-            "favorable_peak": 0.0,
+            "effective_sl": cp_leg.get("effective_sl"),
+            "effective_target": cp_leg.get("effective_target"),
+            "trail_active": bool(cp_leg.get("trail_active") or False),
+            "favorable_peak": float(cp_leg.get("favorable_peak") or 0.0),
+            "realized_pnl": float(cp_leg.get("realized_pnl") or 0.0),
+            "current_side": cp_leg.get("current_side") if status == "open" else None,
         }
 
     return {

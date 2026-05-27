@@ -218,7 +218,7 @@ class SmStrategyOrder(Base):
 
 
 class SmStrategyCheckpoint(Base):
-    """Periodic snapshot of runtime state for crash recovery (~30s cadence)."""
+    """Periodic snapshot of runtime state for crash recovery (~5s cadence)."""
 
     __tablename__ = "sm_strategy_checkpoint"
 
