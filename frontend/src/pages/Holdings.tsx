@@ -1,4 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import {
@@ -10,6 +12,7 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import { getHoldings } from "@/api/dashboard";
+import { useLivePrice } from "@/hooks/useLivePrice";
 import { downloadCsv, type CsvColumn } from "@/lib/csv";
 import type { HoldingItem } from "@/types/order";
 
@@ -24,6 +27,13 @@ export default function Holdings() {
     queryKey: ["holdings"],
     queryFn: getHoldings,
     refetchInterval: 30000,
+  });
+
+  // Live overlay: stream each holding's LTP over the WS proxy and recompute
+  // P&L / P&L% per tick. Hook is called unconditionally (before early returns)
+  // to respect the rules of hooks.
+  const { data: liveHoldings, isLive, isPaused } = useLivePrice(holdings ?? [], {
+    enabled: (holdings?.length ?? 0) > 0,
   });
 
   if (isLoading) {
@@ -61,6 +71,7 @@ export default function Holdings() {
       { header: "P&L %", value: (r) => r.pnlpercent.toFixed(2) },
     ];
     downloadCsv({ filename: "holdings", columns, rows });
+    toast.success(`Exported ${rows.length} holding${rows.length === 1 ? "" : "s"} to CSV`);
   };
 
   return (
@@ -86,9 +97,30 @@ export default function Holdings() {
         </Button>
       </div>
 
+      {isPaused && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+          Live updates paused (tab inactive) — showing last fetched prices.
+        </div>
+      )}
+
       <Card>
         <CardHeader>
-          <CardTitle>Stock Holdings</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            Stock Holdings
+            {isLive ? (
+              <Badge
+                variant="outline"
+                className="gap-1 border-green-500/40 text-green-600 dark:text-green-400"
+              >
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-green-500" />
+                Live
+              </Badge>
+            ) : isPaused ? (
+              <Badge variant="outline" className="text-muted-foreground">
+                Paused
+              </Badge>
+            ) : null}
+          </CardTitle>
           <CardDescription>
             {holdings?.length ?? 0} holding{(holdings?.length ?? 0) !== 1 ? "s" : ""} found
           </CardDescription>
@@ -108,7 +140,7 @@ export default function Holdings() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {holdings.map((holding, i) => (
+                {liveHoldings.map((holding, i) => (
                   <TableRow key={i} className={i % 2 === 0 ? "bg-muted/30" : ""}>
                     <TableCell className="font-medium">{holding.symbol}</TableCell>
                     <TableCell>{holding.exchange}</TableCell>

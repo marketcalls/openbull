@@ -26,6 +26,10 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "cachetools>=5.5.0",
     "pandas>=2.2.0",
+    # opengreeks: Rust Black-76 (py_vollib-compatible signatures, NumPy-only dep)
+    # powers option Greeks/IV. option_greeks_service falls back to a built-in
+    # pure-math Black-76 if this is not installed, so it is effectively optional.
+    "opengreeks>=0.1.0",
     "psycopg2-binary>=2.9.11",
     "psycopg[binary]>=3.3.3",
     "pyzmq>=27.1.0",

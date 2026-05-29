@@ -211,6 +211,9 @@ def transform_positions_data(positions_data: list) -> list[dict]:
 def transform_holdings_data(holdings_data: list) -> list[dict]:
     """Transform Dhan holdings to OpenBull standard format.
 
+    Prefers the enriched fields written by map_portfolio_data (_oa_symbol,
+    _exchange, _ltp) so the first paint shows the real listing exchange and a
+    live LTP; falls back to the raw Dhan fields when enrichment is absent.
     quantity -> int, average_price/ltp/pnl/pnlpercent -> float.
     """
     transformed_data: list[dict] = []
@@ -219,22 +222,41 @@ def transform_holdings_data(holdings_data: list) -> list[dict]:
 
     for holdings in holdings_data:
         avg_price = float(holdings.get("avgCostPrice") or 0.0)
-        ltp = float(holdings.get("lastTradedPrice") or holdings.get("ltp") or 0.0)
         qty = int(holdings.get("totalQty") or 0)
-        pnl = float((ltp - avg_price) * qty) if avg_price else 0.0
-        pnlpercent = float(((ltp - avg_price) / avg_price) * 100) if avg_price else 0.0
 
-        # Resolve OpenBull symbol if not provided
-        sym = holdings.get("tradingSymbol", "")
-        exch = holdings.get("exchange") or holdings.get("exchangeSegment") or ""
-        mapped_exch = map_exchange(exch) or exch
-        oa_sym = (
-            get_symbol_from_brsymbol_cache(sym, mapped_exch) if sym and mapped_exch else None
+        # Enriched LTP first; fall back to any LTP Dhan happened to include.
+        ltp = float(
+            holdings.get("_ltp")
+            or holdings.get("lastTradedPrice")
+            or holdings.get("ltp")
+            or 0.0
         )
 
+        if ltp > 0 and avg_price > 0:
+            pnl = (ltp - avg_price) * qty
+            pnlpercent = ((ltp - avg_price) / avg_price) * 100
+        else:
+            pnl = 0.0
+            pnlpercent = 0.0
+
+        # Symbol/exchange: prefer values resolved from securityId in
+        # map_portfolio_data (Dhan reports exchange="ALL" on /holdings).
+        sym = holdings.get("_oa_symbol")
+        exch = holdings.get("_exchange")
+        if not sym:
+            raw_sym = holdings.get("tradingSymbol", "")
+            raw_exch = holdings.get("exchange") or holdings.get("exchangeSegment") or ""
+            mapped_exch = map_exchange(raw_exch) or raw_exch
+            sym = (
+                get_symbol_from_brsymbol_cache(raw_sym, mapped_exch)
+                if raw_sym and mapped_exch
+                else None
+            ) or raw_sym
+            exch = mapped_exch
+
         transformed_data.append({
-            "symbol": oa_sym or sym,
-            "exchange": mapped_exch or "",
+            "symbol": sym,
+            "exchange": exch or "NSE",
             "quantity": qty,
             "product": "CNC",
             "average_price": avg_price,
@@ -245,35 +267,95 @@ def transform_holdings_data(holdings_data: list) -> list[dict]:
     return transformed_data
 
 
-def map_portfolio_data(portfolio_data):
-    """Pass-through with empty-dict for known DH-1111 (no holdings) error shape."""
-    if (
-        portfolio_data is None
-        or (
-            isinstance(portfolio_data, dict)
-            and (
-                portfolio_data.get("errorCode") == "DHOLDING_ERROR"
-                or portfolio_data.get("internalErrorCode") == "DH-1111"
-                or portfolio_data.get("internalErrorMessage") == "No holdings available"
-            )
+def map_portfolio_data(portfolio_data, auth_token=None, broker=None, config=None):
+    """Validate the Dhan /holdings response and enrich each row with the real
+    listing exchange + live LTP so the first API paint is meaningful.
+
+    Dhan returns exchange="ALL" for every holding (demat is exchange-agnostic)
+    and /holdings carries no LTP. We resolve the OpenBull symbol + exchange from
+    the broker-returned securityId via the shared symtoken cache, then -- when
+    holdings_service supplies an auth context -- batch-fetch LTPs via the
+    multiquote service. Writes three private fields consumed by
+    calculate_portfolio_statistics and transform_holdings_data:
+    _oa_symbol, _exchange, _ltp. The frontend useLivePrice hook keeps LTP/P&L
+    updating over WebSocket after first paint.
+    """
+    if portfolio_data is None or (
+        isinstance(portfolio_data, dict)
+        and (
+            portfolio_data.get("errorCode") == "DHOLDING_ERROR"
+            or portfolio_data.get("internalErrorCode") == "DH-1111"
+            or portfolio_data.get("internalErrorMessage") == "No holdings available"
         )
     ):
         logger.info("No holdings available.")
         return {}
+    if not isinstance(portfolio_data, list):
+        return {}
+
+    # Resolve symbol + real exchange from securityId (exchange-scoped token).
+    for h in portfolio_data:
+        security_id = h.get("securityId")
+        resolved_symbol = h.get("tradingSymbol", "")
+        resolved_exchange = None
+        if security_id is not None:
+            info = get_symbol_exchange_from_token(str(security_id))
+            if info:
+                resolved_symbol, resolved_exchange = info[0], info[1]
+        h["_oa_symbol"] = resolved_symbol
+        h["_exchange"] = resolved_exchange or "NSE"
+        h["_ltp"] = 0.0
+
+    # Batch-fetch LTPs when an auth context is available.
+    if auth_token and broker:
+        try:
+            from backend.services.quotes_service import get_multi_quotes_with_auth
+
+            payload = [
+                {"symbol": h["_oa_symbol"], "exchange": h["_exchange"]}
+                for h in portfolio_data
+                if h.get("_oa_symbol") and h.get("_exchange")
+            ]
+            if payload:
+                ok, resp, _ = get_multi_quotes_with_auth(
+                    symbols_list=payload, auth_token=auth_token, broker=broker, config=config
+                )
+                if ok and isinstance(resp, dict):
+                    ltp_map: dict[str, float] = {}
+                    for row in resp.get("results", []):
+                        if not isinstance(row, dict):
+                            continue
+                        data = row.get("data", row)
+                        ltp_map[f"{row.get('exchange')}:{row.get('symbol')}"] = float(
+                            data.get("ltp", 0) or 0
+                        )
+                    for h in portfolio_data:
+                        key = f"{h['_exchange']}:{h['_oa_symbol']}"
+                        if key in ltp_map:
+                            h["_ltp"] = ltp_map[key]
+        except Exception as e:
+            logger.warning("Failed to fetch holdings LTP via multiquotes: %s", e)
+
     return portfolio_data
 
 
 def calculate_portfolio_statistics(holdings_data: list) -> dict:
-    """Calculate portfolio statistics from raw Dhan holdings."""
+    """Portfolio totals. Uses the enriched _ltp when present so holding value
+    and P&L are live on first paint; falls back to avgCostPrice (zero P&L) until
+    live LTP fills in."""
     if not isinstance(holdings_data, list):
         holdings_data = []
 
-    totalholdingvalue = sum(
+    totalinvvalue = sum(
         float(item.get("avgCostPrice") or 0) * int(item.get("totalQty") or 0)
         for item in holdings_data
     )
-    totalinvvalue = totalholdingvalue
-    totalprofitandloss = 0.0
+    totalholdingvalue = sum(
+        (float(item.get("_ltp") or 0) or float(item.get("avgCostPrice") or 0))
+        * int(item.get("totalQty") or 0)
+        for item in holdings_data
+    )
+    totalprofitandloss = totalholdingvalue - totalinvvalue
     totalpnlpercentage = (totalprofitandloss / totalinvvalue * 100) if totalinvvalue else 0.0
 
     return {

@@ -653,6 +653,7 @@ dependencies = [
     { name = "httpx" },
     { name = "limits", extra = ["redis"] },
     { name = "mako" },
+    { name = "opengreeks" },
     { name = "pandas" },
     { name = "protobuf" },
     { name = "psycopg", extra = ["binary"] },
@@ -684,6 +685,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "limits", extras = ["redis"], specifier = ">=3.0" },
     { name = "mako", specifier = ">=1.3.12" },
+    { name = "opengreeks", specifier = ">=0.1.0" },
     { name = "pandas", specifier = ">=2.2.0" },
     { name = "protobuf", specifier = ">=7.34.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.3" },
@@ -701,6 +703,22 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "websocket-client", specifier = ">=1.9.0" },
     { name = "websockets", specifier = ">=16.0" },
+]
+
+[[package]]
+name = "opengreeks"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/28/8d/a132bacb880b6d36b442ca7c2255e9c640c1653affb357880879be58a039/opengreeks-0.1.0.tar.gz", hash = "sha256:9b3fb1d66344e5ee2818062f3ae48ba3479fb4ccd28e33332197de24ef586bdb", size = 29335, upload-time = "2026-05-20T16:25:32.102Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/be/dd/933168c426aebb55fd29637c81e2e275bd4c276092c3c282bff60fe173b5/opengreeks-0.1.0-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:d61c9d8549e8888acc8f1d9014e0322a00166b66f8ce60ca0a558e0de8135de6", size = 239599, upload-time = "2026-05-20T16:25:23.49Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/d3/6b4be23a1ce62fefa789a501ed34c05ffdd7e1ff23a43881808d734d2505/opengreeks-0.1.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:d6df4a367dc006825eb710af59edeeed6cd1fb5db55192a6fbd977b4ab1bdeaf", size = 230266, upload-time = "2026-05-20T16:25:25.515Z" },
+    { url = "https://files.pythonhosted.org/packages/87/3b/4a74f2ad960d4cd5bbccb4509a730aa7737756b971fe98256a79f709c3e0/opengreeks-0.1.0-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:0d5b5a0a85e8df2805930f4a50f4884ee3c7602f21d5f11b06ffc2fd48608cc6", size = 242778, upload-time = "2026-05-20T16:25:27.013Z" },
+    { url = "https://files.pythonhosted.org/packages/73/99/890a39043f020edc2540483c345b4375c5415456fcada3dda2140f7a92f0/opengreeks-0.1.0-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:c19655f534141a7992000f558eebd48503645be6521d179c17b763162ccae78a", size = 252470, upload-time = "2026-05-20T16:25:28.976Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/13/6fc5a45975533a9d6dea9968bbc25ff071a6a4f0b10b3693151177203a82/opengreeks-0.1.0-cp39-abi3-win_amd64.whl", hash = "sha256:9645ecd4a493d5982b33ffd2382b22a48f4ce4b837cf102487a57478223acab2", size = 184047, upload-time = "2026-05-20T16:25:30.36Z" },
 ]
 
 [[package]]

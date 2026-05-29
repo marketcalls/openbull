@@ -30,6 +30,7 @@ def _import_broker_order_module(broker_name: str):
 def _resolve_leg(
     leg: dict, default_underlying: str, default_exchange: str, default_expiry: str | None,
     auth_token: str, broker: str, config: dict | None,
+    underlying_ltp: float | None = None,
 ) -> tuple[bool, dict, int]:
     underlying = leg.get("underlying") or default_underlying
     exchange = leg.get("exchange") or default_exchange
@@ -48,6 +49,7 @@ def _resolve_leg(
         underlying=underlying, exchange=exchange, expiry_date=expiry_date,
         offset=offset, option_type=option_type,
         auth_token=auth_token, broker=broker, config=config,
+        underlying_ltp=underlying_ltp,
     )
 
 
@@ -107,19 +109,33 @@ def place_options_multiorder(
     default_pricetype = multi_data.get("pricetype", "MARKET")
     default_product = multi_data.get("product", "NRML")
 
-    # Resolve each leg → symbol; capture LTP from first successful resolution
+    # Resolve each leg → symbol. Cache the underlying LTP per (underlying,
+    # exchange) so legs that share an underlying reuse one quote instead of
+    # re-fetching it on every leg (mirrors openalgo's single-fetch behaviour).
     resolved_legs: list[dict] = []
     underlying_ltp: float | None = None
+    _ltp_cache: dict[tuple[str, str], float] = {}
 
     for idx, leg in enumerate(legs, 1):
+        leg_underlying = leg.get("underlying") or underlying
+        leg_exchange = leg.get("exchange") or exchange
+        cache_key = (str(leg_underlying or ""), str(leg_exchange or ""))
+        cached_ltp = _ltp_cache.get(cache_key)
+
         ok, sym_resp, status_code = _resolve_leg(
             leg, underlying, exchange, expiry_date, auth_token, broker, config,
+            underlying_ltp=cached_ltp,
         )
         if not ok:
             return False, {
                 "status": "error",
                 "message": f"Leg {idx}: {sym_resp.get('message')}",
             }, status_code
+
+        # Cache the resolved underlying LTP for subsequent legs on the same key.
+        resolved_ltp = sym_resp.get("underlying_ltp")
+        if cache_key not in _ltp_cache and resolved_ltp:
+            _ltp_cache[cache_key] = float(resolved_ltp)
 
         action = (leg.get("action") or "").upper()
         if action not in ("BUY", "SELL"):

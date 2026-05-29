@@ -5,7 +5,6 @@ Dual-entry pattern: get_positions_with_auth() + get_positions()
 
 import importlib
 import logging
-import traceback
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -89,8 +88,7 @@ def get_positions_with_auth(
         return True, {"status": "success", "data": formatted_positions}, 200
 
     except Exception as e:
-        logger.error("Error processing positions data: %s", e)
-        traceback.print_exc()
+        logger.exception("Error processing positions data: %s", e)
         return False, {"status": "error", "message": str(e)}, 500
 
 

@@ -5,8 +5,10 @@ import { toast } from "sonner";
 import { getPositions } from "@/api/dashboard";
 import { closeAllPositions } from "@/api/orders";
 import { placeOrder } from "@/api/optionchain";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { useLivePrice } from "@/hooks/useLivePrice";
 import { downloadCsv, type CsvColumn } from "@/lib/csv";
 import {
   Card,
@@ -63,6 +65,13 @@ export default function Positions() {
   );
 
   const openCount = openPositions.length;
+
+  // Live overlay: subscribe to each open position's LTP over the WS proxy and
+  // recompute P&L on every tick. Falls back to the REST snapshot when the
+  // socket is down or the tab is hidden.
+  const { data: livePositions, isLive, isPaused } = useLivePrice(openPositions, {
+    enabled: openPositions.length > 0,
+  });
 
   /** Per-row close — reverses the position's direction at MARKET for
    *  abs(qty). Long → SELL, short → BUY. The backend's placeorder
@@ -174,6 +183,7 @@ export default function Positions() {
       { header: "P&L", value: (r) => r.pnl.toFixed(2) },
     ];
     downloadCsv({ filename: "positions", columns, rows });
+    toast.success(`Exported ${rows.length} position${rows.length === 1 ? "" : "s"} to CSV`);
   };
 
   return (
@@ -213,9 +223,30 @@ export default function Positions() {
         </div>
       </div>
 
+      {isPaused && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+          Live updates paused (tab inactive) — showing last fetched prices.
+        </div>
+      )}
+
       <Card>
         <CardHeader>
-          <CardTitle>Open Positions</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            Open Positions
+            {isLive ? (
+              <Badge
+                variant="outline"
+                className="gap-1 border-green-500/40 text-green-600 dark:text-green-400"
+              >
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-green-500" />
+                Live
+              </Badge>
+            ) : isPaused ? (
+              <Badge variant="outline" className="text-muted-foreground">
+                Paused
+              </Badge>
+            ) : null}
+          </CardTitle>
           <CardDescription>
             {openPositions.length} position{openPositions.length !== 1 ? "s" : ""} found
           </CardDescription>
@@ -236,7 +267,7 @@ export default function Positions() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {openPositions.map((pos, i) => {
+                {livePositions.map((pos, i) => {
                   const closeable = isCloseable(pos);
                   const closingThis =
                     closeOneMutation.isPending &&
