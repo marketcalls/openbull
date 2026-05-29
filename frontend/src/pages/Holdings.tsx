@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -70,6 +71,7 @@ export default function Holdings() {
       { header: "P&L %", value: (r) => r.pnlpercent.toFixed(2) },
     ];
     downloadCsv({ filename: "holdings", columns, rows });
+    toast.success(`Exported ${rows.length} holding${rows.length === 1 ? "" : "s"} to CSV`);
   };
 
   return (
@@ -94,6 +96,12 @@ export default function Holdings() {
           Export CSV
         </Button>
       </div>
+
+      {isPaused && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+          Live updates paused (tab inactive) — showing last fetched prices.
+        </div>
+      )}
 
       <Card>
         <CardHeader>
