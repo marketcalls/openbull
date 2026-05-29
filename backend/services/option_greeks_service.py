@@ -6,7 +6,13 @@ parameter names (option_symbol, forward_price, underlying_symbol,
 underlying_exchange, expiry_time, interest_rate), same response shape, and
 same deep-ITM theoretical-Greeks fallback when IV solving fails.
 
-Implementation is a pure-math Black-76 (no py_vollib / scipy / numba):
+Greeks/IV are computed with **opengreeks** (Rust Black-76, byte-identical to
+py_vollib, NumPy-only dependency) when the library is installed. If it is missing
+the service transparently falls back to the built-in pure-math Black-76 below, so
+the endpoint never hard-fails. Both paths return identical units (theta per
+calendar day, vega/rho per 1% move).
+
+Pure-math Black-76 fallback:
   Delta = e^(-rT) * N(d1)              [call]
         = -e^(-rT) * N(-d1)            [put]
   Gamma = e^(-rT) * phi(d1) / (F*sigma*sqrt(T))
@@ -24,9 +30,69 @@ from datetime import datetime
 from typing import Any
 
 from backend.services.market_data_service import _run_query  # noqa: F401  (re-export for compat)
-from backend.services.quotes_service import get_quotes_with_auth
+from backend.services.quotes_service import get_multi_quotes_with_auth, get_quotes_with_auth
 
 logger = logging.getLogger(__name__)
+
+
+# ── opengreeks (Rust Black-76) with pure-math fallback ────────────────
+#
+# opengreeks exposes the same py_vollib signatures and returns trader units
+# directly (theta per calendar day, vega/rho per 1% move) — so we round its
+# output but never re-scale it. When the library is absent we fall back to the
+# built-in pure-math Black-76 further down, keeping the endpoint alive.
+
+_OPENGREEKS: dict | bool | None = None  # None=unchecked, False=unavailable, dict=loaded
+
+
+def _load_opengreeks() -> dict | None:
+    """Lazy-load opengreeks.black76 once. Returns the fn dict, or None if absent."""
+    global _OPENGREEKS
+    if _OPENGREEKS is not None:
+        return _OPENGREEKS or None
+    try:
+        from opengreeks.black76 import (
+            delta as _delta,
+            gamma as _gamma,
+            implied_volatility as _iv,
+            rho as _rho,
+            theta as _theta,
+            vega as _vega,
+        )
+
+        _OPENGREEKS = {
+            "iv": _iv,
+            "delta": _delta,
+            "gamma": _gamma,
+            "theta": _theta,
+            "vega": _vega,
+            "rho": _rho,
+        }
+    except ImportError:
+        logger.warning(
+            "opengreeks not installed; using built-in pure-math Black-76. "
+            "Install the Rust fast path with: pip install opengreeks"
+        )
+        _OPENGREEKS = False
+    return _OPENGREEKS or None
+
+
+def check_opengreeks_availability() -> tuple[bool, dict | None, int | None]:
+    """Probe whether opengreeks is importable (mirrors openalgo's helper).
+
+    openbull keeps a pure-math fallback, so a False result here is informational
+    rather than fatal — callers still get correct Greeks via the fallback.
+    """
+    if _load_opengreeks() is not None:
+        return True, None, None
+    return (
+        False,
+        {
+            "status": "error",
+            "message": "opengreeks not installed. Install with: pip install opengreeks",
+        },
+        500,
+    )
 
 
 # ── Exchange-specific symbol sets (mirrors openalgo) ──────────────────
@@ -98,7 +164,7 @@ def _black76_price(F: float, K: float, T: float, r: float, sigma: float, flag: s
     return disc * (K * _norm_cdf(-d2) - F * _norm_cdf(-d1))
 
 
-def _implied_vol(price: float, F: float, K: float, T: float, r: float, flag: str) -> float | None:
+def _py_implied_vol(price: float, F: float, K: float, T: float, r: float, flag: str) -> float | None:
     """Bisection over sigma in [1e-6, 5.0]. Returns None if not bracketed."""
     intrinsic = max(F - K, 0) if flag == "c" else max(K - F, 0)
     discounted_intrinsic = intrinsic * math.exp(-r * T)
@@ -121,7 +187,7 @@ def _implied_vol(price: float, F: float, K: float, T: float, r: float, flag: str
     return 0.5 * (lo + hi)
 
 
-def _greeks(F: float, K: float, T: float, r: float, sigma: float, flag: str, premium: float) -> dict:
+def _py_greeks(F: float, K: float, T: float, r: float, sigma: float, flag: str, premium: float) -> dict:
     """Black-76 Greeks, matching py_vollib's analytical formulas exactly.
 
     Output units mirror py_vollib (and openalgo's option_greeks_service):
@@ -156,6 +222,52 @@ def _greeks(F: float, K: float, T: float, r: float, sigma: float, flag: str, pre
         "vega": round(vega_per_unit / 100.0, 4),  # per 1% vol move
         "rho": round(rho / 100.0, 6),
     }
+
+
+# ── Dispatchers: opengreeks first, pure-math fallback ─────────────────
+
+def _implied_vol(price: float, F: float, K: float, T: float, r: float, flag: str) -> float | None:
+    """IV via opengreeks (Rust) when available, else pure-math bisection.
+
+    Returns IV as a decimal, or None when it cannot be solved (e.g. price at or
+    below discounted intrinsic) — callers treat None as the deep-ITM case.
+    """
+    og = _load_opengreeks()
+    if og is not None:
+        try:
+            iv = og["iv"](price, F, K, r, T, flag)
+            if iv is None or iv <= 0:
+                return None
+            return float(iv)
+        except Exception:
+            # opengreeks raises on below-intrinsic / non-convergent inputs;
+            # treat as "not solvable", exactly like the pure-math path.
+            return None
+    return _py_implied_vol(price, F, K, T, r, flag)
+
+
+def _greeks(F: float, K: float, T: float, r: float, sigma: float, flag: str, premium: float) -> dict:
+    """Black-76 Greeks via opengreeks when available, else pure-math.
+
+    Output units are identical on both paths: theta per calendar day, vega and
+    rho per 1% move. opengreeks already returns those units, so its results are
+    only rounded — never re-scaled.
+    """
+    if T <= 0 or sigma <= 0:
+        return {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0}
+    og = _load_opengreeks()
+    if og is not None:
+        try:
+            return {
+                "delta": round(og["delta"](flag, F, K, T, r, sigma), 4),
+                "gamma": round(og["gamma"](flag, F, K, T, r, sigma), 6),
+                "theta": round(og["theta"](flag, F, K, T, r, sigma), 4),
+                "vega": round(og["vega"](flag, F, K, T, r, sigma), 4),
+                "rho": round(og["rho"](flag, F, K, T, r, sigma), 6),
+            }
+        except Exception as e:
+            logger.warning("opengreeks greeks failed (%s); using pure-math fallback", e)
+    return _py_greeks(F, K, T, r, sigma, flag, premium)
 
 
 # ── Symbol parsing & exchange resolution (mirrors openalgo) ───────────
@@ -420,6 +532,160 @@ def get_option_greeks(
     except Exception as e:
         logger.exception("Error in get_option_greeks: %s", e)
         return False, {"status": "error", "message": f"Failed to get option Greeks: {e}"}, 500
+
+
+def get_multi_option_greeks(
+    symbols: list[dict],
+    interest_rate: float | None = None,
+    expiry_time: str | None = None,
+    auth_token: str | None = None,
+    broker: str | None = None,
+    config: dict | None = None,
+) -> tuple[bool, dict[str, Any], int]:
+    """Greeks for many option symbols in one call (mirrors openalgo).
+
+    Fetches each unique underlying spot once, batches all option LTPs via
+    get_multi_quotes_with_auth, then computes Greeks (pure math, no further
+    broker calls). `symbols` items: {symbol, exchange, [underlying_symbol],
+    [underlying_exchange]}.
+    """
+    if not symbols:
+        return (
+            True,
+            {"status": "success", "data": [], "summary": {"total": 0, "success": 0, "failed": 0}},
+            200,
+        )
+
+    results: list[dict] = []
+    success_count = 0
+    failed_count = 0
+
+    # Step 1 — parse every symbol and collect the unique underlyings to price.
+    parsed_symbols: dict[str, tuple] = {}
+    spot_keys: dict[tuple, float | None] = {}
+    symbol_to_spot_key: dict[str, tuple] = {}
+
+    for sym_req in symbols:
+        symbol = sym_req.get("symbol")
+        exchange = sym_req.get("exchange")
+        try:
+            base_symbol, _expiry, _strike, _opt_type = parse_option_symbol(
+                symbol, exchange, expiry_time
+            )
+            parsed_symbols[symbol] = (base_symbol, _expiry, _strike, _opt_type)
+            spot_symbol = sym_req.get("underlying_symbol") or base_symbol
+            spot_exchange = sym_req.get("underlying_exchange") or get_underlying_exchange(
+                base_symbol, exchange
+            )
+            spot_key = (spot_symbol, spot_exchange)
+            spot_keys[spot_key] = None
+            symbol_to_spot_key[symbol] = spot_key
+        except Exception as e:
+            logger.warning("Failed to parse symbol %s: %s", symbol, e)
+            failed_count += 1
+            results.append({
+                "status": "error",
+                "symbol": symbol,
+                "exchange": exchange,
+                "message": f"Failed to parse option symbol: {e}",
+            })
+
+    # Step 2 — one spot fetch per unique underlying.
+    for spot_key in spot_keys:
+        spot_symbol, spot_exchange = spot_key
+        try:
+            ok, sresp, _ = get_quotes_with_auth(
+                symbol=spot_symbol, exchange=spot_exchange,
+                auth_token=auth_token, broker=broker, config=config,
+            )
+            if ok:
+                ltp = sresp.get("data", {}).get("ltp")
+                if ltp:
+                    spot_keys[spot_key] = float(ltp)
+        except Exception as e:
+            logger.warning("Error fetching spot for %s: %s", spot_symbol, e)
+
+    # Step 3 — batch-fetch every option LTP. openbull multi-quote rows are flat
+    # (ltp/close at top level); fall back to a nested `data` dict for safety.
+    option_prices: dict[str, float] = {}
+    to_fetch = [
+        {"symbol": s.get("symbol"), "exchange": s.get("exchange")}
+        for s in symbols
+        if s.get("symbol") in parsed_symbols
+    ]
+    if to_fetch:
+        try:
+            ok, mqresp, _ = get_multi_quotes_with_auth(
+                symbols_list=to_fetch, auth_token=auth_token, broker=broker, config=config,
+            )
+            if ok:
+                for row in mqresp.get("results", []):
+                    sym = row.get("symbol")
+                    if not sym:
+                        continue
+                    data = row.get("data", row)
+                    ltp = data.get("ltp")
+                    if ltp:
+                        option_prices[sym] = float(ltp)
+        except Exception as e:
+            logger.warning("Multiquotes fetch failed: %s", e)
+
+    # Step 4 — compute Greeks per symbol (pure math, no broker calls).
+    for sym_req in symbols:
+        symbol = sym_req.get("symbol")
+        exchange = sym_req.get("exchange")
+        if symbol not in parsed_symbols:
+            continue
+
+        spot_key = symbol_to_spot_key.get(symbol)
+        spot_price = spot_keys.get(spot_key) if spot_key else None
+        if not spot_price:
+            failed_count += 1
+            results.append({
+                "status": "error", "symbol": symbol, "exchange": exchange,
+                "message": f"Failed to fetch underlying price for {spot_key[0] if spot_key else 'unknown'}",
+            })
+            continue
+
+        option_price = option_prices.get(symbol)
+        if not option_price:
+            failed_count += 1
+            results.append({
+                "status": "error", "symbol": symbol, "exchange": exchange,
+                "message": "Option LTP not available",
+            })
+            continue
+
+        try:
+            ok_g, gresp, _ = calculate_greeks(
+                option_symbol=symbol, exchange=exchange,
+                spot_price=spot_price, option_price=option_price,
+                interest_rate=interest_rate, expiry_time=expiry_time,
+            )
+            if ok_g:
+                success_count += 1
+            else:
+                failed_count += 1
+                gresp.setdefault("symbol", symbol)
+                gresp.setdefault("exchange", exchange)
+            results.append(gresp)
+        except Exception as e:
+            logger.exception("Error calculating Greeks for %s: %s", symbol, e)
+            failed_count += 1
+            results.append({
+                "status": "error", "symbol": symbol, "exchange": exchange, "message": str(e),
+            })
+
+    order = {s.get("symbol"): i for i, s in enumerate(symbols)}
+    results.sort(key=lambda x: order.get(x.get("symbol"), 999))
+
+    status = "success" if failed_count == 0 else "partial" if success_count > 0 else "error"
+    response = {
+        "status": status,
+        "data": results,
+        "summary": {"total": len(symbols), "success": success_count, "failed": failed_count},
+    }
+    return status != "error", response, 200
 
 
 # ── Backwards-compat aliases for callers still using old names ────────
