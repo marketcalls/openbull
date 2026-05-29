@@ -133,7 +133,7 @@ async def _zmq_listener(zmq_port: int) -> None:
 
             # Exchange can be 1 or 2 segments (NSE vs NSE_INDEX)
             if len(segments) >= 4 and f"{segments[0]}_{segments[1]}" in (
-                "NSE_INDEX", "BSE_INDEX", "MCX_INDEX",
+                "NSE_INDEX", "BSE_INDEX", "MCX_INDEX", "GLOBAL_INDEX",
             ):
                 exchange = f"{segments[0]}_{segments[1]}"
                 symbol = "_".join(segments[2:-1])

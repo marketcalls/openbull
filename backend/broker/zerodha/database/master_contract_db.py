@@ -84,10 +84,14 @@ def _process_csv(path: str) -> pd.DataFrame:
         "BFO": "BFO",
         "BCD": "BCD",
         "MCX": "MCX",
+        "NCO": "NCO",            # NSE Commodities (futures + options + underlyings)
+        "GLOBAL": "GLOBAL_INDEX",  # Zerodha global indices feed (US30, JAPAN225, HANGSENG, ...)
+        "NSEIX": "GLOBAL_INDEX",  # NSE IFSC (single GIFT NIFTY row) folded into GLOBAL_INDEX
     }
     df["exchange"] = df["exchange"].map(exchange_map)
 
-    # Drop rows with unmapped exchanges (e.g. GIFT NIFTY)
+    # Drop rows with exchanges we still don't map (kept after adding NCO /
+    # GLOBAL / NSEIX above so those feeds are no longer silently discarded).
     df = df.dropna(subset=["exchange"])
 
     # Index segment handling
@@ -248,6 +252,13 @@ def _process_csv(path: str) -> pd.DataFrame:
         "SMEIPO": "BSESMEIPO",
         "TECK": "BSETECK",
         "TELCOM": "BSETELECOM",
+    })
+
+    # GLOBAL_INDEX symbol normalisation (the lone NSE-IFSC GIFT NIFTY row, which
+    # Zerodha ships with a literal space). Strip it to a single-token symbol.
+    global_idx_mask = df["exchange"] == "GLOBAL_INDEX"
+    df.loc[global_idx_mask, "symbol"] = df.loc[global_idx_mask, "symbol"].replace({
+        "GIFT NIFTY": "GIFTNIFTY",
     })
 
     return df
