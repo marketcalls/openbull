@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { fetchExpiries, fetchUnderlyings } from "@/api/optionchain";
 import { useOptionChainLive } from "@/hooks/useOptionChainLive";
+import { useSupportedExchanges } from "@/hooks/useSupportedExchanges";
 import {
   COLUMNS,
   FALLBACK_UNDERLYINGS,
@@ -353,6 +354,19 @@ export default function OptionChain() {
 
   const prevChainRef = useRef<Map<number, OptionStrike>>(new Map());
 
+  // Broker-aware F&O exchange options. Falls back to the full hardcoded
+  // FNO_EXCHANGES list when broker capabilities aren't loaded, so the picker
+  // never empties.
+  const { filterExchanges } = useSupportedExchanges();
+  const fnoExchangeOptions = useMemo(() => filterExchanges(FNO_EXCHANGES), [filterExchanges]);
+  // If the connected broker doesn't support the current selection, snap to the
+  // first available option.
+  useEffect(() => {
+    if (fnoExchangeOptions.length && !fnoExchangeOptions.some((o) => o.value === exchange)) {
+      setExchange(fnoExchangeOptions[0].value);
+    }
+  }, [fnoExchangeOptions, exchange]);
+
   // Underlyings list — DB-backed (option-ticker prefix + name), falls back to
   // a small hardcoded list while the API loads.
   const underlyingsQuery = useQuery({
@@ -485,7 +499,7 @@ export default function OptionChain() {
               onChange={(e) => setExchange(e.target.value as FnoExchange)}
               className="h-8 w-24 rounded-lg border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
             >
-              {FNO_EXCHANGES.map((e) => (
+              {fnoExchangeOptions.map((e) => (
                 <option key={e.value} value={e.value}>
                   {e.label}
                 </option>

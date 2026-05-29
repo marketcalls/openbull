@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/table";
 import { searchSymbols } from "@/api/symbols";
 import { EXCHANGES } from "@/types/symbol";
+import { useSupportedExchanges } from "@/hooks/useSupportedExchanges";
 import { cn } from "@/lib/utils";
 
 const MAX_ROWS = 50; // backend LIMIT 50
@@ -162,6 +163,11 @@ function SearchPanel({
   const debouncedQuery = useDebounced(query.trim(), 300);
   const enabled = debouncedQuery.length >= 1 && exchange.length > 0;
 
+  // Broker-aware exchange options: filter the tradable exchanges to the
+  // connected broker's supported set (index/feed exchanges are always kept,
+  // and it falls back to the full list when capabilities aren't loaded).
+  const { filterExchanges } = useSupportedExchanges();
+
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ["symbol-search", exchange, debouncedQuery],
     queryFn: () => searchSymbols(debouncedQuery, exchange),
@@ -214,7 +220,7 @@ function SearchPanel({
                   "focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
                 )}
               >
-                {EXCHANGES.map((e) => (
+                {filterExchanges(EXCHANGES).map((e) => (
                   <option key={e.value} value={e.value}>
                     {e.label}
                   </option>
