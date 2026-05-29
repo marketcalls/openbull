@@ -234,8 +234,15 @@ def get_option_symbol(
     auth_token: str,
     broker: str,
     config: dict | None = None,
+    underlying_ltp: float | None = None,
 ) -> tuple[bool, dict[str, Any], int]:
-    """Resolve option symbol from underlying+expiry+offset+type."""
+    """Resolve option symbol from underlying+expiry+offset+type.
+
+    `underlying_ltp`: optional pre-fetched LTP for the ATM reference. When a
+    caller already knows the underlying price (e.g. multi-leg placement reusing
+    one quote across legs on the same underlying), pass it to skip the internal
+    quote fetch. Default None preserves the original fetch-every-call behaviour.
+    """
     try:
         base_symbol, embedded_expiry = _parse_underlying(underlying)
         final_expiry = (expiry_date or embedded_expiry or "").upper()
@@ -271,19 +278,24 @@ def get_option_symbol(
                 }, 404
             quote_symbol, quote_exchange_for_ltp = fut["symbol"], fut["exchange"]
 
-        ok, quote_data, status_code = get_quotes_with_auth(
-            symbol=quote_symbol, exchange=quote_exchange_for_ltp,
-            auth_token=auth_token, broker=broker, config=config,
-        )
-        if not ok:
-            return False, {
-                "status": "error",
-                "message": f"Failed to fetch LTP for {quote_symbol}: {quote_data.get('message', 'unknown error')}",
-            }, status_code
+        if underlying_ltp is not None and underlying_ltp > 0:
+            # Reuse the caller-supplied LTP (e.g. multi-leg placement that fetched
+            # the underlying quote once for all legs on this underlying).
+            ltp = underlying_ltp
+        else:
+            ok, quote_data, status_code = get_quotes_with_auth(
+                symbol=quote_symbol, exchange=quote_exchange_for_ltp,
+                auth_token=auth_token, broker=broker, config=config,
+            )
+            if not ok:
+                return False, {
+                    "status": "error",
+                    "message": f"Failed to fetch LTP for {quote_symbol}: {quote_data.get('message', 'unknown error')}",
+                }, status_code
 
-        ltp = quote_data.get("data", {}).get("ltp")
-        if ltp is None:
-            return False, {"status": "error", "message": f"LTP not available for {quote_symbol}"}, 500
+            ltp = quote_data.get("data", {}).get("ltp")
+            if ltp is None:
+                return False, {"status": "error", "message": f"LTP not available for {quote_symbol}"}, 500
 
         strikes = _fetch_available_strikes(base_symbol, final_expiry, option_type, options_exchange)
         if not strikes:

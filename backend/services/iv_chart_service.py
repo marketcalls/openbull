@@ -136,12 +136,13 @@ def get_iv_chart_data(
         ce_symbol = f"{base_symbol}{expiry_ddmmmyy}{_format_strike(atm_strike)}CE"
         pe_symbol = f"{base_symbol}{expiry_ddmmmyy}{_format_strike(atm_strike)}PE"
 
-        # 3. Date window. The history fetcher will skip non-trading days so we
-        #    just ask for `days` calendar days; CE/PE alignment falls out of the
+        # 3. Date window. Fetch a GENEROUS calendar buffer guaranteed to contain
+        #    at least `days` trading dates, then trim the final series to the last
+        #    N distinct trading dates (mirrors openalgo's /tools behaviour so
+        #    "5 days" means 5 trading sessions, not 5 calendar days). The history
+        #    fetcher skips non-trading days; CE/PE alignment falls out of the
         #    timestamp intersection.
-        today = datetime.now().date()
-        start_date = (today - timedelta(days=days)).isoformat()
-        end_date = today.isoformat()
+        start_date, end_date = _resolve_trading_window(days)
 
         # 4. Fetch all three histories (underlying, CE, PE).
         ok_u, resp_u, _ = get_history_with_auth(
@@ -215,6 +216,11 @@ def get_iv_chart_data(
                 "iv_data": pe_series,
             })
 
+        # Trim each leg to the last N distinct trading dates with data so the
+        # window means "last N trading sessions" (matches openalgo /tools).
+        for entry in series_results:
+            entry["iv_data"] = _cap_last_n_trading_dates(entry["iv_data"], days)
+
         return True, {
             "status": "success",
             "data": {
@@ -234,6 +240,30 @@ def get_iv_chart_data(
     except Exception as e:
         logger.exception("Error in get_iv_chart_data: %s", e)
         return False, {"status": "error", "message": str(e)}, 500
+
+
+def _resolve_trading_window(days: int) -> tuple[str, str]:
+    """(start, end) ISO dates spanning a generous calendar buffer guaranteed to
+    contain at least ``days`` trading dates. The caller trims the result to the
+    last N distinct trading dates via _cap_last_n_trading_dates. Buffer days*3+2
+    covers worst-case long weekends/holidays while staying small for typical UI
+    options (1/3/5/10 days -> 5/11/17/32 calendar days fetched)."""
+    today = datetime.now().date()
+    buffer_days = max(2, days * 3 + 2)
+    start = today - timedelta(days=buffer_days)
+    return start.isoformat(), today.isoformat()
+
+
+def _cap_last_n_trading_dates(series: list[dict], n: int) -> list[dict]:
+    """Trim ``series`` (each row carries a unix-seconds ``time``) to rows whose
+    local calendar date is among the last N distinct dates present. Non-trading
+    days contribute no rows, so this yields the last N TRADING sessions with
+    data — keeping "last N days" consistent across /tools pages."""
+    if not series or n <= 0:
+        return series
+    tagged = [(datetime.fromtimestamp(r["time"]).date(), r) for r in series]
+    keep = set(sorted({d for d, _ in tagged}, reverse=True)[:n])
+    return [r for d, r in tagged if d in keep]
 
 
 def _build_series(
