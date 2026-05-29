@@ -25,6 +25,35 @@ def _zero_margin() -> dict:
     }
 
 
+def test_auth_token(auth_token: str) -> tuple[bool, str | None]:
+    """Validate a Dhan access token via a lightweight /v2/fundlimit GET.
+
+    Returns (is_valid, error_message); error_message is None when valid.
+    """
+    try:
+        client = get_httpx_client()
+        headers = {
+            "access-token": auth_token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        response = client.get(f"{DHAN_BASE_URL}/v2/fundlimit", headers=headers)
+        try:
+            data = json.loads(response.text)
+        except (json.JSONDecodeError, ValueError):
+            return False, f"Invalid response from Dhan (HTTP {response.status_code})"
+
+        if isinstance(data, dict):
+            if data.get("errorType") == "Invalid_Authentication":
+                return False, data.get("errorMessage", "Invalid authentication token")
+            if data.get("status") == "error":
+                return False, str(data.get("errors", "Unknown error"))
+        return True, None
+    except Exception as e:
+        logger.error("Error testing Dhan auth token: %s", e)
+        return False, f"Error validating authentication: {e}"
+
+
 def get_margin_data(auth_token: str, config: dict | None = None) -> dict:
     """Fetch Dhan margin data.
 

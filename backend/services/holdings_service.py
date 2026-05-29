@@ -86,7 +86,16 @@ def get_holdings_with_auth(
                 500,
             )
 
-        holdings = broker_funcs["map_portfolio_data"](holdings)
+        # Pass the auth context so brokers that enrich holdings with live LTP
+        # (e.g. Dhan, whose /holdings carries no price) can batch-fetch quotes.
+        # Brokers whose map_portfolio_data takes only the data fall back via
+        # TypeError.
+        try:
+            holdings = broker_funcs["map_portfolio_data"](
+                holdings, auth_token=auth_token, broker=broker, config=config
+            )
+        except TypeError:
+            holdings = broker_funcs["map_portfolio_data"](holdings)
         portfolio_stats = broker_funcs["calculate_portfolio_statistics"](holdings)
         holdings = broker_funcs["transform_holdings_data"](holdings)
 
