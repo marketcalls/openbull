@@ -5,7 +5,6 @@ Dual-entry pattern: get_holdings_with_auth() + get_holdings()
 
 import importlib
 import logging
-import traceback
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -111,8 +110,7 @@ def get_holdings_with_auth(
             200,
         )
     except Exception as e:
-        logger.error("Error processing holdings data: %s", e)
-        traceback.print_exc()
+        logger.exception("Error processing holdings data: %s", e)
         return False, {"status": "error", "message": str(e)}, 500
 
 

@@ -5,7 +5,6 @@ Dual-entry pattern: get_funds_with_auth() + get_funds()
 
 import importlib
 import logging
-import traceback
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -53,8 +52,7 @@ def get_funds_with_auth(
         funds = broker_module.get_margin_data(auth_token, config)
         return True, {"status": "success", "data": funds}, 200
     except Exception as e:
-        logger.error("Error in broker_module.get_margin_data: %s", e)
-        traceback.print_exc()
+        logger.exception("Error in broker_module.get_margin_data: %s", e)
         return False, {"status": "error", "message": str(e)}, 500
 
 
