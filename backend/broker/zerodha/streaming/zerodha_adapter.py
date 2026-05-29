@@ -83,6 +83,12 @@ class ZerodhaAdapter(BaseBrokerAdapter):
         self._pending: deque = deque()
         self._pending_lock = threading.Lock()
         self._sub_lock = threading.Lock()  # protects _subscribed_tokens / _ntoken_to_token
+        # Fatal-error short-circuit: when an auth failure is detected (expired
+        # token, invalid api_key, 3am IST roll-over, etc.) we stop reconnecting
+        # instead of burning the 50-try budget against a dead token. Reset on
+        # connect() so a re-start after token refresh is not blocked.
+        self._fatal_error: bool = False
+        self._fatal_error_message: str = ""
 
     # ---- BaseBrokerAdapter interface ----
 
@@ -100,6 +106,10 @@ class ZerodhaAdapter(BaseBrokerAdapter):
 
         ws_url = f"wss://ws.kite.trade?api_key={api_key}&access_token={access_token}"
 
+        # Clear any prior fatal-auth state so a reconnect after a token refresh
+        # is not immediately short-circuited.
+        self._fatal_error = False
+        self._fatal_error_message = ""
         self._running = True
         self._ws = websocket.WebSocketApp(
             ws_url,
@@ -213,6 +223,15 @@ class ZerodhaAdapter(BaseBrokerAdapter):
             if not self._running:
                 break
 
+            # Auth-failure short-circuit: bail before counting the attempt so a
+            # bad/expired token does not burn the whole reconnect budget.
+            if self._fatal_error:
+                logger.error(
+                    "Zerodha WS stopping — fatal error (likely auth/token failure): %s",
+                    self._fatal_error_message,
+                )
+                break
+
             if self._reconnect_reset_signal:
                 # We connected at least once during this run — flaky session,
                 # not a dead one. Reset the counter so the budget isn't burned.
@@ -280,10 +299,18 @@ class ZerodhaAdapter(BaseBrokerAdapter):
     def _on_error(self, ws, error) -> None:
         logger.error("Zerodha WS error: %s", error)
         self._connected = False
+        # A handshake rejection (403/401, TokenException) surfaces here as the
+        # run_forever exception — mark it fatal so we don't retry a dead token.
+        if self._is_fatal_auth_error(error):
+            self._mark_fatal_error(str(error))
 
     def _on_close(self, ws, code, msg) -> None:
         logger.info("Zerodha WS closed (code=%s, msg=%s)", code, msg)
         self._connected = False
+        # close codes are too generic to treat as fatal; only the message text
+        # is matched against the conservative auth-failure indicators.
+        if not self._fatal_error and self._is_fatal_auth_error(msg):
+            self._mark_fatal_error(f"close_msg={msg!r}")
 
     # ---- Subscription worker ----
 
@@ -598,6 +625,39 @@ class ZerodhaAdapter(BaseBrokerAdapter):
             self._ws.send(msg)
         except Exception as e:
             logger.error("Set mode send error: %s", e)
+
+    # ---- Auth-failure detection ----
+
+    # Conservative substring indicators matched against the error / close
+    # payload text. Kept tight so transient network blips are NOT treated as
+    # fatal (those should still reconnect).
+    _AUTH_FAILURE_INDICATORS = (
+        "403",
+        "401",
+        "unauthorized",
+        "tokenexception",
+        "invalid api_key",
+        "invalid access_token",
+    )
+
+    def _is_fatal_auth_error(self, payload) -> bool:
+        """True iff the error/close payload looks like an auth/token failure."""
+        if not payload:
+            return False
+        text = str(payload).lower()
+        return any(tok in text for tok in self._AUTH_FAILURE_INDICATORS)
+
+    def _mark_fatal_error(self, message: str) -> None:
+        """Flag a non-retryable auth failure (idempotent)."""
+        if self._fatal_error:
+            return
+        self._fatal_error = True
+        self._fatal_error_message = message
+        logger.error(
+            "Zerodha auth/token failure detected — will not retry. "
+            "Refresh the token and reconnect. (%s)",
+            message,
+        )
 
     # ---- Health check ----
 
