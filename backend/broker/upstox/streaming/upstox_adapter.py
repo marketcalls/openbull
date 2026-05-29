@@ -36,6 +36,12 @@ AUTH_ENDPOINT = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
 # Server-side routing filters LTP/QUOTE/DEPTH per client subscription.
 _UPSTOX_MODE = {MODE_LTP: "full", MODE_QUOTE: "full", MODE_DEPTH: "full"}
 
+# Reconnect budget: Upstox tokens are valid all day, so a long-lived feed may
+# legitimately drop and reconnect many times. A flaky session (one that
+# connected at least once) resets the counter; only consecutive failures burn it.
+RECONNECT_MAX_TRIES = 50
+RECONNECT_MAX_DELAY = 30
+
 
 class UpstoxAdapter(BaseBrokerAdapter):
     """Upstox v3 protobuf streaming adapter."""
@@ -49,6 +55,8 @@ class UpstoxAdapter(BaseBrokerAdapter):
         self._last_msg_time: float | None = None
         self._subscribed_keys: set[str] = set()
         self._key_mode: dict[str, int] = {}  # instrument_key -> highest subscribed mode
+        self._reconnect_reset_signal = False  # set by _on_open; read by _run_ws
+        self._last_ltpc: dict[str, dict] = {}  # feed_key -> last good ltpc (carry-forward)
 
     # ---- BaseBrokerAdapter interface ----
 
@@ -118,6 +126,7 @@ class UpstoxAdapter(BaseBrokerAdapter):
                 pass
         self._subscribed_keys.clear()
         self._key_mode.clear()
+        self._last_ltpc.clear()
         logger.info("Upstox adapter disconnected")
 
     # ---- WS internals ----
@@ -125,6 +134,9 @@ class UpstoxAdapter(BaseBrokerAdapter):
     def _run_ws(self) -> None:
         reconnect_attempts = 0
         while self._running:
+            # Armed before each run; _on_open sets it true on a successful
+            # handshake so a flaky (but reachable) session doesn't burn the budget.
+            self._reconnect_reset_signal = False
             try:
                 self._ws.run_forever(
                     sslopt={"cert_reqs": ssl.CERT_REQUIRED},
@@ -138,12 +150,17 @@ class UpstoxAdapter(BaseBrokerAdapter):
             if not self._running:
                 break
 
+            if self._reconnect_reset_signal:
+                # Connected at least once this run — reset so the budget tracks
+                # only consecutive failures, not lifetime reconnects.
+                reconnect_attempts = 0
+
             reconnect_attempts += 1
-            if reconnect_attempts > 5:
-                logger.error("Upstox max reconnect attempts reached")
+            if reconnect_attempts > RECONNECT_MAX_TRIES:
+                logger.error("Upstox max reconnect attempts (%d) reached", RECONNECT_MAX_TRIES)
                 break
 
-            delay = min(2 ** reconnect_attempts, 30)
+            delay = min(2 ** reconnect_attempts, RECONNECT_MAX_DELAY)
             logger.info("Reconnecting in %ds (attempt %d)...", delay, reconnect_attempts)
             time.sleep(delay)
 
@@ -160,6 +177,7 @@ class UpstoxAdapter(BaseBrokerAdapter):
     def _on_open(self, ws) -> None:
         logger.info("Upstox WebSocket connected")
         self._connected = True
+        self._reconnect_reset_signal = True
         self._last_msg_time = time.time()
         self._start_health_check()
 
@@ -218,6 +236,13 @@ class UpstoxAdapter(BaseBrokerAdapter):
         # For IndexFullFeed it lives under fullFeed.indexFF.ltpc.
         index_ff = full_feed.get("indexFF", {}) if isinstance(full_feed, dict) else {}
         ltpc = feed_data.get("ltpc") or market_ff.get("ltpc") or index_ff.get("ltpc") or {}
+        # LTPC carry-forward: full-mode packets sometimes carry only OHLC/depth
+        # with no ltpc, which would otherwise publish ltp=0 and wipe the last
+        # price. Reuse the last good ltpc for this feed when the packet omits it.
+        if ltpc and ltpc.get("ltp"):
+            self._last_ltpc[feed_key] = ltpc
+        elif feed_key in self._last_ltpc:
+            ltpc = self._last_ltpc[feed_key]
         try:
             ltp = float(ltpc.get("ltp", 0) or 0)
         except (TypeError, ValueError):

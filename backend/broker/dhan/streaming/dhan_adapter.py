@@ -85,6 +85,14 @@ class DhanAdapter(BaseBrokerAdapter):
         self._sub_queue: list[dict] = []
         self._batch_timer: threading.Timer | None = None
         self._batch_lock = threading.Lock()
+        # Connection-health watchdog + auth short-circuit (parity with the other
+        # broker adapters). _last_msg_time drives stall detection; _fatal_error
+        # stops reconnecting on a detected auth/token failure.
+        self._health_thread: threading.Thread | None = None
+        self._last_msg_time: float | None = None
+        self._reconnect_reset_signal = False
+        self._fatal_error: bool = False
+        self._fatal_error_message: str = ""
 
     def _extract_client_id(self) -> str | None:
         cfg = self.broker_config or {}
@@ -114,6 +122,9 @@ class DhanAdapter(BaseBrokerAdapter):
         }
         ws_url = f"wss://api-feed.dhan.co?{urlencode(params)}"
 
+        # Clear prior fatal-auth state so a reconnect after a token refresh works.
+        self._fatal_error = False
+        self._fatal_error_message = ""
         self._running = True
         self._ws = websocket.WebSocketApp(
             ws_url,
@@ -270,6 +281,7 @@ class DhanAdapter(BaseBrokerAdapter):
     def _run_ws(self) -> None:
         reconnect_attempts = 0
         while self._running:
+            self._reconnect_reset_signal = False
             try:
                 self._ws.run_forever(ping_interval=30, ping_timeout=10)
             except Exception as e:
@@ -278,6 +290,19 @@ class DhanAdapter(BaseBrokerAdapter):
             self._connected = False
             if not self._running:
                 break
+
+            # Auth-failure short-circuit: don't retry a dead/expired token.
+            if self._fatal_error:
+                logger.error(
+                    "Dhan WS stopping — fatal error (likely auth/token failure): %s",
+                    self._fatal_error_message,
+                )
+                break
+
+            # Flaky-but-reachable session resets the budget (only consecutive
+            # failures burn it).
+            if self._reconnect_reset_signal:
+                reconnect_attempts = 0
 
             reconnect_attempts += 1
             if reconnect_attempts > RECONNECT_MAX_TRIES:
@@ -290,6 +315,9 @@ class DhanAdapter(BaseBrokerAdapter):
     def _on_open(self, ws) -> None:
         logger.info("Dhan WS connected")
         self._connected = True
+        self._reconnect_reset_signal = True
+        self._last_msg_time = time.time()
+        self._start_health_check()
 
         # Resubscribe everything on (re)connect, grouped by (segment, mode)
         groups: dict[str, list[dict]] = defaultdict(list)
@@ -304,6 +332,7 @@ class DhanAdapter(BaseBrokerAdapter):
             self._send_subscribe(instruments, dhan_mode)
 
     def _on_message(self, ws, message) -> None:
+        self._last_msg_time = time.time()
         if isinstance(message, (bytes, bytearray)) and len(message) >= 8:
             try:
                 self._parse_binary(bytes(message))
@@ -313,10 +342,74 @@ class DhanAdapter(BaseBrokerAdapter):
     def _on_error(self, ws, error) -> None:
         logger.error("Dhan WS error: %s", error)
         self._connected = False
+        if self._is_fatal_auth_error(error):
+            self._mark_fatal_error(str(error))
 
     def _on_close(self, ws, code, msg) -> None:
         logger.info("Dhan WS closed (code=%s, msg=%s)", code, msg)
         self._connected = False
+        # Match the close MESSAGE text only (Dhan sends "807 token expired" /
+        # "808 auth failed" style text). We deliberately skip the numeric WS
+        # close code: a benign code that happens to contain "807"/"401" must not
+        # permanently kill reconnection. Handshake auth rejections are caught in
+        # _on_error instead.
+        if not self._fatal_error and self._is_fatal_auth_error(msg):
+            self._mark_fatal_error(f"close code={code} msg={msg!r}")
+
+    # ---- Health check + auth-failure short-circuit ----
+
+    # Conservative substring indicators (matched against error/close payloads).
+    # 807 = token expired, 808 = auth failed (Dhan WS disconnect codes). Kept
+    # tight so transient network blips still reconnect.
+    _AUTH_FAILURE_INDICATORS = (
+        "401",
+        "403",
+        "807",
+        "808",
+        "unauthorized",
+        "invalid_authentication",
+    )
+
+    def _start_health_check(self) -> None:
+        if self._health_thread and self._health_thread.is_alive():
+            return
+        self._health_thread = threading.Thread(
+            target=self._health_loop, daemon=True, name="dhan-health",
+        )
+        self._health_thread.start()
+
+    def _health_loop(self) -> None:
+        while self._running and self._connected:
+            time.sleep(30)
+            if not self._running or not self._connected:
+                break
+            if self._last_msg_time and (time.time() - self._last_msg_time) > 90:
+                logger.error("Dhan data stall (>90s). Forcing reconnect.")
+                if self._ws:
+                    try:
+                        self._ws.close()
+                    except Exception:
+                        pass
+                break
+
+    def _is_fatal_auth_error(self, payload) -> bool:
+        """True iff the error/close payload looks like an auth/token failure."""
+        if not payload:
+            return False
+        text = str(payload).lower()
+        return any(tok in text for tok in self._AUTH_FAILURE_INDICATORS)
+
+    def _mark_fatal_error(self, message: str) -> None:
+        """Flag a non-retryable auth failure (idempotent)."""
+        if self._fatal_error:
+            return
+        self._fatal_error = True
+        self._fatal_error_message = message
+        logger.error(
+            "Dhan auth/token failure detected — will not retry. "
+            "Refresh the token and reconnect. (%s)",
+            message,
+        )
 
     # ---- Subscription wire ----
 
