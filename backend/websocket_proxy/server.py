@@ -195,6 +195,15 @@ async def _zmq_listener(zmq_port: int) -> None:
 
 # ---- Client handler ----
 
+def _ack(payload: dict, request_id) -> dict:
+    """Echo the caller's optional correlation id back on an ACK/response so the
+    client can match a response to the subscribe/unsubscribe/auth request that
+    triggered it. No-op when the client didn't send a request_id."""
+    if request_id is not None:
+        payload["request_id"] = request_id
+    return payload
+
+
 async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
     global _adapter, _zmq_task
 
@@ -219,18 +228,21 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
                 continue
 
             action = msg.get("action")
+            # Optional client-supplied correlation id, echoed on the matching
+            # ACK so callers know which subscribe/unsubscribe/auth succeeded.
+            request_id = msg.get("request_id")
 
             # -- authenticate --
             if action == "authenticate":
                 api_key = msg.get("api_key")
                 if not api_key:
-                    await _send_json(ws, {"type": "auth", "status": "error", "message": "api_key required"})
+                    await _send_json(ws, _ack({"type": "auth", "status": "error", "message": "api_key required"}, request_id))
                     continue
 
                 try:
                     user_id, auth_token, bname, config = await verify_api_key_standalone(api_key)
                 except ValueError:
-                    await _send_json(ws, {"type": "auth", "status": "error", "message": "Authentication failed"})
+                    await _send_json(ws, _ack({"type": "auth", "status": "error", "message": "Authentication failed"}, request_id))
                     continue
 
                 broker_name = bname
@@ -267,24 +279,24 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
                                     pass
                             _adapter = None
                             get_market_data_cache().set_connected(False)
-                            await _send_json(ws, {"type": "auth", "status": "error", "message": "Broker connection failed"})
+                            await _send_json(ws, _ack({"type": "auth", "status": "error", "message": "Broker connection failed"}, request_id))
                             continue
 
-                await _send_json(ws, {
+                await _send_json(ws, _ack({
                     "type": "auth",
                     "status": "success",
                     "broker": broker_name,
-                })
+                }, request_id))
 
             # -- subscribe --
             elif action == "subscribe":
                 if _adapter is None or client_id not in _authenticated_clients:
-                    await _send_json(ws, {"type": "subscribe", "status": "error", "message": "Not authenticated"})
+                    await _send_json(ws, _ack({"type": "subscribe", "status": "error", "message": "Not authenticated"}, request_id))
                     continue
 
                 symbols = msg.get("symbols", [])
                 if not isinstance(symbols, list) or len(symbols) > MAX_SYMBOLS_PER_SUBSCRIBE:
-                    await _send_json(ws, {"type": "subscribe", "status": "error", "message": f"symbols must be a list (max {MAX_SYMBOLS_PER_SUBSCRIBE})"})
+                    await _send_json(ws, _ack({"type": "subscribe", "status": "error", "message": f"symbols must be a list (max {MAX_SYMBOLS_PER_SUBSCRIBE})"}, request_id))
                     continue
                 mode = MODE_MAP.get(msg.get("mode", "LTP").upper(), MODE_LTP)
 
@@ -300,19 +312,19 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
                 except Exception as e:
                     logger.error("Subscribe error: %s", e)
 
-                await _send_json(ws, {
+                await _send_json(ws, _ack({
                     "type": "subscribe",
                     "status": "success",
                     "subscriptions": [
                         {"symbol": s["symbol"], "exchange": s["exchange"], "mode": MODE_NAME.get(mode)}
                         for s in symbols if s.get("symbol") and s.get("exchange")
                     ],
-                })
+                }, request_id))
 
             # -- unsubscribe --
             elif action == "unsubscribe":
                 if _adapter is None or client_id not in _authenticated_clients:
-                    await _send_json(ws, {"type": "unsubscribe", "status": "error", "message": "Not authenticated"})
+                    await _send_json(ws, _ack({"type": "unsubscribe", "status": "error", "message": "Not authenticated"}, request_id))
                     continue
 
                 symbols = msg.get("symbols", [])
@@ -336,7 +348,7 @@ async def _handle_client(ws: websockets.WebSocketServerProtocol) -> None:
                     except Exception as e:
                         logger.error("Unsubscribe error: %s", e)
 
-                await _send_json(ws, {"type": "unsubscribe", "status": "success"})
+                await _send_json(ws, _ack({"type": "unsubscribe", "status": "success"}, request_id))
 
             elif action == "ping":
                 # App-level ping for client-side latency measurement. The WS
