@@ -382,7 +382,9 @@ def get_history(
                             "low": candle[3],
                             "close": candle[4],
                             "volume": candle[5] if len(candle) > 5 else 0,
-                            "oi": candle[6] if len(candle) > 6 else 0,
+                            # Cast OI to int (Kite returns it numeric; matches
+                            # openalgo's final_df["oi"].astype(int) guarantee).
+                            "oi": int(candle[6]) if len(candle) > 6 and candle[6] is not None else 0,
                         })
         except Exception as e:
             logger.error("Error fetching history chunk %s to %s: %s", current_start, current_end, e)

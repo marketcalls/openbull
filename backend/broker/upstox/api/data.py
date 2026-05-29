@@ -129,11 +129,53 @@ def _fetch_v3_ohlc(encoded_keys: str, auth_token: str) -> dict:
         return {}
 
 
+def _get_indicator_ltp(token: str, auth_token: str) -> float:
+    """LTP for a GLOBAL_INDICATOR feed (USDINR, BRENTOIL, WTIOIL).
+
+    These are LTP-only on Upstox: /v3 OHLC and /v2 quotes both return
+    UDAPI100500 for them, so we hit /v2/market-quote/ltp instead. Returns the
+    last price, or 0.0 when unavailable.
+    """
+    client = get_httpx_client()
+    encoded = _encode_key(token)
+    url = f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={encoded}"
+    try:
+        resp = client.get(url, headers=_headers(auth_token))
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("status") != "success":
+            return 0.0
+        # Upstox returns the outer key as "GLOBAL_INDICATOR:null"; match on the
+        # inner value's last_price rather than the (useless) key.
+        for value in (body.get("data") or {}).values():
+            if value and value.get("last_price") is not None:
+                return float(value.get("last_price") or 0)
+    except Exception as e:
+        logger.debug("Indicator LTP fetch failed for %s: %s", token, e)
+    return 0.0
+
+
+def _indicator_quote(ltp: float, symbol: str | None = None, exchange: str | None = None) -> dict:
+    """Quote dict for an LTP-only GLOBAL_INDICATOR feed (all non-LTP fields 0)."""
+    q = {
+        "ltp": ltp, "open": 0, "high": 0, "low": 0, "close": 0,
+        "prev_close": 0, "volume": 0, "oi": 0,
+    }
+    if symbol is not None:
+        q = {"symbol": symbol, "exchange": exchange, **q,
+             "bid": 0, "ask": 0, "bid_qty": 0, "ask_qty": 0}
+    return q
+
+
 def get_quotes(symbol: str, exchange: str, auth_token: str, config: dict | None = None) -> dict:
     """Get LTP/OHLC quotes for a single symbol (v3 OHLC + v2 depth)."""
     token = get_token_from_cache(symbol, exchange)
     if not token:
         raise ValueError(f"Instrument token not found for {symbol}/{exchange}")
+
+    # GLOBAL_INDICATOR feeds are LTP-only — short-circuit to the LTP endpoint.
+    if token.startswith("GLOBAL_INDICATOR|"):
+        return _indicator_quote(_get_indicator_ltp(token, auth_token))
 
     client = get_httpx_client()
     encoded = _encode_key(token)
@@ -191,10 +233,22 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
             keys_map[token] = {"symbol": sym, "exchange": exch}
             if "|" in token:
                 suffix_map[token.split("|", 1)[1]] = {"symbol": sym, "exchange": exch}
-            encoded_keys.append(_encode_key(token))
+            # GLOBAL_INDICATOR keys are LTP-only and collide on Upstox's buggy
+            # "GLOBAL_INDICATOR:null" batch key — fetched individually below.
+            if not token.startswith("GLOBAL_INDICATOR|"):
+                encoded_keys.append(_encode_key(token))
+
+    results: list[dict] = []
+    for token, info in keys_map.items():
+        if token.startswith("GLOBAL_INDICATOR|"):
+            results.append(
+                _indicator_quote(
+                    _get_indicator_ltp(token, auth_token), info["symbol"], info["exchange"]
+                )
+            )
 
     if not encoded_keys:
-        return []
+        return results
 
     joined_keys = ",".join(encoded_keys)
     v3_map = _fetch_v3_ohlc(joined_keys, auth_token)
@@ -206,9 +260,8 @@ def get_multi_quotes(symbols_list: list[dict], auth_token: str, config: dict | N
     data = response.json()
 
     if data.get("status") != "success" or not data.get("data"):
-        return []
+        return results
 
-    results = []
     for response_key, quote_data in data["data"].items():
         # Upstox returns null for unknown/expired/illiquid instrument keys.
         # Skip those silently — without this guard the .get() calls below
