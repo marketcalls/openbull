@@ -341,8 +341,16 @@ export function buildScannerRow(p: BuildRowParams): ScannerRow | null {
     callPrem > 0 ? impliedVol(callPrem, p.spot, callRow.strike, T, 0, "c") : null;
   const putIv =
     putPrem > 0 ? impliedVol(putPrem, p.spot, putRow.strike, T, 0, "p") : null;
-  const sigCall = callIv ?? 0.0001;
-  const sigPut = putIv ?? 0.0001;
+  // When a leg's IV can't be solved — most commonly a stale sub-intrinsic
+  // price (e.g. a deep-ITM put quoted below K−S on weekend/after-hours data)
+  // — fall back to the *partner* leg's solved IV instead of a near-zero
+  // floor. For a straddle both legs share a strike, so put-call parity makes
+  // their IV identical; for a strangle the partner's IV is still a far better
+  // proxy than 0.0001. The old 0.0001 floor pinned the leg's delta to ±1 and
+  // halved the blended sigma feeding POP, distorting both for those rows.
+  const IV_FLOOR = 0.0001;
+  const sigCall = callIv ?? putIv ?? IV_FLOOR;
+  const sigPut = putIv ?? callIv ?? IV_FLOOR;
 
   const callG = greeks(p.spot, callRow.strike, T, 0, sigCall, "c", callPrem);
   const putG = greeks(p.spot, putRow.strike, T, 0, sigPut, "p", putPrem);
