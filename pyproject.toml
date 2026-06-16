@@ -16,7 +16,7 @@ dependencies = [
     "cryptography>=44.0.0",
     "httpx>=0.28.0",
     "slowapi>=0.1.9",
-    "python-multipart>=0.0.27",
+    "python-multipart>=0.0.31",
     # Mako is a transitive dep via alembic. Pinned at the top level to
     # force 1.3.12+ which patches CVE-2025 (path traversal via double-
     # slash / backslash URI prefix in TemplateLookup). We don't use
