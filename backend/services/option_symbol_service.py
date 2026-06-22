@@ -199,6 +199,32 @@ def _apply_offset(atm: float, offset: str, option_type: str, strikes: list[float
     return strikes[target_idx]
 
 
+def _apply_atm_percent(atm: float, percent: float, strikes: list[float]) -> float | None:
+    """Return the tradable strike closest to ATM +/- percent of ATM."""
+    if not strikes:
+        return None
+    target = atm + (atm * percent / 100)
+    return min(strikes, key=lambda s: abs(s - target))
+
+
+def _apply_straddle_width(atm: float, straddle_premium: float, width: float, strikes: list[float]) -> float | None:
+    """Return the tradable strike closest to ATM +/- straddle premium * width."""
+    if not strikes:
+        return None
+    target = atm + (straddle_premium * width)
+    return min(strikes, key=lambda s: abs(s - target))
+
+
+def _straddle_premium_target(straddle_premium: float, percent: float) -> float:
+    """Return the target option premium as a percentage of ATM straddle premium."""
+    return straddle_premium * percent / 100
+
+
+def _underlying_percent_premium(underlying_ltp: float, percent: float) -> float:
+    """Premium target equal to a percentage of the underlying reference price."""
+    return underlying_ltp * percent / 100
+
+
 def _format_strike(strike: float) -> str:
     return str(int(strike)) if strike == int(strike) else str(strike)
 

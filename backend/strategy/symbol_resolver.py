@@ -28,11 +28,21 @@ from typing import Any, Optional
 
 from backend.services.market_data_service import get_expiry_dates
 from backend.services.option_symbol_service import (
+    _apply_atm_percent,
+    _apply_straddle_width,
+    _fetch_available_strikes,
     _format_strike,
+    _find_atm,
+    _find_near_month_futures,
     _lookup_option_in_db,
     _option_exchange_for,
+    _parse_underlying,
+    _quote_exchange_for,
+    _straddle_premium_target,
+    _underlying_percent_premium,
     get_option_symbol,
 )
+from backend.services.quotes_service import get_multi_quotes_with_auth, get_quotes_with_auth
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +176,486 @@ def resolve_atm(
     )
 
 
+def resolve_future_based(
+    *,
+    underlying: str,
+    underlying_exchange: str,
+    expiry_date: str,
+    atm_offset: str,
+    option_type: str,
+    auth_token: str,
+    broker: str,
+    config: Optional[dict] = None,
+) -> tuple[bool, dict[str, Any], int]:
+    """Resolve ATM-relative options using the nearest FUT LTP as reference."""
+    base = underlying.strip().upper()
+    fut_exchange = option_exchange_for(underlying_exchange)
+    fut = _find_near_month_futures(base, fut_exchange)
+    if not fut:
+        return False, {
+            "status": "error",
+            "message": f"No FUT contract found for {base} on {fut_exchange}",
+        }, 404
+
+    ok, quote_data, status_code = get_quotes_with_auth(
+        symbol=fut["symbol"],
+        exchange=fut["exchange"],
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, {
+            "status": "error",
+            "message": (
+                f"Failed to fetch FUT LTP for {fut['symbol']}: "
+                f"{quote_data.get('message', 'unknown error')}"
+            ),
+        }, status_code
+
+    fut_ltp = quote_data.get("data", {}).get("ltp")
+    if fut_ltp is None:
+        return False, {"status": "error", "message": f"LTP not available for {fut['symbol']}"}, 500
+
+    expiry_compact = expiry_date.replace("-", "").upper()
+    return get_option_symbol(
+        underlying=underlying,
+        exchange=underlying_exchange,
+        expiry_date=expiry_compact,
+        offset=atm_offset,
+        option_type=option_type,
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+        underlying_ltp=float(fut_ltp),
+    )
+
+
+def resolve_atm_percent(
+    *,
+    underlying: str,
+    underlying_exchange: str,
+    expiry_date: str,
+    atm_percent: float,
+    option_type: str,
+    auth_token: str,
+    broker: str,
+    config: Optional[dict] = None,
+) -> tuple[bool, dict[str, Any], int]:
+    """Resolve an option strike at ATM +/- percentage from the ATM strike."""
+    base_symbol, embedded_expiry = _parse_underlying(underlying)
+    final_expiry = (expiry_date or embedded_expiry or "").replace("-", "").upper()
+    if not re.match(r"^\d{2}[A-Z]{3}\d{2}$", final_expiry):
+        return False, {"status": "error", "message": f"Invalid expiry: {expiry_date}"}, 400
+
+    option_type_u = option_type.upper()
+    if option_type_u not in ("CE", "PE"):
+        return False, {"status": "error", "message": "option_type must be CE or PE"}, 400
+
+    quote_exchange = _quote_exchange_for(base_symbol, underlying_exchange)
+    options_exchange = option_exchange_for(quote_exchange)
+    if quote_exchange in ("NSE_INDEX", "BSE_INDEX", "NSE", "BSE"):
+        quote_symbol, quote_exchange_for_ltp = base_symbol, quote_exchange
+    elif embedded_expiry:
+        quote_symbol, quote_exchange_for_ltp = underlying.upper(), quote_exchange
+    else:
+        fut = _find_near_month_futures(base_symbol, quote_exchange)
+        if not fut:
+            return False, {
+                "status": "error",
+                "message": f"No FUT contract found for {base_symbol} on {quote_exchange}",
+            }, 404
+        quote_symbol, quote_exchange_for_ltp = fut["symbol"], fut["exchange"]
+
+    ok, quote_data, status_code = get_quotes_with_auth(
+        symbol=quote_symbol,
+        exchange=quote_exchange_for_ltp,
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, {
+            "status": "error",
+            "message": f"Failed to fetch LTP for {quote_symbol}: {quote_data.get('message', 'unknown error')}",
+        }, status_code
+
+    ltp = quote_data.get("data", {}).get("ltp")
+    if ltp is None:
+        return False, {"status": "error", "message": f"LTP not available for {quote_symbol}"}, 500
+
+    strikes = _fetch_available_strikes(base_symbol, final_expiry, option_type_u, options_exchange)
+    if not strikes:
+        return False, {
+            "status": "error",
+            "message": f"No strikes found for {base_symbol} {final_expiry} on {options_exchange}.",
+        }, 404
+
+    atm = _find_atm(float(ltp), strikes)
+    if atm is None:
+        return False, {"status": "error", "message": "Could not determine ATM strike"}, 404
+    target_strike = _apply_atm_percent(atm, atm_percent, strikes)
+    if target_strike is None:
+        return False, {"status": "error", "message": "ATM percent strike out of range"}, 400
+
+    option_symbol = f"{base_symbol}{final_expiry}{_format_strike(target_strike)}{option_type_u}"
+    details = _lookup_option_in_db(option_symbol, options_exchange)
+    if not details:
+        return False, {
+            "status": "error",
+            "message": f"Option {option_symbol} not found on {options_exchange}.",
+        }, 404
+
+    return True, {
+        "status": "success",
+        "symbol": details["symbol"],
+        "exchange": details["exchange"],
+        "lotsize": details["lotsize"],
+        "tick_size": details["tick_size"],
+        "strike": details["strike"],
+        "expiry": details["expiry"],
+        "underlying_ltp": float(ltp),
+        "atm_strike": atm,
+        "atm_percent": atm_percent,
+    }, 200
+
+
+def resolve_straddle_width(
+    *,
+    underlying: str,
+    underlying_exchange: str,
+    expiry_date: str,
+    width: float,
+    option_type: str,
+    auth_token: str,
+    broker: str,
+    config: Optional[dict] = None,
+) -> tuple[bool, dict[str, Any], int]:
+    """Resolve an option strike at ATM +/- ATM straddle premium * width."""
+    base_symbol, embedded_expiry = _parse_underlying(underlying)
+    final_expiry = (expiry_date or embedded_expiry or "").replace("-", "").upper()
+    if not re.match(r"^\d{2}[A-Z]{3}\d{2}$", final_expiry):
+        return False, {"status": "error", "message": f"Invalid expiry: {expiry_date}"}, 400
+
+    option_type_u = option_type.upper()
+    if option_type_u not in ("CE", "PE"):
+        return False, {"status": "error", "message": "option_type must be CE or PE"}, 400
+
+    quote_exchange = _quote_exchange_for(base_symbol, underlying_exchange)
+    options_exchange = option_exchange_for(quote_exchange)
+    if quote_exchange in ("NSE_INDEX", "BSE_INDEX", "NSE", "BSE"):
+        quote_symbol, quote_exchange_for_ltp = base_symbol, quote_exchange
+    elif embedded_expiry:
+        quote_symbol, quote_exchange_for_ltp = underlying.upper(), quote_exchange
+    else:
+        fut = _find_near_month_futures(base_symbol, quote_exchange)
+        if not fut:
+            return False, {
+                "status": "error",
+                "message": f"No FUT contract found for {base_symbol} on {quote_exchange}",
+            }, 404
+        quote_symbol, quote_exchange_for_ltp = fut["symbol"], fut["exchange"]
+
+    ok, quote_data, status_code = get_quotes_with_auth(
+        symbol=quote_symbol,
+        exchange=quote_exchange_for_ltp,
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, {
+            "status": "error",
+            "message": f"Failed to fetch LTP for {quote_symbol}: {quote_data.get('message', 'unknown error')}",
+        }, status_code
+
+    ltp = quote_data.get("data", {}).get("ltp")
+    if ltp is None:
+        return False, {"status": "error", "message": f"LTP not available for {quote_symbol}"}, 500
+
+    strikes = _fetch_available_strikes(base_symbol, final_expiry, option_type_u, options_exchange)
+    if not strikes:
+        return False, {
+            "status": "error",
+            "message": f"No strikes found for {base_symbol} {final_expiry} on {options_exchange}.",
+        }, 404
+
+    atm = _find_atm(float(ltp), strikes)
+    if atm is None:
+        return False, {"status": "error", "message": "Could not determine ATM strike"}, 404
+
+    atm_symbols: list[dict[str, str]] = []
+    details_by_symbol: dict[str, dict[str, Any]] = {}
+    for atm_option_type in ("CE", "PE"):
+        symbol = f"{base_symbol}{final_expiry}{_format_strike(atm)}{atm_option_type}"
+        details = _lookup_option_in_db(symbol, options_exchange)
+        if not details:
+            return False, {
+                "status": "error",
+                "message": f"ATM {atm_option_type} option {symbol} not found on {options_exchange}.",
+            }, 404
+        details_by_symbol[details["symbol"]] = details
+        atm_symbols.append({"symbol": details["symbol"], "exchange": details["exchange"]})
+
+    ok, straddle_quotes, status_code = get_multi_quotes_with_auth(
+        symbols_list=atm_symbols,
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, straddle_quotes, status_code
+
+    premiums: dict[str, float] = {}
+    for row in straddle_quotes.get("results", []):
+        symbol = _quote_symbol(row)
+        ltp_value = _quote_ltp(row)
+        details = details_by_symbol.get(symbol)
+        if not symbol or ltp_value is None or not details:
+            continue
+        suffix = "CE" if symbol.upper().endswith("CE") else "PE"
+        premiums[suffix] = ltp_value
+
+    if "CE" not in premiums or "PE" not in premiums:
+        return False, {
+            "status": "error",
+            "message": "ATM CE and PE premiums are required for straddle width selection.",
+        }, 404
+
+    straddle_premium = premiums["CE"] + premiums["PE"]
+    target_strike = _apply_straddle_width(atm, straddle_premium, width, strikes)
+    if target_strike is None:
+        return False, {"status": "error", "message": "Straddle width strike out of range"}, 400
+
+    option_symbol = f"{base_symbol}{final_expiry}{_format_strike(target_strike)}{option_type_u}"
+    details = _lookup_option_in_db(option_symbol, options_exchange)
+    if not details:
+        return False, {
+            "status": "error",
+            "message": f"Option {option_symbol} not found on {options_exchange}.",
+        }, 404
+
+    return True, {
+        "status": "success",
+        "symbol": details["symbol"],
+        "exchange": details["exchange"],
+        "lotsize": details["lotsize"],
+        "tick_size": details["tick_size"],
+        "strike": details["strike"],
+        "expiry": details["expiry"],
+        "underlying_ltp": float(ltp),
+        "atm_strike": atm,
+        "straddle_width": width,
+        "straddle_premium": straddle_premium,
+        "atm_ce_premium": premiums["CE"],
+        "atm_pe_premium": premiums["PE"],
+    }, 200
+
+
+def resolve_underlying_percent(
+    *,
+    underlying: str,
+    underlying_exchange: str,
+    expiry_date: str,
+    percent: float,
+    option_type: str,
+    auth_token: str,
+    broker: str,
+    config: Optional[dict] = None,
+) -> tuple[bool, dict[str, Any], int]:
+    """Pick the option whose premium is closest to percent of underlying LTP."""
+    base_symbol, embedded_expiry = _parse_underlying(underlying)
+    final_expiry = (expiry_date or embedded_expiry or "").replace("-", "").upper()
+    if not re.match(r"^\d{2}[A-Z]{3}\d{2}$", final_expiry):
+        return False, {"status": "error", "message": f"Invalid expiry: {expiry_date}"}, 400
+
+    option_type_u = option_type.upper()
+    if option_type_u not in ("CE", "PE"):
+        return False, {"status": "error", "message": "option_type must be CE or PE"}, 400
+
+    quote_exchange = _quote_exchange_for(base_symbol, underlying_exchange)
+    if quote_exchange in ("NSE_INDEX", "BSE_INDEX", "NSE", "BSE"):
+        quote_symbol, quote_exchange_for_ltp = base_symbol, quote_exchange
+    elif embedded_expiry:
+        quote_symbol, quote_exchange_for_ltp = underlying.upper(), quote_exchange
+    else:
+        fut = _find_near_month_futures(base_symbol, quote_exchange)
+        if not fut:
+            return False, {
+                "status": "error",
+                "message": f"No FUT contract found for {base_symbol} on {quote_exchange}",
+            }, 404
+        quote_symbol, quote_exchange_for_ltp = fut["symbol"], fut["exchange"]
+
+    ok, quote_data, status_code = get_quotes_with_auth(
+        symbol=quote_symbol,
+        exchange=quote_exchange_for_ltp,
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, {
+            "status": "error",
+            "message": f"Failed to fetch LTP for {quote_symbol}: {quote_data.get('message', 'unknown error')}",
+        }, status_code
+
+    ltp = quote_data.get("data", {}).get("ltp")
+    if ltp is None:
+        return False, {"status": "error", "message": f"LTP not available for {quote_symbol}"}, 500
+
+    target_premium = _underlying_percent_premium(float(ltp), percent)
+    ok, data, status_code = resolve_premium_based(
+        underlying=underlying,
+        underlying_exchange=underlying_exchange,
+        expiry_date=final_expiry,
+        option_type=option_type_u,
+        premium_value=target_premium,
+        mode="premium_near",
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, data, status_code
+    data["underlying_ltp"] = float(ltp)
+    data["underlying_percent"] = percent
+    data["target_premium"] = target_premium
+    return True, data, 200
+
+
+def resolve_straddle_premium(
+    *,
+    underlying: str,
+    underlying_exchange: str,
+    expiry_date: str,
+    percent: float,
+    match_mode: str,
+    option_type: str,
+    auth_token: str,
+    broker: str,
+    config: Optional[dict] = None,
+) -> tuple[bool, dict[str, Any], int]:
+    """Pick an option by premium target calculated from ATM straddle premium."""
+    base_symbol, embedded_expiry = _parse_underlying(underlying)
+    final_expiry = (expiry_date or embedded_expiry or "").replace("-", "").upper()
+    if not re.match(r"^\d{2}[A-Z]{3}\d{2}$", final_expiry):
+        return False, {"status": "error", "message": f"Invalid expiry: {expiry_date}"}, 400
+
+    option_type_u = option_type.upper()
+    if option_type_u not in ("CE", "PE"):
+        return False, {"status": "error", "message": "option_type must be CE or PE"}, 400
+    if match_mode not in ("premium_near", "premium_greater", "premium_lesser"):
+        return False, {"status": "error", "message": "Invalid straddle premium match mode"}, 400
+
+    quote_exchange = _quote_exchange_for(base_symbol, underlying_exchange)
+    options_exchange = option_exchange_for(quote_exchange)
+    if quote_exchange in ("NSE_INDEX", "BSE_INDEX", "NSE", "BSE"):
+        quote_symbol, quote_exchange_for_ltp = base_symbol, quote_exchange
+    elif embedded_expiry:
+        quote_symbol, quote_exchange_for_ltp = underlying.upper(), quote_exchange
+    else:
+        fut = _find_near_month_futures(base_symbol, quote_exchange)
+        if not fut:
+            return False, {
+                "status": "error",
+                "message": f"No FUT contract found for {base_symbol} on {quote_exchange}",
+            }, 404
+        quote_symbol, quote_exchange_for_ltp = fut["symbol"], fut["exchange"]
+
+    ok, quote_data, status_code = get_quotes_with_auth(
+        symbol=quote_symbol,
+        exchange=quote_exchange_for_ltp,
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, {
+            "status": "error",
+            "message": f"Failed to fetch LTP for {quote_symbol}: {quote_data.get('message', 'unknown error')}",
+        }, status_code
+
+    ltp = quote_data.get("data", {}).get("ltp")
+    if ltp is None:
+        return False, {"status": "error", "message": f"LTP not available for {quote_symbol}"}, 500
+
+    strikes = _fetch_available_strikes(base_symbol, final_expiry, option_type_u, options_exchange)
+    if not strikes:
+        return False, {
+            "status": "error",
+            "message": f"No strikes found for {base_symbol} {final_expiry} on {options_exchange}.",
+        }, 404
+
+    atm = _find_atm(float(ltp), strikes)
+    if atm is None:
+        return False, {"status": "error", "message": "Could not determine ATM strike"}, 404
+
+    atm_symbols: list[dict[str, str]] = []
+    details_by_symbol: dict[str, dict[str, Any]] = {}
+    for atm_option_type in ("CE", "PE"):
+        symbol = f"{base_symbol}{final_expiry}{_format_strike(atm)}{atm_option_type}"
+        details = _lookup_option_in_db(symbol, options_exchange)
+        if not details:
+            return False, {
+                "status": "error",
+                "message": f"ATM {atm_option_type} option {symbol} not found on {options_exchange}.",
+            }, 404
+        details_by_symbol[details["symbol"]] = details
+        atm_symbols.append({"symbol": details["symbol"], "exchange": details["exchange"]})
+
+    ok, straddle_quotes, status_code = get_multi_quotes_with_auth(
+        symbols_list=atm_symbols,
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, straddle_quotes, status_code
+
+    premiums: dict[str, float] = {}
+    for row in straddle_quotes.get("results", []):
+        symbol = _quote_symbol(row)
+        ltp_value = _quote_ltp(row)
+        details = details_by_symbol.get(symbol)
+        if not symbol or ltp_value is None or not details:
+            continue
+        suffix = "CE" if symbol.upper().endswith("CE") else "PE"
+        premiums[suffix] = ltp_value
+
+    if "CE" not in premiums or "PE" not in premiums:
+        return False, {
+            "status": "error",
+            "message": "ATM CE and PE premiums are required for straddle premium selection.",
+        }, 404
+
+    straddle_premium = premiums["CE"] + premiums["PE"]
+    target_premium = _straddle_premium_target(straddle_premium, percent)
+    ok, data, status_code = resolve_premium_based(
+        underlying=underlying,
+        underlying_exchange=underlying_exchange,
+        expiry_date=final_expiry,
+        option_type=option_type_u,
+        premium_value=target_premium,
+        mode=match_mode,
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, data, status_code
+
+    data["underlying_ltp"] = float(ltp)
+    data["atm_strike"] = atm
+    data["straddle_premium"] = straddle_premium
+    data["straddle_premium_percent"] = percent
+    data["straddle_premium_match"] = match_mode
+    data["target_premium"] = target_premium
+    data["atm_ce_premium"] = premiums["CE"]
+    data["atm_pe_premium"] = premiums["PE"]
+    return True, data, 200
+
+
 def resolve_direct_strike(
     *,
     underlying: str,
@@ -211,6 +701,120 @@ def resolve_direct_strike(
         "strike": details["strike"],
         "expiry": details["expiry"],
         "underlying_ltp": None,  # not fetched in direct-strike mode
+    }, 200
+
+
+def _quote_ltp(row: dict[str, Any]) -> Optional[float]:
+    data = row.get("data") if isinstance(row.get("data"), dict) else row
+    value = data.get("ltp") if isinstance(data, dict) else None
+    if value is None:
+        value = row.get("ltp")
+    try:
+        ltp = float(value)
+    except (TypeError, ValueError):
+        return None
+    return ltp if ltp > 0 else None
+
+
+def _quote_symbol(row: dict[str, Any]) -> Optional[str]:
+    symbol = row.get("symbol")
+    if symbol:
+        return str(symbol)
+    data = row.get("data")
+    if isinstance(data, dict) and data.get("symbol"):
+        return str(data["symbol"])
+    return None
+
+
+def resolve_premium_based(
+    *,
+    underlying: str,
+    underlying_exchange: str,
+    expiry_date: str,
+    option_type: str,
+    premium_value: float,
+    mode: str,
+    auth_token: str,
+    broker: str,
+    config: Optional[dict] = None,
+) -> tuple[bool, dict[str, Any], int]:
+    """Pick the option whose live premium matches near/greater/lesser mode."""
+    base = underlying.strip().upper()
+    opt_exchange = option_exchange_for(underlying_exchange)
+    expiry_compact = expiry_date.replace("-", "").upper()
+    option_type_u = option_type.upper()
+    if not re.match(r"^\d{2}[A-Z]{3}\d{2}$", expiry_compact):
+        return False, {"status": "error", "message": f"Invalid expiry: {expiry_date}"}, 400
+    if option_type_u not in ("CE", "PE"):
+        return False, {"status": "error", "message": "option_type must be CE or PE"}, 400
+
+    strikes = _fetch_available_strikes(base, expiry_compact, option_type_u, opt_exchange)
+    if not strikes:
+        return False, {
+            "status": "error",
+            "message": f"No strikes found for {base} {expiry_compact} on {opt_exchange}.",
+        }, 404
+
+    details_by_symbol: dict[str, dict[str, Any]] = {}
+    symbols_list = []
+    for strike in strikes:
+        symbol = f"{base}{expiry_compact}{_format_strike(strike)}{option_type_u}"
+        details = _lookup_option_in_db(symbol, opt_exchange)
+        if not details:
+            continue
+        details_by_symbol[details["symbol"]] = details
+        symbols_list.append({"symbol": details["symbol"], "exchange": details["exchange"]})
+
+    if not symbols_list:
+        return False, {
+            "status": "error",
+            "message": f"No tradable option symbols found for {base} {expiry_compact} {option_type_u}.",
+        }, 404
+
+    ok, quote_data, status_code = get_multi_quotes_with_auth(
+        symbols_list=symbols_list,
+        auth_token=auth_token,
+        broker=broker,
+        config=config,
+    )
+    if not ok:
+        return False, quote_data, status_code
+
+    candidates = []
+    for row in quote_data.get("results", []):
+        symbol = _quote_symbol(row)
+        details = details_by_symbol.get(symbol)
+        ltp = _quote_ltp(row)
+        if not details or ltp is None:
+            continue
+        candidates.append((details, ltp))
+
+    if mode == "premium_greater":
+        candidates = [(d, l) for d, l in candidates if l >= premium_value]
+        key = lambda item: (item[1] - premium_value, item[0]["strike"])
+    elif mode == "premium_lesser":
+        candidates = [(d, l) for d, l in candidates if l <= premium_value]
+        key = lambda item: (premium_value - item[1], -float(item[0]["strike"]))
+    else:
+        key = lambda item: (abs(item[1] - premium_value), item[0]["strike"])
+
+    if not candidates:
+        return False, {
+            "status": "error",
+            "message": f"No option premium matched {mode.replace('_', ' ')} {premium_value}.",
+        }, 404
+
+    details, ltp = min(candidates, key=key)
+    return True, {
+        "status": "success",
+        "symbol": details["symbol"],
+        "exchange": details["exchange"],
+        "lotsize": details["lotsize"],
+        "tick_size": details["tick_size"],
+        "strike": details["strike"],
+        "expiry": details["expiry"],
+        "underlying_ltp": None,
+        "option_ltp": ltp,
     }, 200
 
 

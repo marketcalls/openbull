@@ -57,6 +57,7 @@ import {
   type StrategyKind,
   type StrategyType,
   type StrategyUpdate,
+  type StrikeMode,
   type UniverseTab,
 } from "@/types/strategy_module";
 import { cn } from "@/lib/utils";
@@ -77,9 +78,14 @@ function freshLeg(id: number, tab: UniverseTab): Leg {
     lots: 1,
     position: "S",
     option_type: "CE",
-    strike_mode: "atm",
+    strike_mode: "spot_based",
     atm_offset: "ATM",
     strike_value: null,
+    atm_pct_value: null,
+    straddle_width_value: null,
+    straddle_premium_value: null,
+    straddle_premium_match: "premium_near",
+    underlying_pct_value: null,
     target_pts: null,
     sl_pts: null,
     trail: { x: 0, y: 0 },
@@ -90,8 +96,8 @@ function freshLeg(id: number, tab: UniverseTab): Leg {
 /** Signal-mode leg defaults: cash for stocks (NSE), futures for MCX,
  *  options for index tabs (weekly_monthly / monthly_only — no spot
  *  trading on indices). The user can switch segment per-leg afterwards.
- *  Options legs ride the same option_type / strike_mode / atm_offset /
- *  strike_value pipeline as batch-mode; the engine resolves the actual
+ *  Options legs ride the same option_type / strike selection pipeline as
+ *  batch-mode; the engine resolves the actual
  *  contract at signal time from (leg.symbol, expiry rank, option fields). */
 function freshSignalLeg(id: number, tab: UniverseTab): Leg {
   const allowedSegs = TAB_SEGMENTS[tab];
@@ -112,9 +118,14 @@ function freshSignalLeg(id: number, tab: UniverseTab): Leg {
     lots: 1,
     position: "B",
     option_type: segment === "options" ? "CE" : null,
-    strike_mode: segment === "options" ? "atm" : null,
+    strike_mode: segment === "options" ? "spot_based" : null,
     atm_offset: segment === "options" ? "ATM" : null,
     strike_value: null,
+    atm_pct_value: null,
+    straddle_width_value: null,
+    straddle_premium_value: null,
+    straddle_premium_match: "premium_near",
+    underlying_pct_value: null,
     symbol: "",
     exchange: "",
     side: "both",
@@ -154,6 +165,61 @@ function expiriesFor(tab: UniverseTab, segment: Segment): ExpiryRank[] {
   return TAB_EXPIRIES[tab];
 }
 
+const STRIKE_MODES: Array<{ value: StrikeMode; label: string }> = [
+  { value: "spot_based", label: "Spot Based" },
+  { value: "future_based", label: "Future Based" },
+  { value: "atm_pct", label: "ATM +/- %" },
+  { value: "straddle_width", label: "Straddle Width" },
+  { value: "straddle_premium", label: "Straddle premium" },
+  { value: "underlying_pct", label: "% of Underlying" },
+  { value: "strike", label: "Specific strike" },
+  { value: "premium_near", label: "Premium close to" },
+  { value: "premium_greater", label: "Premium > than" },
+  { value: "premium_lesser", label: "Premium < than" },
+];
+
+const SPOT_OFFSET_MODES = new Set<StrikeMode>(["atm", "spot_based", "future_based"]);
+const PREMIUM_MODES = new Set<StrikeMode>([
+  "premium_near",
+  "premium_greater",
+  "premium_lesser",
+]);
+
+function normalizeStrikeMode(mode: StrikeMode | null | undefined): StrikeMode {
+  return mode === "atm" ? "spot_based" : mode ?? "spot_based";
+}
+
+function strikeModePatch(
+  leg: Leg,
+  mode: StrikeMode | null,
+): Pick<Leg, "strike_mode" | "atm_offset" | "strike_value" | "atm_pct_value" | "straddle_width_value" | "straddle_premium_value" | "straddle_premium_match" | "underlying_pct_value" | "premium_value"> {
+  if (!mode) {
+    return {
+      strike_mode: null,
+      atm_offset: null,
+      strike_value: null,
+      atm_pct_value: null,
+      straddle_width_value: null,
+      straddle_premium_value: null,
+      straddle_premium_match: null,
+      underlying_pct_value: null,
+      premium_value: null,
+    };
+  }
+  const normalized = normalizeStrikeMode(mode);
+  return {
+    strike_mode: normalized,
+    atm_offset: SPOT_OFFSET_MODES.has(normalized) ? leg.atm_offset ?? "ATM" : null,
+    strike_value: normalized === "strike" ? leg.strike_value ?? null : null,
+    atm_pct_value: normalized === "atm_pct" ? leg.atm_pct_value ?? null : null,
+    straddle_width_value: normalized === "straddle_width" ? leg.straddle_width_value ?? null : null,
+    straddle_premium_value: normalized === "straddle_premium" ? leg.straddle_premium_value ?? null : null,
+    straddle_premium_match: normalized === "straddle_premium" ? leg.straddle_premium_match ?? "premium_near" : null,
+    underlying_pct_value: normalized === "underlying_pct" ? leg.underlying_pct_value ?? null : null,
+    premium_value: PREMIUM_MODES.has(normalized) ? leg.premium_value ?? null : null,
+  };
+}
+
 function LegCard({
   leg,
   tab,
@@ -190,28 +256,13 @@ function LegCard({
               value={leg.segment}
               onChange={(e) => {
                 const seg = e.target.value as Segment;
-                // Resolve the NEW strike_mode first; the atm_offset /
-                // strike_value defaults must be evaluated against that
-                // (not against `leg.strike_mode`, which may be null after
-                // an earlier round-trip through a non-options segment).
-                // Without this, toggling off→on options leaves
-                // atm_offset=null while strike_mode='atm' and the schema
-                // rejects with "atm_offset required when strike_mode='atm'".
                 const nextStrikeMode =
-                  seg === "options" ? leg.strike_mode ?? "atm" : null;
+                  seg === "options" ? normalizeStrikeMode(leg.strike_mode) : null;
                 onChange({
                   ...leg,
                   segment: seg,
                   option_type: seg === "options" ? leg.option_type ?? "CE" : null,
-                  strike_mode: nextStrikeMode,
-                  atm_offset:
-                    nextStrikeMode === "atm"
-                      ? leg.atm_offset ?? "ATM"
-                      : null,
-                  strike_value:
-                    nextStrikeMode === "strike"
-                      ? leg.strike_value ?? null
-                      : null,
+                  ...strikeModePatch(leg, nextStrikeMode),
                 });
               }}
               className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
@@ -227,7 +278,7 @@ function LegCard({
           <div className="space-y-1.5">
             <Label className="text-xs uppercase">Expiry</Label>
             <select
-              value={leg.expiry}
+              value={leg.expiry ?? "weekly"}
               onChange={(e) => update("expiry", e.target.value as ExpiryRank)}
               className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
             >
@@ -298,33 +349,25 @@ function LegCard({
 
             <div className="space-y-1.5">
               <Label className="text-xs uppercase">Strike mode</Label>
-              <div className="flex h-9 overflow-hidden rounded-md border border-input">
-                {(["atm", "strike"] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => {
-                      onChange({
-                        ...leg,
-                        strike_mode: m,
-                        atm_offset: m === "atm" ? leg.atm_offset ?? "ATM" : null,
-                        strike_value: m === "strike" ? leg.strike_value ?? null : null,
-                      });
-                    }}
-                    className={cn(
-                      "flex-1 text-sm font-medium transition-colors",
-                      leg.strike_mode === m
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-background hover:bg-muted",
-                    )}
-                  >
-                    {m === "atm" ? "ATM-relative" : "Direct strike"}
-                  </button>
+              <select
+                value={normalizeStrikeMode(leg.strike_mode)}
+                onChange={(e) =>
+                  onChange({
+                    ...leg,
+                    ...strikeModePatch(leg, e.target.value as StrikeMode),
+                  })
+                }
+                className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+              >
+                {STRIKE_MODES.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
                 ))}
-              </div>
+              </select>
             </div>
 
-            {leg.strike_mode === "atm" ? (
+            {SPOT_OFFSET_MODES.has(normalizeStrikeMode(leg.strike_mode)) ? (
               <div className="space-y-1.5 sm:col-span-2">
                 <Label className="text-xs uppercase">Strike offset</Label>
                 <select
@@ -339,7 +382,7 @@ function LegCard({
                   ))}
                 </select>
               </div>
-            ) : (
+            ) : normalizeStrikeMode(leg.strike_mode) === "strike" ? (
               <div className="space-y-1.5 sm:col-span-2">
                 <Label className="text-xs uppercase">Strike value</Label>
                 <div className="flex gap-2">
@@ -363,6 +406,113 @@ function LegCard({
                 <p className="text-xs text-muted-foreground">
                   Filtered by underlying + resolved expiry rank ({leg.expiry}).
                 </p>
+              </div>
+            ) : normalizeStrikeMode(leg.strike_mode) === "atm_pct" ? (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">ATM +/- %</Label>
+                <Input
+                  type="number"
+                  step={0.01}
+                  value={leg.atm_pct_value ?? ""}
+                  placeholder="e.g. 0.5 or -0.5"
+                  onChange={(e) =>
+                    update(
+                      "atm_pct_value",
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="h-9 font-mono"
+                />
+              </div>
+            ) : normalizeStrikeMode(leg.strike_mode) === "straddle_width" ? (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">Straddle width</Label>
+                <Input
+                  type="number"
+                  step={0.01}
+                  value={leg.straddle_width_value ?? ""}
+                  placeholder="e.g. 0.5 or -0.5"
+                  onChange={(e) =>
+                    update(
+                      "straddle_width_value",
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="h-9 font-mono"
+                />
+              </div>
+            ) : normalizeStrikeMode(leg.strike_mode) === "straddle_premium" ? (
+              <div className="grid gap-3 sm:col-span-2 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label className="text-xs uppercase">Premium match</Label>
+                  <select
+                    value={leg.straddle_premium_match ?? "premium_near"}
+                    onChange={(e) =>
+                      update(
+                        "straddle_premium_match",
+                        e.target.value as Leg["straddle_premium_match"],
+                      )
+                    }
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  >
+                    <option value="premium_near">Close to</option>
+                    <option value="premium_greater">Higher than</option>
+                    <option value="premium_lesser">Lower than</option>
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs uppercase">% of straddle premium</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    value={leg.straddle_premium_value ?? ""}
+                    placeholder="e.g. 50"
+                    onChange={(e) =>
+                      update(
+                        "straddle_premium_value",
+                        e.target.value === "" ? null : Number(e.target.value),
+                      )
+                    }
+                    className="h-9 font-mono"
+                  />
+                </div>
+              </div>
+            ) : normalizeStrikeMode(leg.strike_mode) === "underlying_pct" ? (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">% of underlying</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={leg.underlying_pct_value ?? ""}
+                  placeholder="e.g. 1 or 0.5"
+                  onChange={(e) =>
+                    update(
+                      "underlying_pct_value",
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="h-9 font-mono"
+                />
+              </div>
+            ) : (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">Premium value</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={leg.premium_value ?? ""}
+                  placeholder="e.g. 100"
+                  onChange={(e) =>
+                    update(
+                      "premium_value",
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="h-9 font-mono"
+                />
               </div>
             )}
           </div>
@@ -542,26 +692,15 @@ function SignalLegCard({
               value={leg.segment}
               onChange={(e) => {
                 const seg = e.target.value as Segment;
-                // Resolve the new strike_mode first and use it as the
-                // source of truth for the atm_offset / strike_value
-                // defaults — same race fix as the batch LegCard.
                 const nextStrikeMode =
-                  seg === "options" ? leg.strike_mode ?? "atm" : null;
+                  seg === "options" ? normalizeStrikeMode(leg.strike_mode) : null;
                 onChange({
                   ...leg,
                   segment: seg,
                   expiry:
                     seg === "cash" ? null : expiryChoices[0] ?? "current",
                   option_type: seg === "options" ? leg.option_type ?? "CE" : null,
-                  strike_mode: nextStrikeMode,
-                  atm_offset:
-                    nextStrikeMode === "atm"
-                      ? leg.atm_offset ?? "ATM"
-                      : null,
-                  strike_value:
-                    nextStrikeMode === "strike"
-                      ? leg.strike_value ?? null
-                      : null,
+                  ...strikeModePatch(leg, nextStrikeMode),
                 });
               }}
               className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
@@ -646,34 +785,25 @@ function SignalLegCard({
 
             <div className="space-y-1.5">
               <Label className="text-xs uppercase">Strike mode</Label>
-              <div className="flex h-9 overflow-hidden rounded-md border border-input">
-                {(["atm", "strike"] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => {
-                      onChange({
-                        ...leg,
-                        strike_mode: m,
-                        atm_offset: m === "atm" ? leg.atm_offset ?? "ATM" : null,
-                        strike_value:
-                          m === "strike" ? leg.strike_value ?? null : null,
-                      });
-                    }}
-                    className={cn(
-                      "flex-1 text-sm font-medium transition-colors",
-                      leg.strike_mode === m
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-background hover:bg-muted",
-                    )}
-                  >
-                    {m === "atm" ? "ATM-relative" : "Direct strike"}
-                  </button>
+              <select
+                value={normalizeStrikeMode(leg.strike_mode)}
+                onChange={(e) =>
+                  onChange({
+                    ...leg,
+                    ...strikeModePatch(leg, e.target.value as StrikeMode),
+                  })
+                }
+                className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+              >
+                {STRIKE_MODES.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
                 ))}
-              </div>
+              </select>
             </div>
 
-            {leg.strike_mode === "atm" ? (
+            {SPOT_OFFSET_MODES.has(normalizeStrikeMode(leg.strike_mode)) ? (
               <div className="space-y-1.5 sm:col-span-2">
                 <Label className="text-xs uppercase">Strike offset</Label>
                 <select
@@ -688,7 +818,7 @@ function SignalLegCard({
                   ))}
                 </select>
               </div>
-            ) : (
+            ) : normalizeStrikeMode(leg.strike_mode) === "strike" ? (
               <div className="space-y-1.5 sm:col-span-2">
                 <Label className="text-xs uppercase">Strike value</Label>
                 <Input
@@ -709,6 +839,117 @@ function SignalLegCard({
                   {leg.expiry} {leg.option_type} at signal time.
                 </p>
               </div>
+            ) : normalizeStrikeMode(leg.strike_mode) === "atm_pct" ? (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">ATM +/- %</Label>
+                <Input
+                  type="number"
+                  step={0.01}
+                  value={leg.atm_pct_value ?? ""}
+                  placeholder="e.g. 0.5 or -0.5"
+                  onChange={(e) =>
+                    update(
+                      "atm_pct_value",
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="h-9 font-mono"
+                />
+              </div>
+            ) : normalizeStrikeMode(leg.strike_mode) === "straddle_width" ? (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">Straddle width</Label>
+                <Input
+                  type="number"
+                  step={0.01}
+                  value={leg.straddle_width_value ?? ""}
+                  placeholder="e.g. 0.5 or -0.5"
+                  onChange={(e) =>
+                    update(
+                      "straddle_width_value",
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="h-9 font-mono"
+                />
+              </div>
+            ) : normalizeStrikeMode(leg.strike_mode) === "straddle_premium" ? (
+              <div className="grid gap-3 sm:col-span-2 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label className="text-xs uppercase">Premium match</Label>
+                  <select
+                    value={leg.straddle_premium_match ?? "premium_near"}
+                    onChange={(e) =>
+                      update(
+                        "straddle_premium_match",
+                        e.target.value as Leg["straddle_premium_match"],
+                      )
+                    }
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  >
+                    <option value="premium_near">Close to</option>
+                    <option value="premium_greater">Higher than</option>
+                    <option value="premium_lesser">Lower than</option>
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs uppercase">% of straddle premium</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    value={leg.straddle_premium_value ?? ""}
+                    placeholder="e.g. 50"
+                    onChange={(e) =>
+                      update(
+                        "straddle_premium_value",
+                        e.target.value === "" ? null : Number(e.target.value),
+                      )
+                    }
+                    className="h-9 font-mono"
+                  />
+                </div>
+              </div>
+            ) : normalizeStrikeMode(leg.strike_mode) === "underlying_pct" ? (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">% of underlying</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={leg.underlying_pct_value ?? ""}
+                  placeholder="e.g. 1 or 0.5"
+                  onChange={(e) =>
+                    update(
+                      "underlying_pct_value",
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="h-9 font-mono"
+                />
+              </div>
+            ) : (
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label className="text-xs uppercase">Premium value</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={leg.premium_value ?? ""}
+                  placeholder="e.g. 100"
+                  onChange={(e) =>
+                    update(
+                      "premium_value",
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="h-9 font-mono"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Engine picks the matching premium on {leg.symbol || "<symbol>"}{" "}
+                  {leg.expiry} {leg.option_type} at signal time.
+                </p>
+              </div>
             )}
           </div>
         )}
@@ -724,6 +965,9 @@ function SignalLegCard({
     </Card>
   );
 }
+
+
+
 
 interface StrikePickerProps {
   open: boolean;
@@ -1636,7 +1880,7 @@ export default function StrategyWizard({ editing }: StrategyWizardProps = {}) {
           onOpenChange={(o) => !o && setStrikePickerLegIndex(null)}
           underlying={underlying}
           underlyingExchange={underlyingExchange}
-          expiryRank={legs[strikePickerLegIndex].expiry}
+          expiryRank={legs[strikePickerLegIndex].expiry ?? "weekly"}
           optionType={legs[strikePickerLegIndex].option_type ?? "CE"}
           selectedStrike={legs[strikePickerLegIndex].strike_value ?? null}
           onPick={(strike) => {

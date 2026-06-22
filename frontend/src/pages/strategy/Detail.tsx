@@ -1776,14 +1776,33 @@ function SetupTab({ strategy }: { strategy: Strategy }) {
                 </thead>
                 <tbody>
                   {strategy.legs.map((leg) => {
+                    const strikeMode = leg.strike_mode === "atm"
+                      ? "spot_based"
+                      : leg.strike_mode;
                     const strikeText =
                       leg.segment !== "options"
                         ? "—"
-                        : leg.strike_mode === "strike"
+                        : strikeMode === "strike"
                           ? leg.strike_value != null
                             ? `${leg.strike_value}`
                             : "—"
-                          : `ATM (${leg.atm_offset ?? "ATM"})`;
+                          : strikeMode === "future_based"
+                            ? `Future Based (${leg.atm_offset ?? "ATM"})`
+                            : strikeMode === "atm_pct"
+                              ? `ATM ${Number(leg.atm_pct_value ?? 0) >= 0 ? "+" : ""}${leg.atm_pct_value ?? "—"}%`
+                              : strikeMode === "straddle_width"
+                                ? `Straddle ${Number(leg.straddle_width_value ?? 0) >= 0 ? "+" : ""}${leg.straddle_width_value ?? "—"}`
+                                : strikeMode === "straddle_premium"
+                                  ? `Straddle premium ${leg.straddle_premium_value ?? "—"}%`
+                                  : strikeMode === "underlying_pct"
+                                    ? `${leg.underlying_pct_value ?? "—"}% of Underlying`
+                            : strikeMode === "premium_near"
+                              ? `Premium close to ${leg.premium_value ?? "—"}`
+                              : strikeMode === "premium_greater"
+                                ? `Premium > than ${leg.premium_value ?? "—"}`
+                                : strikeMode === "premium_lesser"
+                                  ? `Premium < than ${leg.premium_value ?? "—"}`
+                                  : `Spot Based (${leg.atm_offset ?? "ATM"})`;
                     return (
                       <tr key={leg.id} className="border-t">
                         <td className="px-2 py-1.5 font-mono">{leg.id}</td>
@@ -2473,7 +2492,7 @@ export default function StrategyDetail() {
     queryKey: ["strategy-orders", numId],
     queryFn: () => listOrders(numId),
     enabled: Number.isFinite(numId) && numId > 0,
-    refetchInterval: (q) =>
+    refetchInterval: () =>
       strategyQuery.data?.status === "running" ? SAFETY_REFETCH_MS : false,
   });
 
@@ -2487,7 +2506,7 @@ export default function StrategyDetail() {
     queryKey: ["strategy-events", numId],
     queryFn: () => listEvents(numId, undefined, 200),
     enabled: Number.isFinite(numId) && numId > 0,
-    refetchInterval: (q) =>
+    refetchInterval: () =>
       strategyQuery.data?.status === "running" ? SAFETY_REFETCH_MS : false,
   });
 
@@ -2495,7 +2514,7 @@ export default function StrategyDetail() {
     queryKey: ["strategy-positions", numId],
     queryFn: () => listPositions(numId),
     enabled: Number.isFinite(numId) && numId > 0,
-    refetchInterval: (q) =>
+    refetchInterval: () =>
       strategyQuery.data?.status === "running" ? SAFETY_REFETCH_MS : false,
   });
 
@@ -2503,7 +2522,7 @@ export default function StrategyDetail() {
     queryKey: ["strategy-trades", numId],
     queryFn: () => listTrades(numId),
     enabled: Number.isFinite(numId) && numId > 0,
-    refetchInterval: (q) =>
+    refetchInterval: () =>
       strategyQuery.data?.status === "running" ? SAFETY_REFETCH_MS : false,
   });
 

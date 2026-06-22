@@ -487,7 +487,7 @@ export default function Playground() {
       } else {
         const q = searchQuery.toLowerCase();
         const filtered = eps.filter(
-          (ep) =>
+          (ep: Endpoint) =>
             ep.name.toLowerCase().includes(q) || ep.path.toLowerCase().includes(q),
         );
         if (filtered.length) acc[category] = filtered;

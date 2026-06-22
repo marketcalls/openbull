@@ -128,12 +128,12 @@ def _resolve_leg(
         }
 
     # Options
-    strike_mode = leg.get("strike_mode") or "atm"
+    strike_mode = leg.get("strike_mode") or "spot_based"
     option_type = leg.get("option_type")
     if not option_type:
         raise EngineError(f"Leg {leg.get('id')}: option_type required for options segment")
 
-    if strike_mode == "atm":
+    if strike_mode in ("atm", "spot_based"):
         atm_offset = leg.get("atm_offset") or "ATM"
         if not auth_token or not broker:
             # Without broker auth we can't fetch the underlying's LTP, which
@@ -157,6 +157,126 @@ def _resolve_leg(
             raise EngineError(f"Leg {leg.get('id')}: {data.get('message', 'ATM resolution failed')}")
         return data
 
+    if strike_mode == "future_based":
+        atm_offset = leg.get("atm_offset") or "ATM"
+        if not auth_token or not broker:
+            raise EngineError(
+                f"Leg {leg.get('id')}: future-based resolution needs broker auth."
+            )
+        ok, data, _ = symbol_resolver.resolve_future_based(
+            underlying=underlying,
+            underlying_exchange=underlying_exchange,
+            expiry_date=resolved,
+            atm_offset=atm_offset,
+            option_type=option_type,
+            auth_token=auth_token,
+            broker=broker,
+            config=config,
+        )
+        if not ok:
+            raise EngineError(f"Leg {leg.get('id')}: {data.get('message', 'future-based resolution failed')}")
+        return data
+
+    if strike_mode == "atm_pct":
+        atm_pct_value = leg.get("atm_pct_value")
+        if atm_pct_value is None:
+            raise EngineError(f"Leg {leg.get('id')}: atm_pct_value required when strike_mode=atm_pct")
+        if not auth_token or not broker:
+            raise EngineError(
+                f"Leg {leg.get('id')}: ATM percent resolution needs broker auth."
+            )
+        ok, data, _ = symbol_resolver.resolve_atm_percent(
+            underlying=underlying,
+            underlying_exchange=underlying_exchange,
+            expiry_date=resolved,
+            atm_percent=float(atm_pct_value),
+            option_type=option_type,
+            auth_token=auth_token,
+            broker=broker,
+            config=config,
+        )
+        if not ok:
+            raise EngineError(f"Leg {leg.get('id')}: {data.get('message', 'ATM percent resolution failed')}")
+        return data
+
+    if strike_mode == "straddle_width":
+        straddle_width_value = leg.get("straddle_width_value")
+        if straddle_width_value is None:
+            raise EngineError(
+                f"Leg {leg.get('id')}: straddle_width_value required when strike_mode=straddle_width"
+            )
+        if not auth_token or not broker:
+            raise EngineError(
+                f"Leg {leg.get('id')}: straddle-width resolution needs broker auth."
+            )
+        ok, data, _ = symbol_resolver.resolve_straddle_width(
+            underlying=underlying,
+            underlying_exchange=underlying_exchange,
+            expiry_date=resolved,
+            width=float(straddle_width_value),
+            option_type=option_type,
+            auth_token=auth_token,
+            broker=broker,
+            config=config,
+        )
+        if not ok:
+            raise EngineError(f"Leg {leg.get('id')}: {data.get('message', 'straddle-width resolution failed')}")
+        return data
+
+    if strike_mode == "straddle_premium":
+        straddle_premium_value = leg.get("straddle_premium_value")
+        straddle_premium_match = leg.get("straddle_premium_match")
+        if straddle_premium_value is None:
+            raise EngineError(
+                f"Leg {leg.get('id')}: straddle_premium_value required when strike_mode=straddle_premium"
+            )
+        if straddle_premium_match is None:
+            raise EngineError(
+                f"Leg {leg.get('id')}: straddle_premium_match required when strike_mode=straddle_premium"
+            )
+        if not auth_token or not broker:
+            raise EngineError(
+                f"Leg {leg.get('id')}: straddle-premium resolution needs broker auth."
+            )
+        ok, data, _ = symbol_resolver.resolve_straddle_premium(
+            underlying=underlying,
+            underlying_exchange=underlying_exchange,
+            expiry_date=resolved,
+            percent=float(straddle_premium_value),
+            match_mode=str(straddle_premium_match),
+            option_type=option_type,
+            auth_token=auth_token,
+            broker=broker,
+            config=config,
+        )
+        if not ok:
+            raise EngineError(f"Leg {leg.get('id')}: {data.get('message', 'straddle-premium resolution failed')}")
+        return data
+
+    if strike_mode == "underlying_pct":
+        underlying_pct_value = leg.get("underlying_pct_value")
+        if underlying_pct_value is None:
+            raise EngineError(
+                f"Leg {leg.get('id')}: underlying_pct_value required when strike_mode=underlying_pct"
+            )
+        if not auth_token or not broker:
+            raise EngineError(
+                f"Leg {leg.get('id')}: underlying-percent resolution needs broker auth."
+            )
+        ok, data, _ = symbol_resolver.resolve_underlying_percent(
+            underlying=underlying,
+            underlying_exchange=underlying_exchange,
+            expiry_date=resolved,
+            percent=float(underlying_pct_value),
+            option_type=option_type,
+            auth_token=auth_token,
+            broker=broker,
+            config=config,
+        )
+        if not ok:
+            raise EngineError(f"Leg {leg.get('id')}: {data.get('message', 'underlying-percent resolution failed')}")
+        return data
+
     if strike_mode == "strike":
         strike_value = leg.get("strike_value")
         if strike_value is None:
@@ -170,6 +290,31 @@ def _resolve_leg(
         )
         if not ok:
             raise EngineError(f"Leg {leg.get('id')}: {data.get('message', 'direct strike not found')}")
+        return data
+
+    if strike_mode in ("premium_near", "premium_greater", "premium_lesser"):
+        premium_value = leg.get("premium_value")
+        if premium_value is None:
+            raise EngineError(
+                f"Leg {leg.get('id')}: premium_value required when strike_mode={strike_mode}"
+            )
+        if not auth_token or not broker:
+            raise EngineError(
+                f"Leg {leg.get('id')}: premium-based resolution needs broker auth."
+            )
+        ok, data, _ = symbol_resolver.resolve_premium_based(
+            underlying=underlying,
+            underlying_exchange=underlying_exchange,
+            expiry_date=resolved,
+            option_type=option_type,
+            premium_value=float(premium_value),
+            mode=strike_mode,
+            auth_token=auth_token,
+            broker=broker,
+            config=config,
+        )
+        if not ok:
+            raise EngineError(f"Leg {leg.get('id')}: {data.get('message', 'premium-based resolution failed')}")
         return data
 
     raise EngineError(f"Leg {leg.get('id')}: unknown strike_mode '{strike_mode}'")
