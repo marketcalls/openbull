@@ -21,7 +21,7 @@
     "@types/react-plotly.js": "^2.6.4",
     "@uiw/codemirror-themes": "^4.23.6",
     "@uiw/react-codemirror": "^4.23.6",
-    "axios": "^1.15.0",
+    "axios": "^1.18.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lightweight-charts": "^5.2.0",
