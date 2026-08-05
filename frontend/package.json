@@ -54,6 +54,6 @@
     "vite": "^8.0.4"
   },
   "overrides": {
-    "fast-uri": "^3.1.2"
+    "fast-uri": "^3.1.5"
   }
 }
