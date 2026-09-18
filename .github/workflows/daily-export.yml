@@ -1,0 +1,61 @@
+# Daily accumulating export → Databricks (options/futures/indices).
+# Runs analysis_export.py so each expiry is archived before it rolls off,
+# building the multi-expiry history the SMC model trains on.
+#
+# PREREQUISITES (repo → Settings → Secrets and variables → Actions):
+#   DATABASE_URL          reachable-from-GitHub Postgres holding a FRESH Upstox
+#                         token (managed DB like Neon/Supabase, or your VM's
+#                         Postgres exposed over TLS). The token is read from the
+#                         broker_auth table and decrypted with ENCRYPTION_PEPPER.
+#   ENCRYPTION_PEPPER     same value as the running backend (to decrypt the token)
+#   DATABRICKS_HOST       bare host, no https://
+#   DATABRICKS_HTTP_PATH
+#   DATABRICKS_TOKEN
+#   DATABRICKS_CATALOG    (optional, default openbull)
+#   DATABRICKS_SCHEMA     (optional, default openbull)
+#   DATABRICKS_STAGE_VOLUME (optional, default data)
+#
+# NOTE: Upstox access tokens expire daily and need interactive login. This job
+# only READS the token your always-on backend refreshed — it cannot mint one.
+# If the DB has no fresh token, the run logs "No active Upstox session" and skips
+# the pull (Databricks is left untouched). If your Postgres is NOT reachable from
+# GitHub, use the on-VM cron in deploy/README.md instead.
+name: daily-databricks-export
+
+on:
+  schedule:
+    - cron: "30 10 * * 1-5"   # 16:00 IST, Mon–Fri (after market close)
+  workflow_dispatch: {}         # allow manual runs
+
+concurrency:
+  group: daily-export
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync deps
+        run: uv sync --frozen --no-dev
+
+      - name: Run accumulating export (3 nearest expiries)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ENCRYPTION_PEPPER: ${{ secrets.ENCRYPTION_PEPPER }}
+          APP_SECRET_KEY: ${{ secrets.APP_SECRET_KEY }}
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_CATALOG: ${{ secrets.DATABRICKS_CATALOG }}
+          DATABRICKS_SCHEMA: ${{ secrets.DATABRICKS_SCHEMA }}
+          DATABRICKS_STAGE_VOLUME: ${{ secrets.DATABRICKS_STAGE_VOLUME }}
+          PYTHONUTF8: "1"
+        run: uv run python analysis_export.py --option-expiries 3 --no-scans --no-depth

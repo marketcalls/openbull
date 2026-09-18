@@ -1,0 +1,9 @@
+# Auto-HTTPS reverse proxy in front of the nginx `frontend` container.
+# {$DOMAIN} comes from the compose env:
+#   - a real hostname (e.g. openbull.example.com) → Caddy gets a Let's Encrypt
+#     cert automatically and redirects HTTP→HTTPS.
+#   - ":80" (default when DOMAIN unset) → plain HTTP only, no cert.
+{$DOMAIN} {
+	encode gzip zstd
+	reverse_proxy frontend:80
+}

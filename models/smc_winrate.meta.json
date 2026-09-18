@@ -1,0 +1,43 @@
+{
+  "feature_keys": [
+    "is_choch",
+    "dir_long",
+    "break_strength_atr",
+    "risk_atr",
+    "rr",
+    "trend_run",
+    "ema_slope",
+    "prem_disc",
+    "swing_range_pct",
+    "atr_pct",
+    "rsi14",
+    "ret3",
+    "ret6",
+    "ret12",
+    "body_ratio",
+    "upper_wick",
+    "lower_wick",
+    "rvol",
+    "tod",
+    "dow"
+  ],
+  "metrics": {
+    "n_total": 8643,
+    "n_train": 6760,
+    "n_test": 1883,
+    "base_win_rate": 0.4114,
+    "test_base_rate": 0.4796,
+    "auc": 0.8092,
+    "accuracy": 0.7047,
+    "brier": 0.1856
+  },
+  "rr": 2.0,
+  "horizon": 48,
+  "sources": "options:5m",
+  "intraday": true,
+  "min_bars": 300,
+  "min_price": 20.0,
+  "long_only": true,
+  "trained_at": "2026-09-18T10:15:58.793266+00:00",
+  "sklearn_model": "HistGradientBoostingClassifier"
+}
