@@ -1,0 +1,70 @@
+# Copy-me overlay template for one OpenBull instance.
+#
+# Copy this directory to overlays/<name>/, replace every CHANGE_ME, copy
+# secret.env.example to secret.env and fill it in, then:
+#
+#   kubectl apply -k deploy/k8s/overlays/<name>
+#
+# secret.env is gitignored; the build fails until it exists, which is the
+# point.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# MUST be restated here: the base's namespace does not reach the sibling edge
+# resources; without it the Ingress/HTTPRoute lands in `default`.
+namespace: openbull
+
+# Optional: unique per instance when co-locating several OpenBulls in ONE
+# namespace. Renames every resource and its references (Services, envFrom,
+# Ingress backends; Gateway API refs via edge/gateway/kustomizeconfig.yaml).
+# The simpler multi-instance pattern is one namespace + one overlay each —
+# leave this commented unless you share a namespace.
+# namePrefix: CHANGE_ME-
+# NOTE: no overlay creates the namespace itself — run
+# `kubectl create namespace openbull` (or your per-instance namespace)
+# before the first apply.
+
+resources:
+- ../../base
+# Ingress API variant (default). For a Gateway API cluster swap the line below
+# AND the edge-host-ingress.yaml patch entry (edge-host-gateway.yaml instead) -
+# the Gateway edge ships no Ingress resource, so a stale Ingress patch makes
+# the build fail with an unmatched-patch error.
+# - ../../edge/gateway
+- ../../edge/ingress
+
+patches:
+- path: patches/config.yaml
+- path: patches/edge-host-ingress.yaml
+# For the Gateway API variant use this host patch instead:
+# - path: patches/edge-host-gateway.yaml
+# SEBI static-IP egress pin (see README "Egress / SEBI static-IP"):
+# - path: patches/node-egress.yaml
+
+labels:
+- pairs:
+    app.kubernetes.io/instance: CHANGE_ME
+  includeSelectors: true
+  includeTemplates: true
+
+# Pin the image per tested release (base ships the local `openbull:latest`).
+# Use the images transformer — it rewrites BOTH the app container and the
+# migrate/seed init containers; a containers-only patch would leave them on
+# the local tag. Pair with imagePullPolicy: IfNotPresent (the base default),
+# or switch to Always only if you track a mutable tag in your registry.
+# images:
+# - name: openbull
+#   newName: ghcr.io/YOUR_ORG/openbull
+#   newTag: v0.1.0
+
+# Generates openbull-env-<hash> from secret.env (the envs LIST form — the
+# singular env field is newer than the kustomize versions some kubectl
+# releases bundle). The content hash means ANY change to secret.env rolls
+# the pod on the next apply — apply secret changes off-hours, never inside
+# the ~03:00 IST token-refresh window. The old hashed Secret is NOT pruned
+# by `kubectl apply -k`; after a rotation delete the previous one once the
+# pod is up on the new Secret (see README, "Secrets").
+secretGenerator:
+- name: openbull-env
+  envs: [secret.env]
+  type: Opaque

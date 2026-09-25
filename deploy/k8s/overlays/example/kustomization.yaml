@@ -1,0 +1,46 @@
+# Worked example overlay for one OpenBull instance behind the Ingress API
+# variant with externally managed PostgreSQL and Redis. Copy the pattern
+# from ../_template for real instances; this one exists so the package has
+# a concrete, renderable reference (see tests/validate.sh).
+#
+# Fill in secret.env (copy from ../_template/secret.env.example) and point
+# the host patches at your domain before applying:
+#   kubectl apply -k deploy/k8s/overlays/example
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Restated so the sibling edge resources land here too (see _template notes).
+namespace: openbull
+
+resources:
+- ../../base
+# Gateway API variant: swap the line below for `- ../../edge/gateway` AND
+# replace the patches/edge-host-ingress.yaml entry with
+# patches/edge-host-gateway.yaml (copy it from ../_template/patches/ first) -
+# the Gateway edge ships no Ingress resource, so a stale Ingress patch makes
+# the build fail with an unmatched-patch error.
+- ../../edge/ingress
+
+patches:
+- path: patches/config.yaml
+- path: patches/edge-host-ingress.yaml
+# Pin the image tag per tested release (base ships local openbull:latest):
+# images:
+# - name: openbull
+#   newName: ghcr.io/YOUR_ORG/openbull
+#   newTag: v0.1.0
+# SEBI static-IP egress pin (see README "Egress / SEBI static-IP"):
+# - path: patches/node-egress.yaml    # copy it from ../_template/patches/ first
+
+labels:
+- pairs:
+    app.kubernetes.io/instance: example
+  includeSelectors: true
+  includeTemplates: true
+
+# Content hash in the generated Secret name: any secret.env change rolls the
+# pod on the next apply — apply off-hours, never in the ~03:00 IST window.
+secretGenerator:
+- name: openbull-env
+  envs: [secret.env]
+  type: Opaque

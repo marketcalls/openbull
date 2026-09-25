@@ -1,0 +1,11 @@
+# Per-instance config (pre-prefix base names — patches run before
+# transformers). Replace openbull.example.com with your domain.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbull-config
+data:
+  FRONTEND_URL: "https://openbull.example.com"
+  CORS_ORIGINS: "https://openbull.example.com"
+  WEBSOCKET_URL: "wss://openbull.example.com/ws"
+  VALID_BROKERS: "upstox,zerodha"

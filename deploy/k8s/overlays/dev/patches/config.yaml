@@ -1,0 +1,13 @@
+# Local-dev config: the app is reached via kubectl port-forward on
+# http://localhost:8080, so cookies must NOT carry the Secure flag and the
+# public URLs are plain ws/http on that origin.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbull-config
+data:
+  FRONTEND_URL: "http://localhost:8080"
+  CORS_ORIGINS: "http://localhost:8080"
+  WEBSOCKET_URL: "ws://localhost:8080/ws"
+  VALID_BROKERS: "upstox,zerodha"
+  COOKIE_SECURE: "false"

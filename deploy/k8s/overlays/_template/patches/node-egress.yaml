@@ -1,0 +1,31 @@
+# SEBI static-IP egress pin (NOT enabled by default).
+#
+# The SEBI static-IP mandate requires broker API calls to originate from a
+# whitelisted IP. Kubernetes ingress (Ingress/Gateway API) does not pin
+# egress. On a bare-metal cluster, pin broker egress to one node:
+#
+#   1. Label the node whose IP is whitelisted at your brokers:
+#        kubectl label node <node> openbull/egress=whitelisted
+#      (Optionally taint it so only OpenBull schedules there:
+#        kubectl taint node <node> openbull/egress=whitelisted:NoSchedule )
+#   2. Uncomment this patch in the overlay's kustomization.yaml and
+#      whitelist that node's IP at every broker this instance trades with.
+#
+# Caveat: node-bound StorageClasses (e.g. k3s local-path) keep any volume on
+# one node; OpenBull keeps no PVCs, so the pod is free to follow the label.
+# Advanced alternatives (Cilium Egress Gateway / Istio / Calico, NAT gateway
+# on managed clusters) are documented in the README — out of scope here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openbull
+spec:
+  template:
+    spec:
+      nodeSelector:
+        openbull/egress: whitelisted
+      # tolerations:
+      # - key: openbull/egress
+      #   operator: Equal
+      #   value: whitelisted
+      #   effect: NoSchedule

@@ -1,0 +1,11 @@
+# Dev database volume. storageClassName omitted on purpose: inherit the
+# cluster default (k3s local-path, kind standard-hostpath, ...).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
