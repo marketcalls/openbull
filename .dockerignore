@@ -1,0 +1,54 @@
+# OpenBull Docker build context. The production image COPYs the repo, so this
+# file is the only filter between a checkout and a locally built image.
+
+# VCS / tooling
+.git
+.gitignore
+.claude
+.uv
+.pytest_cache
+.mypy_cache
+
+# Python artifacts (deps come from uv.lock, not from the context)
+.venv
+__pycache__
+**/__pycache__
+*.py[cod]
+
+# Node (built inside the image; never reuse a local build)
+node_modules
+**/node_modules
+frontend/dist
+frontend/.vite
+
+# Environment files. Dockerignore patterns are root-anchored: '*' does not
+# cross '/', so a nested frontend/.env.production needs the **/ forms.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Kubernetes deployment secret inputs (deploy/k8s/overlays/<name>/secret.env).
+# Recursive on purpose: git-ignoring these keeps credentials out of git but
+# NOT out of the image — only this file keeps them out of `COPY . .`.
+# Templates (*.env.example, .env.example above) stay usable.
+**/secret.env
+**/secret.yaml
+**/*.secret.env
+
+# Databases and runtime files
+*.db
+*.sqlite
+*.sqlite3
+logs
+tmp
+
+# Docs / installers / collections are not needed inside the image. deploy/ is
+# deliberately NOT excluded: the k8s manifests and secret.env.example
+# templates are tiny, and keeping the tree in the context lets the
+# dockerignore regression test prove the recursive secret patterns work.
+docs
+collections
+install

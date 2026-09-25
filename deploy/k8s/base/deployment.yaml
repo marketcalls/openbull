@@ -1,0 +1,299 @@
+# OpenBull workload: one pod, two containers, one replica.
+#
+# OpenBull is architecturally single-process: the FastAPI app, the
+# market-data WebSocket proxy (8765), the loopback ZeroMQ bus (5555), the
+# broker streaming adapters, the sandbox engine and the IST schedulers all
+# live inside ONE uvicorn worker with module-level globals. Multiple
+# replicas would double broker feeds, double-fill sandbox orders and run
+# duplicate schedulers — and two pods in one network namespace would
+# additionally collide on the 8765/5555 binds.
+#
+# The nginx sidecar reproduces install/install.sh's edge inside the pod:
+# it serves the SPA (FastAPI has no static mount) and proxies API/WS paths
+# to the app over loopback, which keeps 8000/8765 pod-internal exactly like
+# the VM install's unix-socket setup. Only the sidecar is exposed via a
+# Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openbull
+spec:
+  # MANDATORY: never raise. See the header comment and the README invariants.
+  replicas: 1
+  # Recreate (maxSurge 0) instead of RollingUpdate: with a single replica a
+  # rolling update briefly runs the old AND new pod together, which is enough
+  # to double broker logins and sandbox fills. Recreate guarantees
+  # pod-at-a-time — a short outage per deploy, by design.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openbull
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbull
+    spec:
+      # Graceful shutdown drains the api-log queue, stops schedulers and
+      # cancels the WS proxy; 60s covers it with headroom.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      # Database migrations BEFORE the app starts. migrate_all.py is
+      # idempotent (create_all -> in-place ALTERs -> alembic upgrade head)
+      # and needs DATABASE_URL plus the required settings from the Secret
+      # (backend.config validates APP_SECRET_KEY/ENCRYPTION_PEPPER on
+      # import). Recreate guarantees no concurrent migration while the old
+      # pod serves. If Postgres is not up yet, this init container retries
+      # via the standard init-failure backoff — that is the intended
+      # wait-for-database behavior.
+      - name: migrate
+        # MUST stay the same image string as the app container below:
+        # overlays pin releases via the `images:` transformer in their
+        # kustomization.yaml, which rewrites containers AND initContainers —
+        # patching the app container's image alone would run migrations
+        # from a different release.
+        image: openbull:latest
+        # IfNotPresent pairs with the locally built/pinned tag; switch to
+        # Always only when you track a mutable tag in a registry.
+        imagePullPolicy: IfNotPresent
+        command: [".venv/bin/python", "migrate_all.py"]
+        envFrom:
+        - secretRef:
+            name: openbull-env
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+          readOnlyRootFilesystem: true
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+      # A Kubernetes volume mount shadows the image's content (unlike Docker
+      # named volumes, which copy on first use), so seed the built SPA into
+      # the nginx sidecar's webroot. Fresh emptyDir every pod — plain cp,
+      # nothing to preserve.
+      - name: seed-webroot
+        # Same image string as the app container — see the note above.
+        image: openbull:latest
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "cp -r /app/frontend/dist/. /webroot/"]
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+          readOnlyRootFilesystem: true
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            memory: 256Mi
+        volumeMounts:
+        - name: webroot
+          mountPath: /webroot
+      containers:
+      - name: openbull
+        # Unqualified local image (docker build -t openbull . / kind load /
+        # k3s ctr import). No registry is published for OpenBull — push to
+        # your own and pin via the overlay's `images:` transformer.
+        image: openbull:latest
+        # Explicit: the implicit default for :latest tags would be Always,
+        # which breaks locally imported images.
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+          # The app's only runtime writes are /app/tmp (master-contract
+          # downloads) and /app/logs (rotating files, disabled by default in
+          # the ConfigMap) — both are emptyDir mounts below.
+          readOnlyRootFilesystem: true
+        ports:
+        - name: http
+          containerPort: 8000
+        - name: ws
+          containerPort: 8765
+        # The ZeroMQ bus port (5555) is deliberately absent. It is
+        # loopback-only inside the pod and must never be exposed as a
+        # container port or Service.
+        envFrom:
+        # Generated by the overlay's secretGenerator from secret.env:
+        # APP_SECRET_KEY, ENCRYPTION_PEPPER, DATABASE_URL, REDIS_URL.
+        - secretRef:
+            name: openbull-env
+        # Non-sensitive per-instance config; every CHANGE_ME placeholder
+        # must be patched by the overlay.
+        - configMapRef:
+            name: openbull-config
+        env:
+        # Invariant layer — explicit values win over envFrom and must not be
+        # overridden by overlays.
+        - name: BACKEND_HOST
+          value: "0.0.0.0"
+        - name: BACKEND_PORT
+          value: "8000"
+        # The market-data WS proxy must accept connections from the nginx
+        # sidecar (and kubelet probes) on the pod interface.
+        - name: WEBSOCKET_HOST
+          value: "0.0.0.0"
+        - name: WEBSOCKET_PORT
+          value: "8765"
+        # ZMQ is hardcoded loopback in the adapters; pinned here so no
+        # ConfigMap/Secret value can ever point it elsewhere.
+        - name: ZMQ_HOST
+          value: "127.0.0.1"
+        - name: ZMQ_PORT
+          value: "5555"
+        # Sandbox square-offs, session expiry and APScheduler run on IST.
+        - name: TZ
+          value: "Asia/Kolkata"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        # uvicorn flags live in the image CMD and are restated here so the
+        # single-worker invariant survives any image CMD drift. The nginx
+        # sidecar is the sole direct HTTP client (loopback), hence
+        # forwarded-allow-ips=127.0.0.1 — the same trust boundary as the VM
+        # install's unix socket.
+        command:
+        - ".venv/bin/uvicorn"
+        - "backend.main:app"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8000"
+        - "--workers"
+        - "1"
+        - "--proxy-headers"
+        - "--forwarded-allow-ips"
+        - "127.0.0.1"
+        - "--log-level"
+        - "info"
+        # Static liveness only — /health returns 200 without checking
+        # Postgres/Redis (no deeper endpoint exists in the app; don't invent
+        # one). First boot runs create_all + sandbox catch-up before the
+        # port opens, so give the startup probe a long budget (10s x 60).
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          failureThreshold: 60
+        # Readiness gates BOTH listeners on the Service path: the API on
+        # 8000 must answer /health AND the market-data WS proxy must accept
+        # TCP on 8765. Kubernetes allows one probe per container, hence the
+        # combined exec form — a plain /health probe would route edge /ws
+        # traffic to a pod whose WS proxy died.
+        readinessProbe:
+          exec:
+            command:
+            - ".venv/bin/python"
+            - "-c"
+            - >-
+              import socket, urllib.request;
+              socket.create_connection(("127.0.0.1", 8765), 3).close();
+              urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5).read()
+          periodSeconds: 15
+          failureThreshold: 3
+          timeoutSeconds: 8
+        # Liveness repeats the combined check: a hung event loop or a dead
+        # WS proxy both restart the pod.
+        livenessProbe:
+          exec:
+            command:
+            - ".venv/bin/python"
+            - "-c"
+            - >-
+              import socket, urllib.request;
+              socket.create_connection(("127.0.0.1", 8765), 3).close();
+              urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5).read()
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 8
+        # Starting points, not limits of the platform: FastAPI + asyncpg +
+        # the in-memory symbol/master-contract caches and market-data fan-out
+        # fit comfortably; no CPU limit on purpose — throttling delays tick
+        # processing (perftuning.sh exists for VM sizing guidance).
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1536Mi
+          limits:
+            memory: 3Gi
+        volumeMounts:
+        - name: tmp
+          mountPath: /app/tmp      # master-contract downloads (regenerable)
+        - name: logs
+          mountPath: /app/logs     # rotating file logs (LOG_TO_FILE=true)
+      - name: nginx
+        # Stock unprivileged nginx (uid 101, listens 8080, pid/temp under
+        # /tmp). No custom frontend image is needed: the webroot is seeded
+        # from the app image by the init container above.
+        image: nginxinc/nginx-unprivileged:1.28-alpine
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 101
+          runAsGroup: 101
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+          # The unprivileged image keeps pid + temp paths under /tmp, which
+          # is an emptyDir below.
+          readOnlyRootFilesystem: true
+        ports:
+        - name: web
+          containerPort: 8080
+        volumeMounts:
+        - name: webroot
+          mountPath: /usr/share/nginx/html
+          readOnly: true
+        - name: nginx-conf
+          mountPath: /etc/nginx/conf.d
+          readOnly: true
+        - name: nginx-tmp
+          mountPath: /tmp
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: web
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: web
+          periodSeconds: 20
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 256Mi
+      volumes:
+      - name: webroot
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      - name: logs
+        emptyDir: {}
+      - name: nginx-tmp
+        emptyDir: {}
+      - name: nginx-conf
+        configMap:
+          name: openbull-nginx-conf

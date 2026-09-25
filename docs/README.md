@@ -70,6 +70,7 @@ Welcome. This is the index for everything under `docs/`. Pick the doc closest to
 |---|---|
 | [`design/RUNBOOK.md`](./design/RUNBOOK.md) | **Operations playbook** — troubleshooting, monitoring, common failure modes, debugging recipes, backup/recovery, ops cheatsheet. The first place to look when something breaks. |
 | [Top-level README § Production deployment](../README.md#production-deployment) | `install/install.sh`, `install/update.sh`, `install/perftuning.sh` — Cloudflare-aware Ubuntu installer with nginx, systemd, certbot. |
+| [`../deploy/k8s/README.md`](../deploy/k8s/README.md) | **Kubernetes (Kustomize)** — base manifests + per-instance overlays, Ingress/Gateway API edges, migration init container, secrets, SEBI egress, upgrades, troubleshooting. |
 | [`design/ARCHITECTURE.md` § Security Architecture](./design/ARCHITECTURE.md#security-architecture) | Threat model, layered controls (passwords, broker secrets, sessions, OAuth callback, API keys, WS auth, transport, headers, rate limits, log redaction). |
 | [`design/ARCHITECTURE.md` § Caching Layer](./design/ARCHITECTURE.md#caching-layer-redis) | Redis key catalogue, TTLs, invalidation rules, master-contract mirror. |
 | [`design/ARCHITECTURE.md` § Logging & Audit](./design/ARCHITECTURE.md#logging--audit) | Request-id correlation, sensitive-data redaction, rotating files, DB-backed `api_logs` / `error_logs`, `/logs` viewer. |

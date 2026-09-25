@@ -1,0 +1,162 @@
+# In-pod edge router (nginx sidecar): serves the SPA and routes to the app.
+#
+# This is the Kubernetes port of the nginx site assembled by
+# install/install.sh — with two gaps fixed that the VM config has:
+#   * the API regex here also matches fyers/dhan/angel (the VM regex only
+#     covers upstox|zerodha, so those OAuth callbacks fall through to the SPA)
+#   * /ws/strategy/* is routed to the FastAPI port (the VM's blanket /ws/
+#     prefix sends the strategy WebSocket to the path-agnostic market-data
+#     proxy on 8765, where it can never complete its handshake)
+# and two additions: /health + /webhook are routed to the app (external
+# health checks and TradingView-style strategy webhooks), and /healthz is a
+# local, dependency-free endpoint for kubelet probes.
+#
+# Mounted at /etc/nginx/conf.d/default.conf (key name matters) in the
+# nginxinc/nginx-unprivileged sidecar, which listens on 8080 and keeps pid +
+# temp paths under /tmp.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbull-nginx-conf
+data:
+  default.conf: |
+    # OpenBull in-pod edge router.
+    server {
+        listen 8080;
+        server_name _;
+
+        # install.sh parity: large strategy JSON / master-contract payloads.
+        client_max_body_size 100M;
+
+        # SPA (frontend/dist, seeded into the shared webroot volume).
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # Static-asset compression (install.sh parity).
+        gzip on;
+        gzip_min_length 1024;
+        gzip_types text/plain text/css text/javascript application/javascript application/json image/svg+xml;
+
+        # Security headers for static responses. The app's middleware sets
+        # the same five on API responses; the API location below hides those
+        # backend copies so exactly one set survives (install.sh parity).
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' wss: ws:; frame-ancestors 'none'" always;
+
+        # Kubelet probe endpoint. Exact-match beats every regex below.
+        location = /healthz {
+            access_log off;
+            return 200 "ok\n";
+        }
+
+        # ------------------------------------------------------------------
+        # FastAPI backend. openbull's top-level router prefixes are:
+        #   /auth     (auth + error-log exports)
+        #   /web      (dashboard, orderbook, tradebook, positions, holdings,
+        #             api_key, broker config, symbols, sandbox, strategies,
+        #             strategybuilder, strategy module, logs, trading-mode,
+        #             playground)
+        #   /api      (/api/v1/* trading API + /api/websocket/* helpers)
+        #   /upstox /zerodha /fyers /dhan /angel  (broker OAuth callbacks)
+        #   /docs /redoc /openapi.json            (FastAPI Swagger)
+        #   /health   (liveness)
+        #   /webhook  (strategy_webhook — external webhook receivers)
+        # If a new top-level router prefix is added in backend/, append it
+        # here or that traffic will 404 to the SPA.
+        # ------------------------------------------------------------------
+        location ~ ^/(auth|web|api|upstox|zerodha|fyers|dhan|angel|docs|redoc|openapi\.json|health|webhook)(/|$) {
+            proxy_pass http://127.0.0.1:8000;
+            proxy_http_version 1.1;
+            proxy_read_timeout 300s;
+            proxy_connect_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_buffer_size 128k;
+            proxy_buffers 4 256k;
+            proxy_busy_buffers_size 256k;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+
+            # nginx owns the security headers (added at server level);
+            # hide the backend's copies to avoid duplicates.
+            proxy_hide_header X-Frame-Options;
+            proxy_hide_header X-Content-Type-Options;
+            proxy_hide_header X-XSS-Protection;
+            proxy_hide_header Referrer-Policy;
+            proxy_hide_header Permissions-Policy;
+            proxy_hide_header Content-Security-Policy;
+        }
+
+        # Strategy live WebSocket — a FastAPI route on the HTTP port
+        # (/ws/strategy/{id}), NOT the market-data proxy. Longest-prefix
+        # beats the /ws/ rule below; the API regex above never matches /ws/*.
+        location /ws/strategy/ {
+            proxy_pass http://127.0.0.1:8000;
+            proxy_http_version 1.1;
+            proxy_read_timeout 86400s;
+            proxy_send_timeout 86400s;
+            proxy_buffering off;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # Market-data WebSocket proxy. The ws server runs in-process on port
+        # 8765 and ignores the request path (clients authenticate with an
+        # API-key message after connecting), so the path passes through.
+        # ZMQ pub/sub (127.0.0.1:5555) is internal between the broker
+        # adapters and the ws proxy and is NOT exposed via nginx.
+        location = /ws {
+            proxy_pass http://127.0.0.1:8765;
+            proxy_http_version 1.1;
+            # 24h idle timeout so long-lived market data streams stay open.
+            proxy_read_timeout 86400s;
+            proxy_send_timeout 86400s;
+            # Real-time streaming — no buffering.
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Host $host;
+        }
+
+        location /ws/ {
+            proxy_pass http://127.0.0.1:8765/;
+            proxy_http_version 1.1;
+            proxy_read_timeout 86400s;
+            proxy_send_timeout 86400s;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Host $host;
+        }
+
+        # SPA fallback for React Router.
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        # Deny hidden/sensitive files (regexes, evaluated in order AFTER the
+        # API regex above — asset requests never reach them).
+        location ~ /\.          { deny all; return 404; }
+        location ~ \.(env|git|ini|log|sh|sql|conf|bak)$ { deny all; return 404; }
+    }

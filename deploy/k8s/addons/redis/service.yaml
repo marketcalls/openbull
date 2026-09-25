@@ -1,0 +1,14 @@
+# Cluster-internal Redis Service (consumed as `redis` by the dev overlay's
+# REDIS_URL). Never exposed through an edge.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  type: ClusterIP
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: redis
+  selector:
+    app.kubernetes.io/name: redis

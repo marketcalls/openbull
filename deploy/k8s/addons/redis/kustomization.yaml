@@ -1,0 +1,20 @@
+# DEVELOPMENT-ONLY Redis addon (consumed by overlays/dev).
+#
+# No persistence: OpenBull's Redis usage is cache/rate-limit/locks, all
+# safely cold. Production instances use externally managed Redis.
+#
+# Sibling library: do not set namespace: — the consuming overlay supplies it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- deployment.yaml
+- service.yaml
+
+labels:
+- pairs:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/part-of: openbull
+  includeSelectors: true
+  includeTemplates: true

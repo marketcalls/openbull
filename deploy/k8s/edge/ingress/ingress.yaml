@@ -1,0 +1,43 @@
+# Per-instance Ingress. The host and TLS secret are patched by the consuming
+# overlay (patches/edge-host-ingress.yaml). The backend Service name is
+# rewritten automatically by kustomize's built-in nameReference rules when an
+# overlay uses namePrefix — no overlay work needed for the backend.
+#
+# The edge only routes host+TLS: ALL path routing (API vs /ws vs SPA) lives
+# in the in-pod nginx sidecar (base/nginx-conf.yaml), so no controller-
+# specific path or WebSocket configuration is needed here beyond the
+# timeouts noted below.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openbull
+  annotations:
+    # Uncomment when cert-manager manages certificates:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    #
+    # Long-lived WebSocket streams (/ws market data, /ws/strategy/*) ride on
+    # this rule. Traefik (k3s default) has no per-route idle timeout to set;
+    # for ingress-nginx add something like:
+    #   nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    #   nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
+spec:
+  # k3s ships Traefik; patch for ingress-nginx or other controllers.
+  ingressClassName: traefik
+  tls:
+  - hosts:
+    - openbull.example.com
+    secretName: openbull-tls
+  rules:
+  - host: openbull.example.com
+    http:
+      paths:
+      # Everything (SPA, API paths, /ws) — the sidecar splits it. WebSocket
+      # upgrades pass through on this rule unchanged on both Traefik and
+      # ingress-nginx.
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: openbull-http
+            port:
+              number: 80

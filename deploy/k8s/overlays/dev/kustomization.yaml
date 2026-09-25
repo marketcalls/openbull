@@ -1,0 +1,37 @@
+# Local-development overlay: OpenBull with throwaway in-cluster PostgreSQL
+# and Redis (addons/), NO edge resource — reach it via port-forward:
+#
+#   kubectl create namespace openbull
+#   cd deploy/k8s/overlays/dev
+#   cp secret.env.example secret.env        # defaults match the addons
+#   kubectl apply -k deploy/k8s/overlays/dev
+#   kubectl -n openbull rollout status deploy/openbull
+#   kubectl -n openbull port-forward svc/openbull-http 8080:80
+#   # then open http://localhost:8080
+#
+# The addons are DEVELOPMENT ONLY (single replica, trivial credentials, no
+# backups). Production instances use externally managed PostgreSQL/Redis —
+# see overlays/example and the README.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: openbull
+
+resources:
+- ../../base
+- ../../addons/postgres
+- ../../addons/redis
+
+patches:
+- path: patches/config.yaml
+
+labels:
+- pairs:
+    app.kubernetes.io/instance: dev
+  includeSelectors: true
+  includeTemplates: true
+
+secretGenerator:
+- name: openbull-env
+  envs: [secret.env]
+  type: Opaque

@@ -1,0 +1,14 @@
+# Cluster-internal PostgreSQL Service (consumed as `postgres` by the dev
+# overlay's DATABASE_URL). Never exposed through an edge.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  type: ClusterIP
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+  selector:
+    app.kubernetes.io/name: postgres

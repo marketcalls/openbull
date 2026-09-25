@@ -1,0 +1,25 @@
+# Gateway API edge variant (opt-in; Standard channel only).
+#
+# Requires a Gateway API controller in the cluster (k3s's bundled Traefik
+# ships the Gateway provider DISABLED — see deploy/k8s/README.md for the
+# HelmChartConfig patch and the standalone-controller alternatives).
+#
+# This directory is a sibling library consumed by overlays
+# (resources: [../../base, ../../edge/gateway]) — do not list ../../base here
+# and do not set namespace:; the consuming overlay supplies both.
+#
+# kustomizeconfig.yaml carries the nameReference rules that make a
+# namePrefix rewrite the Gateway API references kustomize's built-in table
+# misses (HTTPRoute backendRefs and parentRefs). Transformer configurations
+# propagate from nested bases to the whole build, so every consuming
+# overlay inherits the rules automatically. TLS certificateRefs are set by
+# the overlay's edge-host-gateway.yaml patch — their Secret is
+# operator-provided and never a build resource, so kustomize can never
+# rewrite that name.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- gateway.yaml
+- httproute.yaml
+configurations:
+- kustomizeconfig.yaml

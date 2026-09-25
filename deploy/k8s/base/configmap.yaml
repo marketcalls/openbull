@@ -1,0 +1,40 @@
+# Non-sensitive per-instance configuration. The values below are placeholders
+# that every overlay MUST patch (overlays/<name>/patches/config.yaml) — they
+# are deliberately invalid as-is so an unpatched overlay fails visibly
+# instead of silently serving on the wrong host.
+#
+# DATABASE_URL and REDIS_URL are deliberately NOT here: they carry
+# credentials and belong in the overlay's secretGenerator input (secret.env).
+#
+# WEBSOCKET_HOST/PORT, ZMQ_HOST/PORT, BACKEND_HOST/PORT and TZ are pinned as
+# explicit env vars in deployment.yaml and must not be set here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbull-config
+data:
+  # Public origin, scheme included. The frontend calls the API same-origin
+  # (axios baseURL ""), so this must be the URL users actually open.
+  # PATCH per overlay.
+  FRONTEND_URL: "https://CHANGE_ME.example.com"
+  # Comma-separated allowed CORS origins (the same origin in production).
+  # PATCH per overlay.
+  CORS_ORIGINS: "https://CHANGE_ME.example.com"
+  # Public market-data WebSocket URL. The SPA fetches this verbatim from
+  # GET /api/websocket/config and connects to it — it MUST be the externally
+  # reachable wss:// URL routed to the /ws path. PATCH per overlay.
+  WEBSOCKET_URL: "wss://CHANGE_ME.example.com/ws"
+  # Brokers to expose in this instance (upstox, zerodha, fyers, dhan, angel).
+  # PATCH per overlay as needed.
+  VALID_BROKERS: "upstox,zerodha"
+
+  # --- production defaults (sensible for every overlay; override if needed) ---
+  # https:// in k8s: JWT cookies must carry the Secure flag behind the edge.
+  COOKIE_SECURE: "true"
+  FLASK_DEBUG: "false"
+  # Container-native logging: stdout/stderr only (kubelet captures them).
+  # The base mounts an emptyDir at /app/logs, so file logging can be
+  # re-enabled without code changes, but rotated files die with the pod.
+  LOG_TO_FILE: "false"
+  LOG_COLORS: "false"
+  LOG_LEVEL: "INFO"

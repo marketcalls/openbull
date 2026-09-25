@@ -90,6 +90,19 @@ sudo ./install/install.sh
 # follow the certbot prompts; nginx proxies /auth, /web, /upstox, /zerodha, /ws to the backend
 ```
 
+### Kubernetes (Kustomize)
+
+`deploy/k8s/` packages base manifests + per-instance Kustomize overlays
+(Ingress and Gateway API edge variants, migration init container, nginx
+sidecar for the SPA, dev overlay with throwaway Postgres/Redis). Build the
+image with the root `Dockerfile` and see
+[deploy/k8s/README.md](deploy/k8s/README.md) for the operator guide:
+
+```bash
+docker build -t your-registry/openbull:v0.1.0 .
+kubectl apply -k deploy/k8s/overlays/example   # after filling in secrets + host
+```
+
 ## API endpoints (35+)
 
 Full per-endpoint docs: [docs/api/README.md](docs/api/README.md). Bruno collection: `collections/openbull/`.
