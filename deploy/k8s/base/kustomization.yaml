@@ -1,0 +1,36 @@
+# OpenBull Kubernetes base (Kustomize).
+#
+# This directory is a library consumed by overlays under ../overlays — it is
+# not directly deployable: it declares no Secret (each overlay generates its
+# own via secretGenerator), so a bare build emits a Deployment referencing a
+# Secret that does not exist.
+#
+# Requires kustomize >= 5.3 (the `labels:` field syntax below). Check what
+# your kubectl bundles with `kubectl version --client`; older kubectl
+# releases ship kustomize 5.0.x-5.2.x and reject this base — use a standalone
+# kustomize then: kustomize build deploy/k8s/overlays/<name> | kubectl apply -f -
+#
+# The manifests set namespace: openbull but do NOT create it (a Namespace
+# object here would fight an overlay's namePrefix). One instance per
+# namespace is the recommended isolation: kubectl create namespace openbull.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Default namespace for all resources. Overlays MUST restate this — the
+# base's namespace does not reach sibling resources contributed by an edge
+# variant (../edge/ingress or ../edge/gateway) or by the dev addons.
+namespace: openbull
+
+resources:
+- configmap.yaml
+- nginx-conf.yaml
+- deployment.yaml
+- service.yaml
+
+labels:
+- pairs:
+    app.kubernetes.io/name: openbull
+    app.kubernetes.io/component: trading-api
+    app.kubernetes.io/part-of: openbull
+  includeSelectors: true
+  includeTemplates: true

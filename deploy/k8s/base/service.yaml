@@ -1,0 +1,16 @@
+# The only Service: the nginx sidecar. Ports 8000 (API), 8765 (market-data
+# WS) and 5555 (ZMQ) stay pod-internal — the sidecar already proxies the
+# first two over loopback, and ZMQ must never be reachable at all.
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbull-http
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: web
+    appProtocol: http
+  selector:
+    app.kubernetes.io/name: openbull
