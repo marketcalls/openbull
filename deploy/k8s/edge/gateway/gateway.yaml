@@ -1,0 +1,34 @@
+# Per-overlay (namespaced) Gateway. The listener hostname and certificate
+# are patched by the consuming overlay (patches/edge-host-gateway.yaml).
+#
+# gatewayClassName refers to a GatewayClass that is CLUSTER-SCOPED and owned
+# by the installed controller. Do NOT ship a GatewayClass here: namePrefix
+# would mint one per instance. Install it once at cluster level
+# (`kubectl get gatewayclass` lists what exists; traefik / envoy / cilium are
+# the common names).
+#
+# One overlay = one Gateway = one controller-managed LoadBalancer. To share
+# a single cluster-level Gateway across instances instead, point the
+# HTTPRoute's parentRef at it (with its namespace and
+# allowedRoutes.namespaces.from: All on the shared Gateway) and drop this
+# resource from the build with a $patch: delete overlay patch.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: openbull
+spec:
+  gatewayClassName: traefik
+  listeners:
+  - name: https
+    port: 443
+    protocol: HTTPS
+    hostname: openbull.example.com
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: openbull-tls
+        kind: Secret
+    # Routes from the same namespace only (one instance per overlay).
+    allowedRoutes:
+      namespaces:
+        from: Same
